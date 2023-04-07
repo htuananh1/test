@@ -1,0 +1,83 @@
+local autobuy = false
+
+local Material = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kinlei/MaterialLua/master/Module.lua"))()
+
+local UI = Material.Load({
+Title = "Noob Army Tycoon",
+Style = 3,
+SizeX = 225,
+SizeY = 115,
+Theme = "Dark"
+})
+
+local Main = UI.New({
+Title = "Main"
+})
+
+Main.Button({
+Text = "Collect all Treasures!",
+Callback = function()
+local player = game.Players.LocalPlayer.Character:WaitForChild("HumanoidRootPart")
+for _,k in pairs(game:GetService("Workspace").Map.Treasures:GetChildren()) do
+if k:IsA("Part") then
+player.CFrame = k.CFrame
+wait(.4)
+fireproximityprompt(k.ProximityPrompt)
+wait(.4)
+end
+end
+end
+})
+
+Main.Toggle({
+Text = "Auto Buy Buttons",
+Callback = function(value)
+autobuy = value
+end,
+Enabled = false
+})
+
+while wait() do
+if autobuy == true then
+local player = game.Players.LocalPlayer.Character:WaitForChild("HumanoidRootPart")
+for _,k in pairs(game:GetService("Workspace").Tycoons:GetChildren()) do
+if k.Owner.Value == game.Players.LocalPlayer then
+for i,o in pairs(k:FindFirstChild("Models"):GetChildren()) do
+if o:FindFirstChild("Model") then
+else
+local stats = o:FindFirstChild("Stats")
+local price = stats:FindFirstChild("Price")
+local gamepass = stats:FindFirstChild("Gamepass")
+local group = stats:FindFirstChild("Group")
+local premium = stats:FindFirstChild("Premium")
+local button = o:FindFirstChild("Button")
+local prompt = button:FindFirstChild("ProximityPrompt")
+local research = stats:FindFirstChild("Research")
+
+                    if research then
+                        if button.Transparency == 0 and price.Value < game:GetService("Players").LocalPlayer.leaderstats.Money.Value and research.Value < game:GetService("Players").LocalPlayer.leaderstats["Research Points"].Value then
+                            if gamepass or group or premium then
+                            else
+                                
+                                player.CFrame = button.CFrame
+                                wait(.3)
+                                fireproximityprompt(prompt)
+                                wait(.5)
+                            end
+                        end
+                    else
+                        if button.Transparency == 0 and price.Value < game:GetService("Players").LocalPlayer.leaderstats.Money.Value then
+                            if gamepass or group or premium then
+                            else
+                                player.CFrame = button.CFrame
+                                wait(.3)
+                                fireproximityprompt(prompt)
+                                wait(.5)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
