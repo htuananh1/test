@@ -4,7 +4,7 @@
     x.Visible = true
     x.Text = "\240\159\147\162 "..text
 end
-Message("‎D‎a‎‎rk H‎‎u‎b Ars‎enal 1.6.3")
+Message("‎D‎a‎‎rk H‎‎u‎b V3.0")
 
 
 Client = {
