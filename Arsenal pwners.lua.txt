@@ -5,7 +5,7 @@ local KillingCheats = PhantomForcesWindow:NewSection("Combat")
 KillingCheats:CreateButton("Silent Aim", function()
 game:GetService("StarterGui"):SetCore("SendNotification",{
 Title = "Silent aim has been executed",
-Text = "aim go brrrrrr", 
+Text = "aim con cặc", 
 Duration = 5
 })
 local CurrentCamera = workspace.CurrentCamera
