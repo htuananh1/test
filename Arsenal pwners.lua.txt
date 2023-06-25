@@ -91,7 +91,7 @@ getgenv().Options = {
     Triggerbot = true,
     Smoothness = true,
     AimPart = "Head",
-    FOV = 30
+    FOV = 15
 }
 --// Functions \\--
 local gc = function()
