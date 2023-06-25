@@ -91,7 +91,7 @@ getgenv().Options = {
     Triggerbot = true,
     Smoothness = true,
     AimPart = "Head",
-    FOV = 150
+    FOV = 30
 }
 --// Functions \\--
 local gc = function()
@@ -179,7 +179,7 @@ Duration = 5
 -- settings
 local settings = {
    defaultcolor = Color3.fromRGB(255,0,0),
-   teamcheck = false,
+   teamcheck = true,
    teamcolor = true
 };
 -- services
