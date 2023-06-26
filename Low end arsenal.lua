@@ -94,14 +94,14 @@ local Inset = GuiService:GetGuiInset()
 --// Options \\--
 getgenv().Options = {
     Enabled = aimbot,
-    TeamCheck = false,
-    WallCheck = false,
-    Visiblecheck = false,
-    SilentAim = false,
+    TeamCheck = true,
+    WallCheck = true,
+    Visiblecheck = true,
+    SilentAim = true,
     Triggerbot = false,
     Smoothness = false,
     AimPart = "Head",
-    FOV = 150
+    FOV = 50
 }
 
 --// Functions \\--
