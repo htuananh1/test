@@ -23,7 +23,7 @@ for i, v in pairs(replicationstorage.Weapons:GetDescendants()) do
        v.Value = true
    end
    if v.Name == "RecoilControl" then
-       v.Value = 50
+       v.Value = 0
    end
    if v.Name == "MaxSpread" then
        v.Value = 0
