@@ -1,3 +1,8 @@
+---By Daxkey---
+
+repeat wait() until game:IsLoaded()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Maikderninja/Maikderninja/main/esp%20name"))()
+
 --Made By Anh Đẹp Trai
 
 game.StarterGui:SetCore("SendNotification", {
@@ -18,7 +23,7 @@ for i, v in pairs(replicationstorage.Weapons:GetDescendants()) do
        v.Value = true
    end
    if v.Name == "RecoilControl" then
-       v.Value = 0
+       v.Value = 50
    end
    if v.Name == "MaxSpread" then
        v.Value = 0
@@ -30,7 +35,7 @@ for i, v in pairs(replicationstorage.Weapons:GetDescendants()) do
        v.Value = 0.05
    end
    if v.Name == "Crit" then
-       v.Value = 20
+       v.Value = true
    end
 end
 
@@ -67,8 +72,3 @@ end
 end
 end
 end
-
----By Daxkey---
-
-repeat wait() until game:IsLoaded()
-loadstring(game:HttpGet("https://raw.githubusercontent.com/Maikderninja/Maikderninja/main/esp%20name"))()
