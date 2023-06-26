@@ -1,8 +1,3 @@
----By Daxkey---
-
-repeat wait() until game:IsLoaded()
-loadstring(game:HttpGet("https://raw.githubusercontent.com/Maikderninja/Maikderninja/main/esp%20name"))()
-
 --Made By Anh Đẹp Trai
 
 game.StarterGui:SetCore("SendNotification", {
@@ -35,7 +30,7 @@ for i, v in pairs(replicationstorage.Weapons:GetDescendants()) do
        v.Value = 0.05
    end
    if v.Name == "Crit" then
-       v.Value = 50
+       v.Value = 100
    end
 end
 
