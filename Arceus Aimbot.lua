@@ -242,9 +242,8 @@ end
 
 -- ui creating & handling
 local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/Maikderninja/Maikderninja/main/ui%20lib%20fix.lua"))()
-Library:SetWatermark("github.com/cfreemepq")
 
-local Window = Library:CreateWindow("Universal casanova")
+local Window = Library.CreateLib("Arsenal V2", "Ocean")
 local GeneralTab = Window:AddTab("General")
 local MainBOX = GeneralTab:AddLeftTabbox("Main") do
     local Main = MainBOX:AddTab("Main")
