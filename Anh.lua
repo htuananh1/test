@@ -35,7 +35,7 @@ for i, v in pairs(replicationstorage.Weapons:GetDescendants()) do
        v.Value = 0.05
    end
    if v.Name == "Crit" then
-       v.Value = true
+       v.Value = 50
    end
 end
 
