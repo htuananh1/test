@@ -1,38 +1,6 @@
 --Made By Anh Đẹp Trai
 
-game.StarterGui:SetCore("SendNotification", {
-    Title = "Arsenal OP Script V1.0";
-    Text = "Made by BlackKen"; -- what the text says (ofc)
-    Duration = 5;
-})
-wait(1)
-game.StarterGui:SetCore("SendNotification", {
-    Title = "Executed!";
-    Text = "Subscribe To BlackKen!"; -- what the text says (ofc)
-    Duration = 5;
-})
-local replicationstorage = game.ReplicatedStorage
-
-for i, v in pairs(replicationstorage.Weapons:GetDescendants()) do
-   if v.Name == "Auto" then
-       v.Value = true
-   end
-   if v.Name == "RecoilControl" then
-       v.Value = 0
-   end
-   if v.Name == "MaxSpread" then
-       v.Value = 0
-   end
-   if v.Name == "ReloadTime" then
-      v.Value = 0.1
-   end
-   if v.Name == "FireRate" then
-       v.Value = 0.05
-   end
-   if v.Name == "Crit" then
-       v.Value = 20
-   end
-end
+function getplrsname() for i,v in pairs(game:GetChildren()) do if v.ClassName == "Players" then return v.Name end end end local players = getplrsname() local plr = game[players].LocalPlayer coroutine.resume(coroutine.create(function() while wait(1) do coroutine.resume(coroutine.create(function() for _,v in pairs(game[players]:GetPlayers()) do if v.Name ~= plr.Name and v.Character then v.Character.RightUpperLeg.CanCollide = false v.Character.RightUpperLeg.Transparency = 75 v.Character.RightUpperLeg.Size = Vector3.new(21,21,21) v.Character.LeftUpperLeg.CanCollide = false v.Character.LeftUpperLeg.Transparency = 75 v.Character.LeftUpperLeg.Size = Vector3.new(21,21,21) v.Character.HeadHB.CanCollide = false v.Character.HeadHB.Transparency = 75 v.Character.HeadHB.Size = Vector3.new(21,21,21) v.Character.HumanoidRootPart.CanCollide = false v.Character.HumanoidRootPart.Transparency = 75 v.Character.HumanoidRootPart.Size = Vector3.new(21,21,21) end end end)) end end))
 
 --Script By Blaxken
 
