@@ -18,9 +18,9 @@ getgenv().Config = {
         ["Get Mirror Fractal when have God's Chalice"] = false
     },
     ["Mastery"] = {
-        ["Melee"] = false, -- 600 mastery
+        ["Melee"] = true, -- 600 mastery
         ["Sword"] = {
-            ["Enable"] = false,
+            ["Enable"] = true,
             ["Method"] = "Half" -- Half/Full
         }
     },
@@ -31,9 +31,9 @@ getgenv().Config = {
     ["Hop"] = {
         ["Hop Find Mirror"] = false,
         ["Hop Find Valkyrie Helm"] = false,
-        ["Hop Find Fruit 1m For Auto Third Sea"] = false,
+        ["Hop Find Fruit 1m For Auto Third Sea"] = true,
         ["Hop For Get Tushita"] = false,
-        ["Hop Find Full Moon For Get Skull Guitar"] = false,
+        ["Hop Find Full Moon For Get Skull Guitar"] = true,
         ["Hop Find Cake Queen [CDK]"] = false
     },
 }
