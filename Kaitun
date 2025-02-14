@@ -3,9 +3,9 @@ getgenv().Config = {
     ["Team"] = "Pirates", -- Marines
     ["FPS Boost"] = false,
     ["Black Screen"] = false,
-    ["Lock Fragment"] = 0,
+    ["Lock Fragment"] = 100000,
     ["Awakening Fruit"] = false,
-    ["Hop if Other Players are Nearby"] = false,
+    ["Hop if Other Players are Nearby"] = true,
     ["Collect Mob Method"] = "Teleport", -- Walk/Teleport
     ["Item"] = {
         ["Get Pole"] = false,
@@ -25,7 +25,7 @@ getgenv().Config = {
         }
     },
     ["Fruit"] = {
-        ["Select Fruit"] = "", --Example: Dough-Dough, Leopard-Leopard,...
+        ["Select Fruit"] = "Dragon-Dragon", --Example: Dough-Dough, Leopard-Leopard,...
         ["Snipe Fruit Selected"] = false
     },
     ["Hop"] = {
