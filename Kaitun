@@ -12,7 +12,7 @@ getgenv().Config = {
         ["Get Saber"] = false,
         ["Skull Guitar"] = {
             ["Enable"] = true,
-            ["Get Materials Before Go 3rd Sea"] = false
+            ["Get Materials Before Go 3rd Sea"] = true
         },
         ["Cursed Dual Katana"] = true,
         ["Get Mirror Fractal when have God's Chalice"] = false
@@ -20,7 +20,7 @@ getgenv().Config = {
     ["Mastery"] = {
         ["Melee"] = true, -- 600 mastery
         ["Sword"] = {
-            ["Enable"] = true,
+            ["Enable"] = false,
             ["Method"] = "Half" -- Half/Full
         }
     },
@@ -33,7 +33,7 @@ getgenv().Config = {
         ["Hop Find Valkyrie Helm"] = false,
         ["Hop Find Fruit 1m For Auto Third Sea"] = true,
         ["Hop For Get Tushita"] = false,
-        ["Hop Find Full Moon For Get Skull Guitar"] = true,
+        ["Hop Find Full Moon For Get Skull Guitar"] = false,
         ["Hop Find Cake Queen [CDK]"] = false
     },
 }
