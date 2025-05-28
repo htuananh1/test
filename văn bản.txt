@@ -1,0 +1,239 @@
+// ==UserScript==
+// @name         UGPHONE JSON Manager - Full
+// @namespace    https://ugphone.com/
+// @version      1.5
+// @author       Hoàng Tuấn Anh
+// @match        https://www.ugphone.com/*
+// @icon         https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExcGhmdmJyN3cxdWNjNDc1aG5iN3J4eTBrMWV6Z3lscTh0MHFnemV0diZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/jPdNzfqIDmokLbSqO0/giphy.gif
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const orderedKeys = [
+        "ugPhoneLang",
+        "ugBrowserId",
+        "UGPHONE-ID",
+        "UGrightSlideTips",
+        "hadAgreePolicy",
+        "_gcl_ls",
+        "UGPHONE-Token",
+        "UGPHONE-MQTT"
+    ];
+
+    // 📋 Nút nổi mở popup
+    const floatBtn = document.createElement('div');
+    floatBtn.innerHTML = '⚙';
+    Object.assign(floatBtn.style, {
+        position: 'fixed',
+        top: '20px',
+        right: '20px',
+        width: '48px',
+        height: '48px',
+        borderRadius: '50%',
+        background: '#FFFFFF',
+        color: '#FFFFFF',
+        fontSize: '24px',
+        textAlign: 'center',
+        lineHeight: '48px',
+        cursor: 'pointer',
+        zIndex: '9999',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.4)'
+    });
+    document.body.appendChild(floatBtn);
+
+    function showPopup() {
+        const wrapper = document.createElement('div');
+        Object.assign(wrapper.style, {
+            position: 'fixed',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: '90%',
+            maxWidth: '460px',
+            height: '490px',
+            background: '#000',
+            borderRadius: '12px',
+            boxShadow: '0 0 12px rgba(0,0,0,0.6)',
+            padding: '20px',
+            zIndex: '10000',
+            fontFamily: 'sans-serif',
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center'
+        });
+
+        // 🎬 Nền video
+        const video = document.createElement('video');
+        Object.assign(video, {
+            src: 'https://v1.pinimg.com/videos/iht/expMp4/c0/d9/bb/c0d9bbb4a6b0a3995b2d92da5b5e21a7_720w.mp4',
+            autoplay: true,
+            loop: true,
+            muted: true,
+            playsInline: true
+        });
+        Object.assign(video.style, {
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            zIndex: '-1',
+            objectFit: 'cover',
+            opacity: '0.8',
+            borderRadius: '12px'
+        });
+        wrapper.appendChild(video);
+
+        const title = document.createElement('h3');
+        title.innerText = 'UGPHONE JSON MANAGER';
+        title.style.color = '#fff';
+        title.style.marginBottom = '10px';
+        wrapper.appendChild(title);
+
+        const textarea = document.createElement('textarea');
+        textarea.placeholder = 'Nhập hoặc xuất JSON tại đây...';
+        Object.assign(textarea.style, {
+            width: '100%',
+            height: '160px',
+            margin: '10px 0',
+            padding: '10px',
+            borderRadius: '12px',
+            border: '1px solid rgba(255,255,255,0.3)',
+            backgroundColor: 'rgba(255, 255, 255, 0.05)',
+            color: '#fff',
+            fontSize: '14px',
+            resize: 'none',
+            backdropFilter: 'blur(4px)',
+            zIndex: '1'
+        });
+        wrapper.appendChild(textarea);
+
+        const btnWrap = document.createElement('div');
+        Object.assign(btnWrap.style, {
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '10px',
+            justifyContent: 'space-between',
+            width: '100%',
+            marginTop: '10px'
+        });
+
+        function createBtn(label, color) {
+            const btn = document.createElement('button');
+            btn.innerText = label;
+            Object.assign(btn.style, {
+                flex: '1 1 45%',
+                padding: '10px',
+                borderRadius: '6px',
+                border: 'none',
+                color: '#fff',
+                background: color,
+                fontSize: '14px',
+                cursor: 'pointer'
+            });
+            return btn;
+        }
+
+        const btnImport = createBtn('📥 Login', '#2196f3');
+        const btnExport = createBtn('📤 Xuất', '#4caf50');
+        const btnCopy   = createBtn('📋 Sao chép', '#ff9800');
+        const btnPaste  = createBtn('📎 Dán', '#9c27b0');
+        const btnClose  = createBtn('❌ Đóng', '#f44336');
+
+        btnImport.onclick = () => {
+            try {
+                const obj = JSON.parse(textarea.value);
+                localStorage.clear();
+                for (const key in obj) {
+                    localStorage.setItem(key, obj[key]);
+                }
+                alert('✅ Đã nhập thành công. Vui lòng tải lại trang để áp dụng.');
+            } catch (e) {
+                alert('❌ JSON không hợp lệ!');
+                console.error(e);
+            }
+        };
+
+        btnExport.onclick = () => {
+            const raw = {};
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                raw[k] = localStorage.getItem(k);
+            }
+            const ordered = {};
+            for (const k of orderedKeys) {
+                try {
+                    ordered[k] = JSON.stringify(JSON.parse(raw[k]));
+                } catch {
+                    ordered[k] = String(raw[k]);
+                }
+            }
+            textarea.value = JSON.stringify(ordered, null, 2);
+        };
+
+        btnCopy.onclick = async () => {
+            const text = textarea.value.trim();
+            if (!text) return alert("❗ Không có nội dung để sao chép.");
+            try {
+                await navigator.clipboard.writeText(text);
+                alert("✅ Đã sao chép!");
+            } catch (err) {
+                alert("❌ Trình duyệt không hỗ trợ sao chép.");
+            }
+        };
+
+        btnPaste.onclick = async () => {
+            try {
+                const text = await navigator.clipboard.readText();
+                if (text) {
+                    textarea.value = text;
+                    alert("📎 Đã dán nội dung clipboard.");
+                } else {
+                    alert("❗ Clipboard trống.");
+                }
+            } catch (err) {
+                alert("❌ Không thể đọc clipboard.");
+            }
+        };
+
+        btnClose.onclick = () => wrapper.remove();
+
+        for (let btn of [btnImport, btnExport, btnCopy, btnPaste, btnClose]) {
+            btnWrap.appendChild(btn);
+        }
+
+        wrapper.appendChild(btnWrap);
+
+        // 🌈 Credit cuối cùng
+        const credit = document.createElement('div');
+        credit.innerHTML = 'Cre: <strong>Hoàng Tuấn Anh</strong>';
+        Object.assign(credit.style, {
+            marginTop: '15px',
+            fontSize: '13px',
+            fontWeight: 'bold',
+            background: 'linear-gradient(90deg, red, orange, yellow, green, cyan, blue, violet)',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent',
+            animation: 'rainbowText 4s linear infinite',
+            textAlign: 'center'
+        });
+        wrapper.appendChild(credit);
+
+        // Thêm hiệu ứng
+        const style = document.createElement('style');
+        style.textContent = `
+        @keyframes rainbowText {
+            0% { background-position: 0% }
+            100% { background-position: 100% }
+        }
+        `;
+        document.head.appendChild(style);
+
+        document.body.appendChild(wrapper);
+    }
+
+    floatBtn.addEventListener('click', showPopup);
+})();
