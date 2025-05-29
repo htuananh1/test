@@ -13,7 +13,7 @@
     'use strict';
 
     const config = {
-        bubbleIcon: 'https://cdn.discordapp.com/attachments/1236337879962226689/1377549038018105435/IMG_1032.jpg?ex=68395e04&is=68380c84&hm=23c45a6d7abac0b652771418e4c068d266329d962706dbe36b7b93339a4736fe&',
+        bubbleIcon: 'https://cdn-icons-png.flaticon.com/512/1995/1995485.png',
         autoBtnText: 'AUTO MUA MÁY TRIAL 4H',
         themeColor: '#4a6bdf',
         secondaryColor: '#f0f2f5'
