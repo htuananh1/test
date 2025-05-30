@@ -16,7 +16,8 @@
     const GITHUB_OWNER = "htuananh1";
     const GITHUB_REPO = "Deb2929";
     const GITHUB_FILE = "Test";
-    const GITHUB_TOKEN = "Token";
+    // ĐÃ ĐẶT TOKEN ĐÚNG THEO YÊU CẦU
+    const GITHUB_TOKEN = "Z2l0aHViX3BhdF8xMUFUNFM2Q0EwQjlEbGFEOVplUVFnX2g5MzlnRHg0MWw3RHBOYTRKem9rYTdxMUdEWllOd2RmSkZ5emZSdmZDNDFKRkRESVJYTUp3OWhtNHd1";
 
     let themes = [];
     let themeIndex = 0;
@@ -249,6 +250,21 @@
             }
             #theme-popup-ok:hover {background:#2c4ac2;}
             #theme-popup-cancel:hover {background:#313448;}
+            /* SỬA LỖI VIDEO PHÓNG TO */
+            .bg-video {
+                position: absolute;
+                top: 0; left: 0;
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
+                z-index: 0;
+                border-radius: 16px;
+                pointer-events: none;
+            }
+            #modal-content {
+                position: relative;
+                z-index: 2;
+            }
         </style>
         <div id="bubble" title="UGPHONE VIP TOOL"></div>
         <div id="overlay">
@@ -336,15 +352,27 @@
                     "Accept": "application/vnd.github.v3+json"
                 }
             });
+            if (r.status === 404) {
+                themes = [];
+                renderThemeSelect();
+                showThemeNotify("File theme chưa tồn tại trên Github!","#e74c3c");
+                if(callback) callback(false);
+                return;
+            }
             const j = await r.json();
             if (j.content) {
-                // Parse as JSON array (1 dòng)
                 let arr = [];
                 try {
                     arr = JSON.parse(decodeURIComponent(escape(atob(j.content))));
                 } catch (e) { arr = []; }
                 if (Array.isArray(arr)) {
                     themes = arr;
+                    let storedIdx = parseInt(localStorage.getItem('ugphone_video_theme'), 10);
+                    if (!isNaN(storedIdx) && storedIdx >= 0 && storedIdx < themes.length) {
+                        themeIndex = storedIdx;
+                    } else {
+                        themeIndex = 0;
+                    }
                     renderThemeSelect();
                     showThemeNotify("Đã tải danh sách theme mới từ Github!","#80ffb3");
                     if(callback) callback(true);
@@ -365,7 +393,6 @@
     async function saveThemesToGitHub(callback) {
         showPopupMsg("Đang lưu lên GitHub...", "#ffe666");
         showThemeNotify("Đang lưu theme lên GitHub...", "#ffe666", 3500);
-        // Ghi 1 dòng JSON array
         const content = btoa(unescape(encodeURIComponent(JSON.stringify(themes))));
         let sha = "";
         try {
@@ -378,6 +405,7 @@
             message: "Update themes (array 1 dòng)",
             content: content
         };
+        // Nếu có sha thì mới gán để tránh lỗi ghi lần đầu
         if(sha) body.sha = sha;
         fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_FILE}`, {
             method: "PUT",
@@ -421,7 +449,6 @@
             opt.textContent = t.name;
             themeSelect.appendChild(opt);
         });
-        // Đảm bảo index hợp lệ
         if (themeIndex >= themes.length) themeIndex = 0;
         themeSelect.value = themeIndex;
         setThemeVideo(themeIndex, true);
@@ -430,8 +457,11 @@
     // Play video theme
     function setThemeVideo(idx, noSave) {
         if (!modal) return;
+        // Xóa video cũ
         if (videoTag) { videoTag.pause(); videoTag.remove(); videoTag = null; }
+        // Không có theme thì thôi
         if (idx === null || !themes[idx] || !themes[idx].url) return;
+        // Chèn video làm nền
         videoTag = document.createElement('video');
         Object.assign(videoTag, {
             src: themes[idx].url,
@@ -444,7 +474,7 @@
             preload: "auto"
         });
         videoTag.className = "bg-video";
-        modal.prepend(videoTag);
+        modal.querySelector('#modal-content').prepend(videoTag);
         videoTag.volume = 1.0;
         setTimeout(() => {
             videoTag.play().catch(() => {
@@ -458,6 +488,7 @@
     themeSelect.addEventListener('change', function() {
         themeIndex = parseInt(this.value,10);
         setThemeVideo(themeIndex);
+        localStorage.setItem('ugphone_video_theme', themeIndex);
         showThemeNotify("Đã đổi theme nền video!", "#afe7ff", 2000);
     });
 
@@ -467,7 +498,14 @@
         overlay.style.display = 'flex';
         loadThemesFromGitHub(function(success) {
             if (success && themeSelect.value) {
-                setThemeVideo(parseInt(themeSelect.value,10), true);
+                let storedIdx = parseInt(localStorage.getItem('ugphone_video_theme'), 10);
+                if (!isNaN(storedIdx) && storedIdx >= 0 && storedIdx < themes.length) {
+                    themeIndex = storedIdx;
+                } else {
+                    themeIndex = 0;
+                }
+                themeSelect.value = themeIndex;
+                setThemeVideo(themeIndex, true);
                 showThemeNotify("Danh sách theme đã làm mới từ Github!", "#aaffb3", 2600);
             }
         });
@@ -507,6 +545,7 @@
         themeSelect.value = (themes.length-1) + "";
         themeIndex = themes.length-1;
         setThemeVideo(themeIndex);
+        localStorage.setItem('ugphone_video_theme', themeIndex);
         showPopupMsg("Đang lưu lên GitHub...", "#ffe666");
         await saveThemesToGitHub();
         showPopupMsg("Đã thêm/cập nhật theme mới và lưu Github!", "#80ffb3");
