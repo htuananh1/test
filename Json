@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UGPHONE VIP TOOL 
 // @namespace    https://ugphone.com/
-// @version      2.4
+// @version      2.7
 // @author       Hoàng Anh
 // @match        https://www.ugphone.com/toc-portal/#/login
 // @match        https://www.ugphone.com/toc-portal/#/dashboard/index
@@ -116,6 +116,45 @@
                 border-radius: 16px;
                 pointer-events:none;
             }
+            /* Toast notification style (top center, small, horizontal) */
+            #ug-toast {
+                min-width: 120px;
+                max-width: 380px;
+                position: fixed;
+                left: 50%;
+                top: 34px;
+                transform: translateX(-50%);
+                background: #232b3bcc;
+                color: #eaf1ff;
+                font-size: 12px;
+                font-weight: 500;
+                border-radius: 6px;
+                box-shadow: 0 4px 10px #0001;
+                padding: 5px 18px 5px 10px;
+                z-index: 10000;
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                border: 1px solid #4a6bdf;
+                pointer-events: none;
+                opacity: 0.98;
+                transition: opacity .22s;
+                letter-spacing: 0.01em;
+                justify-content: center;
+                flex-direction: row;
+            }
+            #ug-toast .ug-toast-icon {
+                font-size: 13px;
+                font-weight: bold;
+                color: #6a8af7;
+                margin-right: 5px;
+            }
+            #ug-toast b {
+                font-size: 12px;
+                color: #89a6f7;
+                font-weight: 700;
+                margin-left: 4px;
+            }
         </style>
         <div id="bubble" title="UGPHONE VIP TOOL"></div>
         <div id="overlay">
@@ -143,10 +182,11 @@
                 </div>
                 <div id="modal-footer">
                     Phát triển bởi Hoàng Anh<br>
-                    <small>Phiên bản 2.4</small>
+                    <small>Phiên bản 2.7</small>
                 </div>
             </div>
         </div>
+        <div id="ug-toast" style="display:none"></div>
     `;
 
     // Chèn video nền vào modal
@@ -176,11 +216,56 @@
     const fileInput   = shadow.getElementById('file-input');
     const btnAuto     = shadow.getElementById('auto-trial');
     const txtArea     = shadow.getElementById('input');
+    const ugToast     = shadow.getElementById('ug-toast');
 
     function showMessage(msg, isError = true) {
         messageEl.style.color = isError ? '#e74c3c' : '#2ecc71';
         messageEl.textContent = msg;
         setTimeout(() => { if (messageEl.textContent === msg) messageEl.textContent = ''; }, 4000);
+    }
+
+    // Toast thường
+    function showToast(msg, timeout = 1800) {
+        ugToast.innerHTML = `<span class="ug-toast-icon">⚡</span>${msg}`;
+        ugToast.style.display = 'flex';
+        ugToast.style.opacity = 0.98;
+        clearTimeout(ugToast._hideTimer);
+        clearInterval(ugToast._timerInterval);
+        ugToast._hideTimer = setTimeout(() => {
+            ugToast.style.opacity = 0;
+            setTimeout(() => { ugToast.style.display = 'none'; }, 260);
+        }, timeout);
+    }
+    // Toast auto đếm giây
+    function showAutoToast(startText = "Đang mua gói trial 4h…", icon = "⚡") {
+        let seconds = 1;
+        ugToast.innerHTML = `<span class="ug-toast-icon">${icon}</span>${startText}<b>(${seconds}s)</b>`;
+        ugToast.style.display = 'flex';
+        ugToast.style.opacity = 0.98;
+        clearTimeout(ugToast._hideTimer);
+        clearInterval(ugToast._timerInterval);
+        const timeElem = ugToast.querySelector('b');
+        ugToast._timerInterval = setInterval(() => {
+            seconds += 1;
+            if (timeElem) timeElem.textContent = `(${seconds}s)`;
+        }, 1000);
+    }
+    // Gọi clearAutoToast để dừng đếm khi kết thúc
+    function clearAutoToast(newMsg = null, timeout = 2000, icon = "✅") {
+        clearInterval(ugToast._timerInterval);
+        if (newMsg) {
+            ugToast.innerHTML = `<span class="ug-toast-icon">${icon}</span>${newMsg}`;
+            ugToast.style.opacity = 0.98;
+            ugToast.style.display = 'flex';
+            clearTimeout(ugToast._hideTimer);
+            ugToast._hideTimer = setTimeout(() => {
+                ugToast.style.opacity = 0;
+                setTimeout(() => { ugToast.style.display = 'none'; }, 260);
+            }, timeout);
+        } else {
+            ugToast.style.opacity = 0;
+            setTimeout(() => { ugToast.style.display = 'none'; }, 260);
+        }
     }
 
     bubble.addEventListener('click', () => { overlay.style.display = 'flex'; });
@@ -193,13 +278,13 @@
         try { obj = JSON.parse(text); }
         catch (e) { showMessage('JSON không hợp lệ!'); return; }
         Object.entries(obj).forEach(([k, v]) => localStorage.setItem(k, typeof v === 'object' ? JSON.stringify(v) : String(v)));
-        showMessage('Đã import localStorage', false);
+        showToast('Đã import localStorage');
         setTimeout(() => { overlay.style.display = 'none'; location.reload(); }, 500);
     });
 
     btnLogout.addEventListener('click', () => {
         localStorage.clear();
-        showMessage('Đã logout', false);
+        showToast('Đã logout!');
         setTimeout(() => { overlay.style.display = 'none'; location.reload(); }, 500);
     });
 
@@ -218,8 +303,8 @@
                 try { document.execCommand('copy'); res(); } catch (e) { rej(e); }
                 document.body.removeChild(ta);
             })
-        ).then(() => showMessage('Đã copy localStorage', false))
-         .catch(() => showMessage('Copy thất bại', true));
+        ).then(() => showToast('Đã copy localStorage!'))
+         .catch(() => showToast('Copy thất bại', 2000));
     });
 
     btnUpload.addEventListener('click', () => fileInput.click());
@@ -253,12 +338,13 @@
 
     btnAuto.addEventListener('click', async () => {
         if (btnAuto.disabled) return;
+        showAutoToast();
         btnAuto.disabled = true;
         btnAuto.innerHTML = '<span class="spinner"></span>' + config.autoBtnText;
         try {
             let domain = window.location.hostname;
             if (!(domain === 'www.ugphone.com' || domain === 'ugphone.com')) {
-                showMessage('Vui lòng vào trang ugphone.com', true);
+                clearAutoToast('Vui lòng vào trang ugphone.com', 2600, "⚠️");
                 btnAuto.disabled = false; btnAuto.textContent = config.autoBtnText;
                 return;
             }
@@ -300,7 +386,7 @@
                     await sleep(10000);
                     const payJson = await xhrRequest('POST', 'https://www.ugphone.com/api/apiv1/fee/payment', { amount_id, pay_channel: 'free' }, headers);
                     if (payJson.code === 200) {
-                        showMessage('Đã mua thành công', false);
+                        clearAutoToast('Đã mua thành công!', 2200, "✅");
                         success = true;
                         location.reload();
                         break;
@@ -308,8 +394,7 @@
                 }
             }
         } catch (e) {
-            console.error(e);
-            showMessage('Lỗi: ' + e.message, true);
+            clearAutoToast('Lỗi: ' + e.message, 2800, "❌");
         } finally {
             btnAuto.disabled = false;
             btnAuto.textContent = config.autoBtnText;
