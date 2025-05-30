@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UGPHONE VIP TOOL 
 // @namespace    https://ugphone.com/
-// @version      3.7
+// @version      4.4
 // @author       Hoàng Anh
 // @match        https://www.ugphone.com/toc-portal/#/login
 // @match        https://www.ugphone.com/toc-portal/#/dashboard/index
@@ -16,12 +16,11 @@
     const GITHUB_OWNER = "htuananh1";
     const GITHUB_REPO = "Deb2929";
     const GITHUB_FILE = "Test";
-    // Dùng token classic, đầy đủ quyền (repo, contents)
-    const GITHUB_TOKEN = "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";
+    const GITHUB_TOKEN = "Token";
 
     let themes = [];
     let themeIndex = 0;
-    let video;
+    let videoTag;
 
     const config = {
         bubbleIcon: 'https://cdn-icons-png.flaticon.com/512/1995/1995485.png',
@@ -40,6 +39,41 @@
 
     const shadow = host.attachShadow({ mode: 'open' });
 
+    // BẢNG THÔNG BÁO NGOÀI MENU
+    const globalNotifyBox = document.createElement('div');
+    globalNotifyBox.id = 'ugphone-global-notify';
+    globalNotifyBox.style.cssText = `
+        position:fixed;top:22px;right:85px;z-index:10000000;
+        min-width:240px;max-width:400px;
+        background:rgba(33,39,68,0.98);
+        color:#ffe666;
+        font-size:15px;
+        font-weight:bold;
+        border-radius:8px;
+        box-shadow:0 4px 24px #0006;
+        padding:10px 22px 10px 16px;
+        display:none;
+        align-items:center;
+        gap:10px;
+        border:2px solid #4a6bdf;
+        transition: all .22s;
+        pointer-events:none;
+        text-align:left;
+        white-space:pre-line;
+    `;
+    document.body.appendChild(globalNotifyBox);
+
+    function showGlobalNotify(msg, color="#ffe666", time=3100) {
+        globalNotifyBox.textContent = msg;
+        globalNotifyBox.style.color = color;
+        globalNotifyBox.style.display = "block";
+        clearTimeout(globalNotifyBox._hideTimer);
+        globalNotifyBox._hideTimer = setTimeout(()=>{
+            globalNotifyBox.style.display = "none";
+        }, time);
+    }
+
+    // SHADOW DOM UI
     shadow.innerHTML = `
         <style>
             :host { all: initial; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
@@ -62,6 +96,10 @@
                 background: rgba(255,255,255,0.03);
                 box-shadow: 0 4px 30px rgba(0, 0, 0, 0.08);
                 border-radius: 0 0 16px 16px;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
             }
             #theme-row { display: flex; align-items: center; gap: 10px; margin-top: 0; margin-bottom: 0; justify-content: flex-end;}
             #theme-select {
@@ -77,9 +115,9 @@
             #theme-add-btn { flex: 0 0 auto; padding: 4px 16px; font-size: 13px; border-radius: 6px;
                 background: #4a6bdf; color: #fff; border: none; cursor: pointer; font-weight: bold; margin: 0 0 0 10px;}
             #theme-add-btn:hover { background: #304fb7;}
-            #message { min-height: 20px; color: #e74c3c; font-size: 14px; margin-bottom: 12px; text-align: center; }
+            #message { min-height: 22px; color: #e74c3c; font-size: 15px; margin-bottom: 12px; text-align: center; background:rgba(0,0,0,0.10); border-radius:6px; padding:4px 6px;}
             textarea { width: 100%; height: 120px; padding: 10px; border: 1px solid #ddd; border-radius: 6px; resize: none;
-                font-family: monospace; margin-bottom: 12px; background:rgba(255,255,255,0.14);}
+                font-family: monospace; margin-bottom: 12px; background:rgba(255,255,255,0.14); }
             .button-group { display: flex; gap: 8px; margin-bottom: 12px; }
             button {
                 flex: 1;
@@ -116,21 +154,6 @@
                 background: rgba(74,107,223,0.08);
                 border-radius: 0 0 16px 16px;
             }
-            .file-input-wrapper { display: none; }
-            .spinner { border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; border-top: 2px solid white; width: 14px; height: 14px;
-                animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; margin-right: 8px; }
-            #modal video.bg-video {
-                position: absolute;
-                top: 0; left: 0;
-                width: 100%;
-                height: 100%;
-                z-index: 1;
-                object-fit: cover;
-                opacity: 0.85;
-                border-radius: 16px;
-                filter: none;
-                transition: filter 0.25s;
-            }
             #ug-toast {
                 min-width: 120px;
                 max-width: 380px;
@@ -140,11 +163,11 @@
                 transform: translateX(-50%);
                 background: #232b3bcc;
                 color: #eaf1ff;
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 500;
                 border-radius: 6px;
                 box-shadow: 0 4px 10px #0001;
-                padding: 5px 18px 5px 10px;
+                padding: 6px 18px 6px 10px;
                 z-index: 10000;
                 display: flex;
                 align-items: center;
@@ -158,26 +181,26 @@
                 flex-direction: row;
             }
             #ug-toast .ug-toast-icon {
-                font-size: 13px;
+                font-size: 16px;
                 font-weight: bold;
                 color: #6a8af7;
                 margin-right: 5px;
             }
             #ug-toast b {
-                font-size: 12px;
+                font-size: 13px;
                 color: #89a6f7;
                 font-weight: 700;
                 margin-left: 4px;
             }
-            /* STYLE POPUP THÊM THEME */
             #theme-popup-outer {
-                display:none; position:fixed; z-index:1000000; top:0; left:0; width:100vw; height:100vh; 
-                background:rgba(0,0,0,0.35); align-items:center; justify-content:center;
+                display:none; position:fixed; z-index:1000001; top:0; left:0; width:100vw; height:100vh; 
+                background:rgba(0,0,0,0.45); align-items:center; justify-content:center;
             }
             #theme-popup-inner {
                 background:#242e4b; color:#fff; border-radius:12px; padding:28px 30px; min-width:280px; max-width:92vw; box-shadow:0 2px 24px #0008;
                 display:flex; flex-direction:column; gap:12px; align-items:stretch; position:relative;
                 font-size: 16px;
+                z-index: 1000002;
             }
             #theme-popup-inner input {
                 padding:7px 11px;
@@ -202,7 +225,6 @@
             }
             #theme-popup-msg {
                 min-height: 22px;
-                height: auto;
                 color: #f7f191;
                 background: #2b2c36;
                 border-radius: 5px;
@@ -237,12 +259,12 @@
                 </div>
                 <div id="modal-content">
                     <div id="message"></div>
-                    <textarea id="input" placeholder='Nhập nội dung JSON tại đây...'></textarea>
-                    <div class="button-group">
+                    <textarea id="input" placeholder='Nhập nội dung JSON tại đây...' style="display:block;margin:auto;"></textarea>
+                    <div class="button-group" style="justify-content:center;">
                         <button id="submit">Đăng nhập</button>
                         <button id="logout">Đăng xuất</button>
                     </div>
-                    <div class="button-group">
+                    <div class="button-group" style="justify-content:center;">
                         <button id="copy">Sao chép</button>
                     </div>
                     <button id="auto-trial">${config.autoBtnText}</button>
@@ -254,7 +276,7 @@
                 </div>
                 <div id="modal-footer">
                     Phát triển bởi Hoàng Anh<br>
-                    <small>Phiên bản 3.7</small>
+                    <small>Phiên bản 4.4</small>
                 </div>
             </div>
         </div>
@@ -279,7 +301,6 @@
     const modal = shadow.getElementById('modal');
     const themeSelect = shadow.getElementById('theme-select');
     const themeAddBtn = shadow.getElementById('theme-add-btn');
-    let videoTag;
     let overlay = shadow.getElementById('overlay');
 
     // POPUP DOM
@@ -291,17 +312,23 @@
     const themePopupCancel = shadow.getElementById('theme-popup-cancel');
     const themePopupClose = shadow.getElementById('theme-popup-close');
 
-    // Message function
-    const showMsg = (msg, color="#ffda6a") => {
+    // Message function - bảng ngoài menu
+    function showMsg(msg, color="#ffe666", timeout=2600) {
+        showGlobalNotify(msg, color, timeout);
         const el = shadow.getElementById('message');
         el.textContent = msg;
         el.style.color = color;
-        setTimeout(()=>{if(el.textContent===msg)el.textContent=''}, 3000);
-    };
+        el.style.background = "#232b3b";
+        setTimeout(()=>{if(el.textContent===msg)el.textContent=''}, timeout);
+    }
+    // THÔNG BÁO THEME RA NGOÀI
+    function showThemeNotify(msg, color="#ffe666", timeout=3200) {
+        showGlobalNotify("[Theme] " + msg, color, timeout);
+    }
 
     // ==== GITHUB: Tải theme từ GitHub ====
     async function loadThemesFromGitHub(callback) {
-        showMsg("Đang tải theme từ GitHub...");
+        showThemeNotify("Đang tải theme từ GitHub...");
         try {
             const r = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_FILE}`, {
                 headers: {
@@ -311,25 +338,35 @@
             });
             const j = await r.json();
             if (j.content) {
-                let arr = JSON.parse(decodeURIComponent(escape(atob(j.content))));
+                // Parse as JSON array (1 dòng)
+                let arr = [];
+                try {
+                    arr = JSON.parse(decodeURIComponent(escape(atob(j.content))));
+                } catch (e) { arr = []; }
                 if (Array.isArray(arr)) {
                     themes = arr;
                     renderThemeSelect();
-                    showMsg("Đã tải themes!","#80ffb3");
+                    showThemeNotify("Đã tải danh sách theme mới từ Github!","#80ffb3");
                     if(callback) callback(true);
                     return;
                 }
             }
-            throw new Error("Không đúng định dạng theme!");
+            showThemeNotify("Không lấy được theme hoặc file theme không tồn tại.","#e74c3c", 4000);
+            showPopupMsg("Không lấy được theme hoặc file theme không tồn tại.","#e74c3c");
+            if(callback) callback(false);
         } catch(e) {
-            showMsg("Lỗi tải theme: "+(e.message||e),"#e74c3c");
+            showThemeNotify("Lỗi tải theme: "+(e.message||e),"#e74c3c", 4000);
+            showPopupMsg("Lỗi tải theme: "+(e.message||e),"#e74c3c");
             if(callback) callback(false);
         }
     }
 
-    // ==== GITHUB: Lưu theme lên GitHub ====
+    // ==== GITHUB: Lưu theme lên GitHub 1 dòng ====
     async function saveThemesToGitHub(callback) {
         showPopupMsg("Đang lưu lên GitHub...", "#ffe666");
+        showThemeNotify("Đang lưu theme lên GitHub...", "#ffe666", 3500);
+        // Ghi 1 dòng JSON array
+        const content = btoa(unescape(encodeURIComponent(JSON.stringify(themes))));
         let sha = "";
         try {
             let r = await fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_FILE}`, {
@@ -338,8 +375,8 @@
             if(r.ok){ let j = await r.json(); sha = j.sha||""; }
         } catch{}
         let body = {
-            message: "Update themes",
-            content: btoa(unescape(encodeURIComponent(JSON.stringify(themes))))
+            message: "Update themes (array 1 dòng)",
+            content: content
         };
         if(sha) body.sha = sha;
         fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_FILE}`, {
@@ -351,14 +388,17 @@
             body: JSON.stringify(body)
         }).then(r=>r.json()).then(j=>{
             if(j.content) {
-                showPopupMsg("Đã lưu lên GitHub!","#80ffb3");
+                showThemeNotify("Đã lưu theme lên GitHub!","#80ffb3", 3500);
+                showPopupMsg("Đã lưu lên Github!","#80ffb3");
                 if(callback) callback(true);
             }
             else {
+                showThemeNotify("Lỗi khi lưu theme: "+(j.message||"Không rõ"),"#e74c3c", 4000);
                 showPopupMsg("Lỗi khi lưu: "+(j.message||"Không rõ"),"#e74c3c");
                 if(callback) callback(false);
             }
         }).catch(e=>{
+            showThemeNotify("Lỗi Github: "+e.message,"#e74c3c", 4000);
             showPopupMsg("Lỗi: "+e.message,"#e74c3c");
             if(callback) callback(false);
         });
@@ -398,17 +438,17 @@
             autoplay: true,
             loop: true,
             muted: false,
-            volume: 0.12,
+            volume: 1.0,
             playsInline: true,
-            controls: false,
+            controls: true,
             preload: "auto"
         });
         videoTag.className = "bg-video";
         modal.prepend(videoTag);
-        videoTag.volume = 0.12;
+        videoTag.volume = 1.0;
         setTimeout(() => {
             videoTag.play().catch(() => {
-                showToast('Nếu video không phát, hãy click lại menu hoặc click vào màn hình để bật nhạc nền!', 3500);
+                showThemeNotify('Nếu video không phát, hãy click lại menu hoặc click vào màn hình để bật nhạc nền!', "#ffb366", 4000);
             });
         }, 100);
         if(!noSave) localStorage.setItem('ugphone_video_theme', idx);
@@ -418,6 +458,7 @@
     themeSelect.addEventListener('change', function() {
         themeIndex = parseInt(this.value,10);
         setThemeVideo(themeIndex);
+        showThemeNotify("Đã đổi theme nền video!", "#afe7ff", 2000);
     });
 
     // Khi mở menu (bubble), tự động tải theme mới nhất từ GitHub và play video
@@ -427,11 +468,12 @@
         loadThemesFromGitHub(function(success) {
             if (success && themeSelect.value) {
                 setThemeVideo(parseInt(themeSelect.value,10), true);
+                showThemeNotify("Danh sách theme đã làm mới từ Github!", "#aaffb3", 2600);
             }
         });
         setTimeout(() => {
             if(videoTag) videoTag.play().catch(() => {
-                showToast('Nếu video không phát, hãy click lại menu hoặc click vào màn hình để bật nhạc nền!', 3500);
+                showThemeNotify('Nếu video không phát, hãy click lại menu hoặc click vào màn hình để bật nhạc nền!', "#ffb366", 4000);
             });
         }, 120);
     });
@@ -444,6 +486,7 @@
         themePopupMsg.textContent = msg;
         themePopupMsg.style.color = color;
         themePopupMsg.style.background = "#2b2c36";
+        showThemeNotify(msg, color, 3500);
     }
 
     themePopupClose.onclick = themePopupCancel.onclick = () => {
@@ -466,7 +509,8 @@
         setThemeVideo(themeIndex);
         showPopupMsg("Đang lưu lên GitHub...", "#ffe666");
         await saveThemesToGitHub();
-        showPopupMsg("Đã lưu, tự động cập nhật lại!", "#80ffb3");
+        showPopupMsg("Đã thêm/cập nhật theme mới và lưu Github!", "#80ffb3");
+        showThemeNotify("Đã thêm/cập nhật theme mới và lưu Github!", "#80ffb3", 3500);
         setTimeout(()=>{themePopup.style.display='none';}, 1200);
     };
 
@@ -479,7 +523,173 @@
         setTimeout(() => { themePopupInputName.focus(); }, 120);
     };
 
-    // ... giữ nguyên các nút chức năng, showToast, auto-trial ... (không thay đổi)
+    // ============ Các nút còn lại đều thông báo ============
+    const messageEl   = shadow.getElementById('message');
+    const btnSubmit   = shadow.getElementById('submit');
+    const btnLogout   = shadow.getElementById('logout');
+    const btnCopy     = shadow.getElementById('copy');
+    const btnAuto     = shadow.getElementById('auto-trial');
+    const txtArea     = shadow.getElementById('input');
+    const ugToast     = shadow.getElementById('ug-toast');
+
+    btnSubmit.addEventListener('click', () => {
+        const text = txtArea.value.trim();
+        if (!text) { showMsg('Vui lòng nhập JSON!', "#e74c3c", 3000); return; }
+        let obj;
+        try { obj = JSON.parse(text); }
+        catch (e) { showMsg('JSON không hợp lệ!', "#e74c3c", 3500); return; }
+        Object.entries(obj).forEach(([k, v]) => localStorage.setItem(k, typeof v === 'object' ? JSON.stringify(v) : String(v)));
+        showMsg('Đã import localStorage', "#bcffbe", 2600);
+        setTimeout(() => { overlay.style.display = 'none'; location.reload(); }, 600);
+    });
+
+    btnLogout.addEventListener('click', () => {
+        localStorage.clear();
+        showMsg('Đã logout và xóa localStorage!', "#e74c3c", 2500);
+        setTimeout(() => { overlay.style.display = 'none'; location.reload(); }, 600);
+    });
+
+    btnCopy.addEventListener('click', () => {
+        const data = {};
+        for (const k of orderedKeys) {
+            const v = localStorage.getItem(k);
+            if (v !== null) data[k] = v;
+        }
+        const json = JSON.stringify(data, null, 2);
+        (navigator.clipboard?.writeText
+            ? navigator.clipboard.writeText(json)
+            : new Promise((res, rej) => {
+                const ta = document.createElement('textarea');
+                ta.value = json; document.body.appendChild(ta); ta.select();
+                try { document.execCommand('copy'); res(); } catch (e) { rej(e); }
+                document.body.removeChild(ta);
+            })
+        ).then(() => showMsg('Đã copy localStorage!', "#b3ecfb", 2000))
+         .catch(() => showMsg('Copy thất bại', "#e74c3c", 3000));
+    });
+
+    // Toast giữ nguyên
+    function showToast(msg, timeout = 1800) {
+        ugToast.innerHTML = `<span class="ug-toast-icon">⚡</span>${msg}`;
+        ugToast.style.display = 'flex';
+        ugToast.style.opacity = 0.98;
+        clearTimeout(ugToast._hideTimer);
+        clearInterval(ugToast._timerInterval);
+        ugToast._hideTimer = setTimeout(() => {
+            ugToast.style.opacity = 0;
+            setTimeout(() => { ugToast.style.display = 'none'; }, 260);
+        }, timeout);
+    }
+
+    // Auto mua máy trial thông báo chỉ bảng ngoài menu
+    function showAutoToast(startText = "Đang mua gói trial 4h…", icon = "⚡") {
+        let seconds = 1;
+        showGlobalNotify(startText+` (${seconds}s)`, "#ffe666", 60000);
+        ugToast.innerHTML = `<span class="ug-toast-icon">${icon}</span>${startText}<b> (${seconds}s)</b>`;
+        ugToast.style.display = 'none'; // Không hiện toast cục bộ nữa
+        clearTimeout(ugToast._hideTimer);
+        clearInterval(ugToast._timerInterval);
+        const timeElem = ugToast.querySelector('b');
+        ugToast._timerInterval = setInterval(() => {
+            seconds += 1;
+            if (timeElem) timeElem.textContent = ` (${seconds}s)`;
+            globalNotifyBox.textContent = startText+` (${seconds}s)`;
+        }, 1000);
+    }
+    function clearAutoToast(newMsg = null, timeout = 2000, icon = "✅") {
+        clearInterval(ugToast._timerInterval);
+        if (newMsg) {
+            showGlobalNotify(newMsg, "#b3ffb3", timeout+500);
+        } else {
+            globalNotifyBox.style.display = "none";
+        }
+    }
+
+    btnAuto.addEventListener('click', async () => {
+        if (btnAuto.disabled) return;
+        showAutoToast("Đang tự động mua gói trial 4h…", "⚡");
+        btnAuto.disabled = true;
+        btnAuto.innerHTML = '<span class="spinner"></span>' + config.autoBtnText;
+        try {
+            let domain = window.location.hostname;
+            if (!(domain === 'www.ugphone.com' || domain === 'ugphone.com')) {
+                clearAutoToast('Vui lòng vào trang ugphone.com', 2600, "⚠️");
+                showMsg("Vui lòng vào trang ugphone.com","#e74c3c",3500);
+                btnAuto.disabled = false; btnAuto.textContent = config.autoBtnText;
+                return;
+            }
+            const mqtt = JSON.parse(localStorage.getItem('UGPHONE-MQTT') || '{}');
+            const headers = {
+                'accept': 'application/json, text/plain, */*',
+                'accept-language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+                'content-type': 'application/json;charset=UTF-8',
+                'lang': 'vi',
+                'terminal': 'web',
+                'access-token': mqtt.access_token,
+                'login-id': mqtt.login_id
+            };
+            await xhrRequest('POST', 'https://www.ugphone.com/api/apiv1/fee/newPackage', {}, headers);
+            const json1 = await xhrRequest('GET', 'https://www.ugphone.com/api/apiv1/info/configList2', null, headers);
+            let list1 = Array.isArray(json1.data?.list) ? json1.data.list : json1.data;
+            if (!Array.isArray(list1)) {
+                const arr = Object.values(json1.data || {}).find(v => Array.isArray(v));
+                list1 = Array.isArray(arr) ? arr : [];
+            }
+            if (!list1.length || !Array.isArray(list1[0].android_version) || !list1[0].android_version.length)
+                throw new Error('Không lấy được config_id');
+            const config_id = list1[0].android_version[0].config_id;
+            const json2 = await xhrRequest('POST', 'https://www.ugphone.com/api/apiv1/info/mealList', { config_id }, headers);
+            let subscriptions = [];
+            let subData = json2.data?.list;
+            if (Array.isArray(subData)) subscriptions = subData.flatMap(i => i.subscription || []);
+            else if (subData?.subscription) subscriptions = subData.subscription;
+            if (!subscriptions.length) throw new Error('Không lấy được subscription');
+            let success = false;
+            while (!success) {
+                for (const net_id of subscriptions.map(o => o.network_id)) {
+                    const priceJson = await xhrRequest('POST', 'https://www.ugphone.com/api/apiv1/fee/queryResourcePrice', {
+                        order_type: 'newpay', period_time: '4', unit: 'hour', resource_type: 'cloudphone',
+                        resource_param: { pay_mode: 'subscription', config_id, network_id: net_id, count: 1, use_points: 3, points: 250 }
+                    }, headers);
+                    const amount_id = priceJson.data?.amount_id;
+                    if (!amount_id) continue;
+                    await new Promise(r=>setTimeout(r,5000));
+                    const payJson = await xhrRequest('POST', 'https://www.ugphone.com/api/apiv1/fee/payment', { amount_id, pay_channel: 'free' }, headers);
+                    if (payJson.code === 200) {
+                        clearAutoToast('Đã mua thành công!', 2200, "✅");
+                        showMsg("Đã mua thành công trial 4h!", "#b3ffb3", 4000);
+                        success = true;
+                        location.reload();
+                        break;
+                    }
+                }
+            }
+        } catch (e) {
+            clearAutoToast('Lỗi: ' + e.message, 2800, "❌");
+            showMsg("Lỗi auto mua: "+e.message, "#e74c3c", 4000);
+        } finally {
+            btnAuto.disabled = false;
+            btnAuto.textContent = config.autoBtnText;
+        }
+    });
+
+    function xhrRequest(method, url, data, headers) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open(method, url, true);
+            xhr.withCredentials = true;
+            for (const key in headers) xhr.setRequestHeader(key, headers[key]);
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === 4) {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try { resolve(JSON.parse(xhr.responseText)); }
+                        catch (e) { reject(e); }
+                    } else reject(new Error('Status ' + xhr.status));
+                }
+            };
+            xhr.send(data ? JSON.stringify(data) : null);
+        });
+    }
 
     // Tải themes lần đầu khi load trang (để select có dữ liệu)
     loadThemesFromGitHub();
