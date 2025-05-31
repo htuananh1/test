@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UGPHONE VIP TOOL 
 // @namespace    https://ugphone.com/
-// @version      4.4
+// @version      4.7
 // @author       Hoàng Anh
 // @match        https://www.ugphone.com/toc-portal/#/login
 // @match        https://www.ugphone.com/toc-portal/#/dashboard/index
@@ -16,19 +16,10 @@
     const GITHUB_OWNER = "htuananh1";
     const GITHUB_REPO = "Deb2929";
     const GITHUB_FILE = "Test";
-    // ĐÃ ĐẶT TOKEN ĐÚNG THEO YÊU CẦU
-    const GITHUB_TOKEN = "Z2l0aHViX3BhdF8xMUFUNFM2Q0EwQjlEbGFEOVplUVFnX2g5MzlnRHg0MWw3RHBOYTRKem9rYTdxMUdEWllOd2RmSkZ5emZSdmZDNDFKRkRESVJYTUp3OWhtNHd1";
+    const GITHUB_TOKEN = "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";
 
     let themes = [];
     let themeIndex = 0;
-    let videoTag;
-
-    const config = {
-        bubbleIcon: 'https://cdn-icons-png.flaticon.com/512/1995/1995485.png',
-        autoBtnText: 'AUTO MUA MÁY TRIAL 4H',
-        themeColor: '#4a6bdf',
-        secondaryColor: '#f0f2f5'
-    };
 
     const orderedKeys = [
         "ugPhoneLang","ugBrowserId","UGPHONE-ID","UGrightSlideTips","hadAgreePolicy","_gcl_ls","UGPHONE-Token","UGPHONE-MQTT"
@@ -40,230 +31,165 @@
 
     const shadow = host.attachShadow({ mode: 'open' });
 
-    // BẢNG THÔNG BÁO NGOÀI MENU
-    const globalNotifyBox = document.createElement('div');
-    globalNotifyBox.id = 'ugphone-global-notify';
-    globalNotifyBox.style.cssText = `
-        position:fixed;top:22px;right:85px;z-index:10000000;
-        min-width:240px;max-width:400px;
-        background:rgba(33,39,68,0.98);
-        color:#ffe666;
-        font-size:15px;
-        font-weight:bold;
-        border-radius:8px;
-        box-shadow:0 4px 24px #0006;
-        padding:10px 22px 10px 16px;
-        display:none;
-        align-items:center;
-        gap:10px;
-        border:2px solid #4a6bdf;
-        transition: all .22s;
-        pointer-events:none;
-        text-align:left;
-        white-space:pre-line;
-    `;
-    document.body.appendChild(globalNotifyBox);
-
-    function showGlobalNotify(msg, color="#ffe666", time=3100) {
-        globalNotifyBox.textContent = msg;
-        globalNotifyBox.style.color = color;
-        globalNotifyBox.style.display = "block";
-        clearTimeout(globalNotifyBox._hideTimer);
-        globalNotifyBox._hideTimer = setTimeout(()=>{
-            globalNotifyBox.style.display = "none";
-        }, time);
-    }
-
-    // SHADOW DOM UI
+    // ==== UI ====
     shadow.innerHTML = `
         <style>
             :host { all: initial; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-            #bubble { position: fixed; top: 20px; right: 20px; width: 50px; height: 50px; border-radius: 50%;
-                background: ${config.themeColor}; background-image: url('${config.bubbleIcon}');
+            #bubble { position: fixed; top: 20px; right: 20px; width: 46px; height: 46px; border-radius: 50%;
+                background: #4a6bdf; background-image: url('https://cdn-icons-png.flaticon.com/512/1995/1995485.png');
                 background-size: 60%; background-repeat: no-repeat; background-position: center; cursor: pointer;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 9999; transition: all 0.3s ease; border: 2px solid white; }
-            #bubble:hover { transform: scale(1.1); box-shadow: 0 6px 16px rgba(0,0,0,0.2); }
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 9999; border: 2px solid white;}
+            #bubble:hover { transform: scale(1.08);}
             #overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.5);
-                display: none; justify-content: center; align-items: center; z-index: 9998; }
-            #modal { width: 380px; background: transparent; border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.2);
-                overflow: hidden; animation: fadeIn 0.3s ease; position:relative; }
-            @keyframes fadeIn { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
-            #modal-header { background: rgba(74,107,223,0.92); color: white; padding: 16px; font-size: 18px; font-weight: bold;
-                display: flex; justify-content: space-between; align-items: center; z-index:2; position:relative; border-radius: 16px 16px 0 0;}
+                display: flex; justify-content: center; align-items: flex-start; z-index: 9998; }
+            #modal { width: 380px; height: 950px; background: transparent; border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+                overflow: hidden; animation: fadeIn 0.3s ease; position:relative; margin-top:70px;}
+            @keyframes fadeIn { from { opacity: 0; transform: translateY(-24px); } to { opacity: 1; transform: translateY(0); } }
+            #modal-header { 
+                background: #5777db;
+                color: #fff; 
+                padding: 8px 16px 7px 16px;
+                font-size: 1.05rem;
+                font-weight: bold;
+                display: flex; 
+                justify-content: space-between; 
+                align-items: center; 
+                z-index:2; 
+                position:relative; 
+                border-radius: 16px 16px 0 0;
+                letter-spacing: 0.5px;
+                line-height: 1.08;
+                height: 40px;
+            }
+            #modal-header span {
+                font-size: 1.05rem;
+                font-weight: bold;
+                letter-spacing: 0.5px;
+                line-height: 1.08;
+            }
             #modal-content {
-                padding: 20px;
+                padding: 0;
                 position:relative;
-                z-index:2;
-                background: rgba(255,255,255,0.03);
-                box-shadow: 0 4px 30px rgba(0, 0, 0, 0.08);
-                border-radius: 0 0 16px 16px;
+                background: transparent;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                height: 460px;
+            }
+            #modal-bg-video {
+                position: absolute;
+                top: 0; left: 0; width: 100%; height: 100%; object-fit: cover;
+                z-index: 0; border-radius: 0 0 16px 16px; pointer-events: none;
+                opacity: 0.995; filter: blur(0.1px) brightness(1.09) grayscale(0.03) contrast(1.22) saturate(1.16);
+                transition: opacity 0.25s;
+                background: #232b3b;
+            }
+            #modal-inner {
+                position: relative;
+                z-index: 2;
+                width: 100%;
+                height: 100%;
+                padding: 10px 10px 0 10px;
                 display: flex;
                 flex-direction: column;
                 align-items: center;
                 justify-content: center;
             }
-            #theme-row { display: flex; align-items: center; gap: 10px; margin-top: 0; margin-bottom: 0; justify-content: flex-end;}
-            #theme-select {
-                filter: blur(2px) brightness(0.7) grayscale(0.2);
-                opacity: 0.72;
-                transition: filter 0.25s, opacity 0.25s;
-            }
-            #theme-select:focus, #theme-select:hover {
-                filter: none;
-                opacity: 1;
-            }
-            #theme-select { font-size: 14px; padding: 4px 8px; border-radius: 6px; border: 1px solid #ddd;}
-            #theme-add-btn { flex: 0 0 auto; padding: 4px 16px; font-size: 13px; border-radius: 6px;
-                background: #4a6bdf; color: #fff; border: none; cursor: pointer; font-weight: bold; margin: 0 0 0 10px;}
-            #theme-add-btn:hover { background: #304fb7;}
-            #message { min-height: 22px; color: #e74c3c; font-size: 15px; margin-bottom: 12px; text-align: center; background:rgba(0,0,0,0.10); border-radius:6px; padding:4px 6px;}
-            textarea { width: 100%; height: 120px; padding: 10px; border: 1px solid #ddd; border-radius: 6px; resize: none;
-                font-family: monospace; margin-bottom: 12px; background:rgba(255,255,255,0.14); }
-            .button-group { display: flex; gap: 8px; margin-bottom: 12px; }
+            #message { min-height: 20px; color: #e74c3c; font-size: 13px; margin-bottom: 7px; text-align: center; background:rgba(0,0,0,0.10); border-radius:6px; padding:3px 4px;}
+            textarea { width: 100%; height: 80px; padding: 7px; border: 1.2px solid #fff4; border-radius: 10px; resize: none;
+                font-family: monospace; margin-bottom: 8px; background: rgba(255,255,255,0.11); color: #fff; font-size: 0.95em; box-shadow: 0 1.5px 18px #0002; outline: none;}
+            #input::placeholder { color: #fff9; }
+            .button-group { display: flex; gap: 7px; margin-bottom: 7px; width:99%; }
             button {
                 flex: 1;
-                padding: 10px;
+                padding: 9px;
                 border: none;
-                border-radius: 6px;
+                border-radius: 8px;
                 cursor: pointer;
                 font-weight: 500;
-                transition: all 0.2s;
-                opacity: 0.93;
-                background: rgba(74,107,223,0.13);
+                font-size: 0.97em;
+                background: rgba(72,114,181,0.12);
+                color: #fff;
+                transition: background .18s, color .18s;
+                margin: 0 0 0 0;
+            }
+            button:hover, button:focus {
+                background: #5777db;
                 color: #fff;
             }
-            button:hover {
-                opacity: 1;
-                background: #4a6bdf;
-                color: #fff;
-                box-shadow: 0 2px 8px rgba(74,107,223,0.2);
-                transform: translateY(-2px) scale(1.04);
+            #submit { background: #314e92b0;}
+            #logout { background: #a14a4ab0;}
+            #copy { background: #3a7660b0;}
+            #upload { background: #3c4a6eb0;}
+            #auto-trial { 
+                background: #d8b64c; 
+                color: #fff; 
+                font-weight: bold; 
+                margin: 0 0 7px 0;
+                padding: 9px 0;
+                border-radius: 8px;
+                font-size: 0.97em;
+                width: 49%;
+                min-width: 120px;
+                max-width: 180px;
+                align-self: flex-start;
+                transition: background .18s, color .18s;
             }
-            #submit { background: rgba(74,107,223,0.13); }
-            #logout { background: rgba(231,76,60,0.13); }
-            #copy { background: rgba(46,204,113,0.13); }
-            #cancel { background: rgba(149,165,166,0.13); }
-            #auto-trial { width: 100%; background: rgba(243,156,18,0.18); color: white; font-weight: bold; margin-top: 8px; }
+            #auto-trial:hover { background: #c7a238; color: #232733;}
             #modal-footer {
                 text-align: center;
-                padding: 12px;
-                font-size: 12px;
+                padding: 10px 0 6px 0;
+                font-size: 11.5px;
                 color: #fff;
-                border-top: 1px solid rgba(240,242,245,0.18);
-                position:relative;
-                z-index:2;
-                background: rgba(74,107,223,0.08);
+                border-top: 1px solid rgba(240,242,245,0.16);
+                background: transparent;
                 border-radius: 0 0 16px 16px;
+                z-index: 2;
+                position: relative;
             }
-            #ug-toast {
-                min-width: 120px;
-                max-width: 380px;
-                position: fixed;
-                left: 50%;
-                top: 34px;
-                transform: translateX(-50%);
-                background: #232b3bcc;
-                color: #eaf1ff;
-                font-size: 13px;
-                font-weight: 500;
-                border-radius: 6px;
-                box-shadow: 0 4px 10px #0001;
-                padding: 6px 18px 6px 10px;
-                z-index: 10000;
-                display: flex;
-                align-items: center;
-                gap: 7px;
-                border: 1px solid #4a6bdf;
-                pointer-events: none;
-                opacity: 0.98;
-                transition: opacity .22s;
-                letter-spacing: 0.01em;
-                justify-content: center;
-                flex-direction: row;
+            #theme-row {
+                display: flex; align-items: center; gap: 8px; margin-top: 2px; margin-bottom: 0; justify-content: flex-end; width: 100%;
             }
-            #ug-toast .ug-toast-icon {
-                font-size: 16px;
-                font-weight: bold;
-                color: #6a8af7;
-                margin-right: 5px;
+            #theme-select {
+                font-size: 13px; padding: 3px 6px; border-radius: 6px; border: 1px solid #8fa2e9; background: #f7faff;
+                color: #3a3a4a; font-weight: 500; min-width: 108px;
             }
-            #ug-toast b {
-                font-size: 13px;
-                color: #89a6f7;
-                font-weight: 700;
-                margin-left: 4px;
-            }
-            #theme-popup-outer {
-                display:none; position:fixed; z-index:1000001; top:0; left:0; width:100vw; height:100vh; 
-                background:rgba(0,0,0,0.45); align-items:center; justify-content:center;
-            }
-            #theme-popup-inner {
-                background:#242e4b; color:#fff; border-radius:12px; padding:28px 30px; min-width:280px; max-width:92vw; box-shadow:0 2px 24px #0008;
-                display:flex; flex-direction:column; gap:12px; align-items:stretch; position:relative;
-                font-size: 16px;
-                z-index: 1000002;
-            }
-            #theme-popup-inner input {
-                padding:7px 11px;
-                border-radius:7px;
-                font-size:15px;
-                border:1.5px solid #4a6bdf;
-                color:#fff;
-                background:#1a2034;
-                margin-bottom: 6px;
-                outline: none;
-                transition: border-color .2s;
-            }
-            #theme-popup-inner input:focus {
-                border-color: #6a93ff;
-            }
-            #theme-popup-title {
-                font-size:19px;
-                margin-bottom:5px;
-                font-weight:bold;
-                color:#ffda6a;
-                text-align:center;
-            }
-            #theme-popup-msg {
-                min-height: 22px;
-                color: #f7f191;
-                background: #2b2c36;
-                border-radius: 5px;
-                padding: 6px 9px;
-                margin: 2px 0 0 0;
-                font-size: 14px;
-                text-align: center;
-                word-break: break-word;
-                white-space: pre-wrap;
-            }
-            #theme-popup-close {
-                position:absolute;top:7px;right:15px;background:none;border:none;font-size:23px;color:#fff;cursor:pointer;line-height:1;
-            }
-            #theme-popup-btns {
-                display:flex;gap:8px;margin-top:13px;
-            }
-            #theme-popup-ok {
-                flex:1;background:#4a6bdf;border:none;border-radius:7px;color:#fff;font-weight:bold;padding:8px 0;font-size:16px;cursor:pointer;
-            }
-            #theme-popup-cancel {
-                flex:1;background:#555b75;border:none;border-radius:7px;color:#fff;padding:8px 0;font-size:16px;cursor:pointer;
-            }
+            #theme-add-btn { flex: 0 0 auto; padding: 4px 10px; font-size: 12px; border-radius: 7px;
+                background: #4a6bdf; color: #fff; border: none; cursor: pointer; font-weight: bold; margin: 0 0 0 8px;}
+            #theme-add-btn:hover { background: #304fb7;}
+            #theme-popup-outer { display:none; position:fixed; z-index:1000001; top:0; left:0; width:100vw; height:100vh;
+                background:rgba(0,0,0,0.45); align-items:center; justify-content:center; }
+            #theme-popup-inner { background:#242e4b; color:#fff; border-radius:12px; padding:24px 18px; min-width:180px; max-width:92vw; box-shadow:0 2px 24px #0008;
+                display:flex; flex-direction:column; gap:10px; align-items:stretch; position:relative; font-size: 14px; z-index: 1000002;}
+            #theme-popup-inner input { padding:6px 9px; border-radius:7px; font-size:13px; border:1.5px solid #4a6bdf; color:#fff; background:#1a2034; margin-bottom: 4px; outline: none; transition: border-color .2s;}
+            #theme-popup-inner input:focus { border-color: #6a93ff;}
+            #theme-popup-title { font-size:15px; margin-bottom:3px; font-weight:bold; color:#ffda6a; text-align:center;}
+            #theme-popup-msg { min-height: 18px; color: #f7f191; background: #2b2c36; border-radius: 5px; padding: 4px 6px; margin: 2px 0 0 0; font-size: 12px; text-align: center; word-break: break-word;}
+            #theme-popup-close { position:absolute;top:6px;right:13px;background:none;border:none;font-size:17px;color:#fff;cursor:pointer;line-height:1;}
+            #theme-popup-btns { display:flex;gap:6px;margin-top:11px;}
+            #theme-popup-ok { flex:1;background:#4a6bdf;border:none;border-radius:7px;color:#fff;font-weight:bold;padding:6px 0;font-size:13px;cursor:pointer;}
+            #theme-popup-cancel { flex:1;background:#555b75;border:none;border-radius:7px;color:#fff;padding:6px 0;font-size:13px;cursor:pointer;}
             #theme-popup-ok:hover {background:#2c4ac2;}
             #theme-popup-cancel:hover {background:#313448;}
-            /* SỬA LỖI VIDEO PHÓNG TO */
-            .bg-video {
-                position: absolute;
-                top: 0; left: 0;
-                width: 100%;
-                height: 100%;
-                object-fit: cover;
-                z-index: 0;
-                border-radius: 16px;
-                pointer-events: none;
-            }
-            #modal-content {
-                position: relative;
-                z-index: 2;
+            #ugphone-global-notify {
+                position:fixed;top:22px;right:85px;z-index:10000000;
+                min-width:170px;max-width:320px;
+                background:rgba(33,39,68,0.97);
+                color:#ffe666;
+                font-size:13px;
+                font-weight:bold;
+                border-radius:8px;
+                box-shadow:0 4px 24px #0006;
+                padding:8px 16px 8px 12px;
+                display:none;
+                align-items:center;
+                gap:8px;
+                border:2px solid #4a6bdf;
+                transition: all .22s;
+                pointer-events:none;
+                text-align:left;
+                white-space:pre-line;
             }
         </style>
         <div id="bubble" title="UGPHONE VIP TOOL"></div>
@@ -271,33 +197,38 @@
             <div id="modal">
                 <div id="modal-header">
                     <span>UGPHONE VIP TOOL</span>
-                    <span id="close-modal" style="cursor:pointer">×</span>
+                    <span id="close-modal" style="cursor:pointer;font-size:1.3rem;font-weight:bold;line-height:0.7;">×</span>
                 </div>
                 <div id="modal-content">
-                    <div id="message"></div>
-                    <textarea id="input" placeholder='Nhập nội dung JSON tại đây...' style="display:block;margin:auto;"></textarea>
-                    <div class="button-group" style="justify-content:center;">
-                        <button id="submit">Đăng nhập</button>
-                        <button id="logout">Đăng xuất</button>
-                    </div>
-                    <div class="button-group" style="justify-content:center;">
-                        <button id="copy">Sao chép</button>
-                    </div>
-                    <button id="auto-trial">${config.autoBtnText}</button>
-                    <div id="theme-row">
-                        <label for="theme-select" style="color:#fff">Theme:</label>
-                        <select id="theme-select"></select>
-                        <button id="theme-add-btn" type="button">+ Thêm theme</button>
+                    <video id="modal-bg-video" autoplay loop muted playsinline preload="auto" style="display:none"></video>
+                    <div id="modal-inner">
+                        <div id="message"></div>
+                        <textarea id="input" placeholder='Nhập nội dung JSON tại đây...'></textarea>
+                        <div class="button-group" style="justify-content:center;">
+                            <button id="submit">Đăng nhập</button>
+                            <button id="logout">Đăng xuất</button>
+                        </div>
+                        <div class="button-group" style="justify-content:center;">
+                            <button id="copy">Sao chép</button>
+                            <button id="upload">Tải lên</button>
+                        </div>
+                        <div class="button-group" style="justify-content:center;margin-bottom:8px;">
+                            <button id="auto-trial">AUTO MUA MÁY TRIAL 4H</button>
+                        </div>
+                        <div id="theme-row">
+                            <label for="theme-select" style="color:#fff;font-size:13px;">Theme:</label>
+                            <select id="theme-select"></select>
+                            <button id="theme-add-btn" type="button">+ Thêm theme</button>
+                        </div>
                     </div>
                 </div>
                 <div id="modal-footer">
                     Phát triển bởi Hoàng Anh<br>
-                    <small>Phiên bản 4.4</small>
+                    <small>Phiên bản 4.7</small>
                 </div>
             </div>
         </div>
-        <div id="ug-toast" style="display:none"></div>
-        <!-- POPUP THÊM THEME -->
+        <div id="ugphone-global-notify"></div>
         <div id="theme-popup-outer">
             <div id="theme-popup-inner">
                 <button id="theme-popup-close" title="Đóng">×</button>
@@ -313,13 +244,21 @@
         </div>
     `;
 
-    // Video logic
-    const modal = shadow.getElementById('modal');
+    // ==== DOM refs ====
+    const overlay = shadow.getElementById('overlay');
+    const bubble = shadow.getElementById('bubble');
+    const closeModal = shadow.getElementById('close-modal');
     const themeSelect = shadow.getElementById('theme-select');
     const themeAddBtn = shadow.getElementById('theme-add-btn');
-    let overlay = shadow.getElementById('overlay');
-
-    // POPUP DOM
+    const videoBg = shadow.getElementById('modal-bg-video');
+    const btnUpload = shadow.getElementById('upload');
+    const btnSubmit = shadow.getElementById('submit');
+    const btnLogout = shadow.getElementById('logout');
+    const btnCopy = shadow.getElementById('copy');
+    const btnAuto = shadow.getElementById('auto-trial');
+    const txtArea = shadow.getElementById('input');
+    const messageEl = shadow.getElementById('message');
+    // Theme popup
     const themePopup = shadow.getElementById('theme-popup-outer');
     const themePopupInputName = shadow.getElementById('theme-input-name');
     const themePopupInputUrl = shadow.getElementById('theme-input-url');
@@ -327,22 +266,45 @@
     const themePopupOk = shadow.getElementById('theme-popup-ok');
     const themePopupCancel = shadow.getElementById('theme-popup-cancel');
     const themePopupClose = shadow.getElementById('theme-popup-close');
+    const globalNotifyBox = shadow.getElementById('ugphone-global-notify');
 
-    // Message function - bảng ngoài menu
+    // ==== Notify helpers ====
+    function showGlobalNotify(msg, color="#ffe666", time=3000) {
+        globalNotifyBox.textContent = msg;
+        globalNotifyBox.style.color = color;
+        globalNotifyBox.style.display = "block";
+        clearTimeout(globalNotifyBox._hideTimer);
+        globalNotifyBox._hideTimer = setTimeout(()=>{
+            globalNotifyBox.style.display = "none";
+        }, time);
+    }
     function showMsg(msg, color="#ffe666", timeout=2600) {
-        showGlobalNotify(msg, color, timeout);
-        const el = shadow.getElementById('message');
-        el.textContent = msg;
-        el.style.color = color;
-        el.style.background = "#232b3b";
-        setTimeout(()=>{if(el.textContent===msg)el.textContent=''}, timeout);
+        messageEl.textContent = msg;
+        messageEl.style.color = color;
+        setTimeout(()=>{if(messageEl.textContent===msg)messageEl.textContent=''}, timeout);
+        showGlobalNotify(msg, color, timeout+600);
     }
-    // THÔNG BÁO THEME RA NGOÀI
-    function showThemeNotify(msg, color="#ffe666", timeout=3200) {
-        showGlobalNotify("[Theme] " + msg, color, timeout);
+    function showThemeNotify(msg, color="#92ffb3", timeout=3500) {
+        showMsg("[Theme] "+msg, color, timeout);
     }
 
-    // ==== GITHUB: Tải theme từ GitHub ====
+    // ==== Theme video background ====
+    function setThemeVideo(idx, noSave) {
+        if (!videoBg) return;
+        if (typeof idx !== "number" || !themes[idx] || !themes[idx].url) {
+            videoBg.style.display = "none";
+            videoBg.src = "";
+            return;
+        }
+        videoBg.src = themes[idx].url;
+        videoBg.currentTime = 0;
+        videoBg.loop = true;
+        videoBg.muted = true;
+        videoBg.style.display = "block";
+        try { videoBg.play(); } catch(e) {}
+        if(!noSave) localStorage.setItem('ugphone_video_theme', idx);
+    }
+    // ==== Load/save theme from GitHub ====
     async function loadThemesFromGitHub(callback) {
         showThemeNotify("Đang tải theme từ GitHub...");
         try {
@@ -352,10 +314,9 @@
                     "Accept": "application/vnd.github.v3+json"
                 }
             });
-            if (r.status === 404) {
-                themes = [];
-                renderThemeSelect();
-                showThemeNotify("File theme chưa tồn tại trên Github!","#e74c3c");
+            if (!r.ok) {
+                const errText = await r.text();
+                showThemeNotify(`[Theme] Lỗi HTTP ${r.status}: ${errText}`,"#e74c3c", 4000);
                 if(callback) callback(false);
                 return;
             }
@@ -374,7 +335,7 @@
                         themeIndex = 0;
                     }
                     renderThemeSelect();
-                    showThemeNotify("Đã tải danh sách theme mới từ Github!","#80ffb3");
+                    showThemeNotify("Danh sách theme đã làm mới từ Github!","#92ffb3");
                     if(callback) callback(true);
                     return;
                 }
@@ -388,8 +349,6 @@
             if(callback) callback(false);
         }
     }
-
-    // ==== GITHUB: Lưu theme lên GitHub 1 dòng ====
     async function saveThemesToGitHub(callback) {
         showPopupMsg("Đang lưu lên GitHub...", "#ffe666");
         showThemeNotify("Đang lưu theme lên GitHub...", "#ffe666", 3500);
@@ -405,7 +364,6 @@
             message: "Update themes (array 1 dòng)",
             content: content
         };
-        // Nếu có sha thì mới gán để tránh lỗi ghi lần đầu
         if(sha) body.sha = sha;
         fetch(`https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${GITHUB_FILE}`, {
             method: "PUT",
@@ -432,7 +390,6 @@
         });
     }
 
-    // Render select theme
     function renderThemeSelect() {
         themeSelect.innerHTML = "";
         if (!themes.length) {
@@ -454,46 +411,7 @@
         setThemeVideo(themeIndex, true);
     }
 
-    // Play video theme
-    function setThemeVideo(idx, noSave) {
-        if (!modal) return;
-        // Xóa video cũ
-        if (videoTag) { videoTag.pause(); videoTag.remove(); videoTag = null; }
-        // Không có theme thì thôi
-        if (idx === null || !themes[idx] || !themes[idx].url) return;
-        // Chèn video làm nền
-        videoTag = document.createElement('video');
-        Object.assign(videoTag, {
-            src: themes[idx].url,
-            autoplay: true,
-            loop: true,
-            muted: false,
-            volume: 1.0,
-            playsInline: true,
-            controls: true,
-            preload: "auto"
-        });
-        videoTag.className = "bg-video";
-        modal.querySelector('#modal-content').prepend(videoTag);
-        videoTag.volume = 1.0;
-        setTimeout(() => {
-            videoTag.play().catch(() => {
-                showThemeNotify('Nếu video không phát, hãy click lại menu hoặc click vào màn hình để bật nhạc nền!', "#ffb366", 4000);
-            });
-        }, 100);
-        if(!noSave) localStorage.setItem('ugphone_video_theme', idx);
-    }
-
-    // Đổi theme khi chọn select
-    themeSelect.addEventListener('change', function() {
-        themeIndex = parseInt(this.value,10);
-        setThemeVideo(themeIndex);
-        localStorage.setItem('ugphone_video_theme', themeIndex);
-        showThemeNotify("Đã đổi theme nền video!", "#afe7ff", 2000);
-    });
-
-    // Khi mở menu (bubble), tự động tải theme mới nhất từ GitHub và play video
-    const bubble      = shadow.getElementById('bubble');
+    // ==== UI logic ====
     bubble.addEventListener('click', () => {
         overlay.style.display = 'flex';
         loadThemesFromGitHub(function(success) {
@@ -510,34 +428,39 @@
             }
         });
         setTimeout(() => {
-            if(videoTag) videoTag.play().catch(() => {
-                showThemeNotify('Nếu video không phát, hãy click lại menu hoặc click vào màn hình để bật nhạc nền!', "#ffb366", 4000);
-            });
+            if(videoBg && videoBg.src) videoBg.play().catch(() => {});
         }, 120);
     });
-
-    const closeModal  = shadow.getElementById('close-modal');
     closeModal.addEventListener('click', () => { overlay.style.display = 'none'; });
 
-    // =========== POPUP THÊM THEME =============
+    themeSelect.addEventListener('change', function() {
+        themeIndex = parseInt(this.value,10);
+        setThemeVideo(themeIndex);
+        localStorage.setItem('ugphone_video_theme', themeIndex);
+        showThemeNotify("Đã đổi theme nền video!", "#afe7ff", 2000);
+    });
+
+    // Thêm theme popup
+    themeAddBtn.onclick = () => {
+        themePopup.style.display = 'flex';
+        themePopupInputName.value = "";
+        themePopupInputUrl.value = "";
+        showPopupMsg("Nhập tên và link mp4 theme mới","#ffe666");
+        setTimeout(() => { themePopupInputName.focus(); }, 120);
+    };
     function showPopupMsg(msg, color="#ffe666") {
         themePopupMsg.textContent = msg;
         themePopupMsg.style.color = color;
-        themePopupMsg.style.background = "#2b2c36";
-        showThemeNotify(msg, color, 3500);
     }
-
     themePopupClose.onclick = themePopupCancel.onclick = () => {
         themePopup.style.display = 'none';
         themePopupMsg.textContent = '';
     };
-
     themePopupOk.onclick = async () => {
         const pname = themePopupInputName.value.trim();
         const purl  = themePopupInputUrl.value.trim();
         if (!pname || !purl) return showPopupMsg("Nhập đầy đủ tên và url", "#ffb366");
         if (!/^https?:\/\/.+\.mp4(\?.*)?$/i.test(purl)) return showPopupMsg("Link mp4 không hợp lệ", "#e74c3c");
-        // Xoá nếu trùng tên hoặc url
         let idx = themes.findIndex(t => t.name.toLowerCase() === pname.toLowerCase() || t.url === purl);
         if (idx >= 0) themes.splice(idx, 1);
         themes.push({name: pname, url: purl});
@@ -553,24 +476,32 @@
         setTimeout(()=>{themePopup.style.display='none';}, 1200);
     };
 
-    // Thay sự kiện nút "Thêm theme" thành mở popup
-    themeAddBtn.onclick = () => {
-        themePopup.style.display = 'flex';
-        themePopupInputName.value = "";
-        themePopupInputUrl.value = "";
-        showPopupMsg("Nhập tên và link mp4 theme mới","#ffe666");
-        setTimeout(() => { themePopupInputName.focus(); }, 120);
+    // Upload theme JSON
+    btnUpload.onclick = () => {
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = '.json,application/json';
+        fileInput.onchange = async (e) => {
+            const file = fileInput.files[0];
+            if (!file) return;
+            const text = await file.text();
+            try {
+                const arr = JSON.parse(text);
+                if (Array.isArray(arr)) {
+                    themes = arr;
+                    renderThemeSelect();
+                    showThemeNotify('Đã tải theme từ file JSON!');
+                } else {
+                    showThemeNotify('File không đúng định dạng theme (array)!', "#e74c3c");
+                }
+            } catch (err) {
+                showThemeNotify('Lỗi đọc file JSON: ' + err.message, "#e74c3c");
+            }
+        };
+        fileInput.click();
     };
 
-    // ============ Các nút còn lại đều thông báo ============
-    const messageEl   = shadow.getElementById('message');
-    const btnSubmit   = shadow.getElementById('submit');
-    const btnLogout   = shadow.getElementById('logout');
-    const btnCopy     = shadow.getElementById('copy');
-    const btnAuto     = shadow.getElementById('auto-trial');
-    const txtArea     = shadow.getElementById('input');
-    const ugToast     = shadow.getElementById('ug-toast');
-
+    // Nhập localStorage
     btnSubmit.addEventListener('click', () => {
         const text = txtArea.value.trim();
         if (!text) { showMsg('Vui lòng nhập JSON!', "#e74c3c", 3000); return; }
@@ -607,54 +538,17 @@
          .catch(() => showMsg('Copy thất bại', "#e74c3c", 3000));
     });
 
-    // Toast giữ nguyên
-    function showToast(msg, timeout = 1800) {
-        ugToast.innerHTML = `<span class="ug-toast-icon">⚡</span>${msg}`;
-        ugToast.style.display = 'flex';
-        ugToast.style.opacity = 0.98;
-        clearTimeout(ugToast._hideTimer);
-        clearInterval(ugToast._timerInterval);
-        ugToast._hideTimer = setTimeout(() => {
-            ugToast.style.opacity = 0;
-            setTimeout(() => { ugToast.style.display = 'none'; }, 260);
-        }, timeout);
-    }
-
-    // Auto mua máy trial thông báo chỉ bảng ngoài menu
-    function showAutoToast(startText = "Đang mua gói trial 4h…", icon = "⚡") {
-        let seconds = 1;
-        showGlobalNotify(startText+` (${seconds}s)`, "#ffe666", 60000);
-        ugToast.innerHTML = `<span class="ug-toast-icon">${icon}</span>${startText}<b> (${seconds}s)</b>`;
-        ugToast.style.display = 'none'; // Không hiện toast cục bộ nữa
-        clearTimeout(ugToast._hideTimer);
-        clearInterval(ugToast._timerInterval);
-        const timeElem = ugToast.querySelector('b');
-        ugToast._timerInterval = setInterval(() => {
-            seconds += 1;
-            if (timeElem) timeElem.textContent = ` (${seconds}s)`;
-            globalNotifyBox.textContent = startText+` (${seconds}s)`;
-        }, 1000);
-    }
-    function clearAutoToast(newMsg = null, timeout = 2000, icon = "✅") {
-        clearInterval(ugToast._timerInterval);
-        if (newMsg) {
-            showGlobalNotify(newMsg, "#b3ffb3", timeout+500);
-        } else {
-            globalNotifyBox.style.display = "none";
-        }
-    }
-
+    // Auto mua máy trial
     btnAuto.addEventListener('click', async () => {
         if (btnAuto.disabled) return;
-        showAutoToast("Đang tự động mua gói trial 4h…", "⚡");
+        showMsg("Đang tự động mua gói trial 4h…", "#ffe666", 6000);
         btnAuto.disabled = true;
-        btnAuto.innerHTML = '<span class="spinner"></span>' + config.autoBtnText;
+        btnAuto.innerHTML = '<span class="spinner"></span> AUTO MUA MÁY TRIAL 4H';
         try {
             let domain = window.location.hostname;
             if (!(domain === 'www.ugphone.com' || domain === 'ugphone.com')) {
-                clearAutoToast('Vui lòng vào trang ugphone.com', 2600, "⚠️");
                 showMsg("Vui lòng vào trang ugphone.com","#e74c3c",3500);
-                btnAuto.disabled = false; btnAuto.textContent = config.autoBtnText;
+                btnAuto.disabled = false; btnAuto.textContent = "AUTO MUA MÁY TRIAL 4H";
                 return;
             }
             const mqtt = JSON.parse(localStorage.getItem('UGPHONE-MQTT') || '{}');
@@ -695,7 +589,6 @@
                     await new Promise(r=>setTimeout(r,5000));
                     const payJson = await xhrRequest('POST', 'https://www.ugphone.com/api/apiv1/fee/payment', { amount_id, pay_channel: 'free' }, headers);
                     if (payJson.code === 200) {
-                        clearAutoToast('Đã mua thành công!', 2200, "✅");
                         showMsg("Đã mua thành công trial 4h!", "#b3ffb3", 4000);
                         success = true;
                         location.reload();
@@ -704,11 +597,10 @@
                 }
             }
         } catch (e) {
-            clearAutoToast('Lỗi: ' + e.message, 2800, "❌");
             showMsg("Lỗi auto mua: "+e.message, "#e74c3c", 4000);
         } finally {
             btnAuto.disabled = false;
-            btnAuto.textContent = config.autoBtnText;
+            btnAuto.textContent = "AUTO MUA MÁY TRIAL 4H";
         }
     });
 
