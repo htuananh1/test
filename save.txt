@@ -1,1 +1,17 @@
-{}
+{
+"máy rửa chén công nghiệp": "Storytelling",
+        "Bác sĩ Nguyên Giáp ưu đãi": "0909886054",
+        "nền tảng affiliate marketing": "AffiliatePlatform",
+        "công ty hoàng việt travel": "/2015/CDLQGVN",
+        "máy rửa chén bát công nghiệp": "0972222958",
+        "trần xuyên sáng": "315476699",
+        "affiliate network permate": "AffiliatePlatform",
+        "máy sục ozone": "0972222958",
+        "nước hoa nữ cao cấp gucci bloom": "0824422828",
+        "set nước hoa victoria secret": "0824422828",
+        "gửi hàng đi mỹ": "989799622",
+        "hút bể phốt tại hưng yên": "24/2424/24",
+        "chivas 12": "Annabel Meikle",
+        "lưới thép hàn": "301155522",
+        "creed aventus": "0824422828",
+}
