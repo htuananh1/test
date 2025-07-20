@@ -1,396 +1,242 @@
 // ==UserScript==
-// @name         VSPhone - UI mobile menu trang, random từng mã/100 mã, auto reload, lưu local
+// @name         VSPhone - UI gọn nhẹ (Blob Menu), Quản lý Dữ liệu
 // @namespace    http://tampermonkey.net/
-// @version      5.0
-// @description  UI mobile menu trang, random từng mã 1s (auto reload), hoặc 100 mã/lần, lưu local, xuất/xem/reset mã đã random
-// @author       OpenAI
+// @version      8.1
+// @description  Giao diện đẹp hơn, có hiệu ứng khi chạy (pulsing blob, progress bar), delay 1.5s.
+// @author       OpenAI & Gemini
 // @match        https://cloud.vsphone.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
-// @run-at       document-idle
+// @run-at       document-end
 // ==/UserScript==
 
 (function() {
     'use strict';
+    console.log('[VSPhone Tool v8.1] Script loading...');
 
     // ==== CONFIG ====
     const CONFIG = {
         CHARSET: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',
         LENGTH: 9,
         PREFIX: 'CA',
-        BATCH_SIZE: 100,
-        DELAY_MS: 3000,
-        DELAY_ONE: 1000
+        BATCH_SIZE: 5000,
+        DELAY_MS: 1500 // << ĐÃ SỬA: Thời gian delay 1,5 giây
     };
 
-    // ==== RANDOM CODE ====
-    class CodeRandom {
-        constructor(charset, length, prefix) {
-            this.charset = charset;
-            this.length = length;
-            this.prefix = prefix;
-            this.triedCodes = new Set();
-        }
-        async loadTriedCodes() {
-            const saved = await GM_getValue('vsphone_tried_codes', []);
-            saved.forEach(code => this.triedCodes.add(code));
-        }
-        async saveTriedCodes() {
-            await GM_setValue('vsphone_tried_codes', Array.from(this.triedCodes));
-        }
-        randomCode() {
-            let code = '';
-            for (let i = 0; i < this.length; i++) {
-                code += this.charset.charAt(Math.floor(Math.random() * this.charset.length));
-            }
-            return this.prefix + code;
-        }
-        randomBatch(size) {
-            const batch = [];
-            let tries = 0;
-            while (batch.length < size && tries < size * 200) {
-                const code = this.randomCode();
-                if (!this.triedCodes.has(code)) {
-                    batch.push(code);
-                    this.triedCodes.add(code);
-                }
-                tries++;
-            }
-            return batch;
-        }
-        randomOne() {
-            let tries = 0;
-            while (tries < 10000) {
-                const code = this.randomCode();
-                if (!this.triedCodes.has(code)) {
-                    this.triedCodes.add(code);
-                    return code;
-                }
-                tries++;
-            }
-            return null;
-        }
+    // =========================================================================
+    // ==== UI & NAVIGATION ====
+    // =========================================================================
+
+    function injectGlobalStyles() {
+        document.getElementById('vsphone-styles')?.remove();
+        const style = document.createElement('style');
+        style.id = 'vsphone-styles';
+        style.textContent = `
+            /* General */
+            #vsphone-blob-container { position: fixed; bottom: 20px; right: 20px; z-index: 99998; }
+            #vsphone-blob { width: 55px; height: 55px; background: linear-gradient(135deg, #00b894, #0984e3); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-size: 28px; cursor: pointer; box-shadow: 0 4px 15px rgba(0,0,0,0.2); transition: transform 0.2s ease; user-select: none; }
+            #vsphone-blob:hover { transform: scale(1.1); }
+            #vsphone-menu-panel { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 99999; display: none; align-items: center; justify-content: center; }
+            #vsphone-menu { background: #1c2128; color: #fff; font-family: 'Segoe UI', sans-serif; width: 90vw; max-width: 420px; border-radius: 18px; display: flex; flex-direction: column; box-shadow: 0 5px 20px rgba(0,0,0,0.3); animation: vs-fadein 0.3s; }
+            @keyframes vs-fadein { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+
+            /* Running Effect */
+            #vsphone-blob.is-running { animation: vs-pulse 1.5s infinite; }
+            @keyframes vs-pulse { 0% { box-shadow: 0 0 0 0 rgba(0, 184, 148, 0.7); } 70% { box-shadow: 0 0 0 15px rgba(0, 184, 148, 0); } 100% { box-shadow: 0 0 0 0 rgba(0, 184, 148, 0); } }
+
+            /* Header & Tabs */
+            #vsphone-menu .vs-header { padding: 15px; text-align: center; font-size: 20px; font-weight: 700; color: #00b894; background: #2d333b; border-radius: 18px 18px 0 0; position: relative; }
+            #vsphone-menu .vs-close { position: absolute; right: 15px; top: 50%; transform: translateY(-50%); font-size: 28px; color: #b2bec3; cursor: pointer; line-height: 1; }
+            .vs-tabs { display: flex; background: #2d333b; border-bottom: 1px solid #444c56; }
+            .vs-tab { flex: 1; text-align: center; padding: 12px 0; font-size: 16px; cursor: pointer; color: #b2bec3; border-bottom: 3px solid transparent; transition: all 0.2s; }
+            .vs-tab:hover { background: #444c56; }
+            .vs-tab.active { color: #00b894; border-bottom-color: #00b894; font-weight: 600; }
+
+            /* Content & Buttons */
+            .vs-content { padding: 20px; }
+            .action-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+            .vs-btn { width: 100%; background: linear-gradient(90deg,#00b894,#0984e3); color: #fff; border: none; border-radius: 8px; padding: 13px 0; font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+            .vs-btn:hover { opacity: 0.9; transform: translateY(-2px); }
+            .vs-btn.stop { background: #d63031; }
+            .vs-btn.secondary { background: #636e72; }
+            .vs-btn.danger-outline { margin-top: 15px; background: transparent; border: 1px solid #d63031; color: #d63031; }
+            .vs-btn.danger-outline:hover { background: #d63031; color: white; }
+
+            /* Status & Progress Bar */
+            .vs-status-area { margin-top: 15px; font-size: 15px; min-height: 40px; text-align: center; }
+            .vs-status-text { color: #00b894; margin-bottom: 8px; }
+            .progress-bar-container { height: 6px; background: #2d333b; border-radius: 3px; overflow: hidden; }
+            #vs-progress-bar { height: 100%; width: 0%; background: #00b894; border-radius: 3px; transition: width 0.1s linear; }
+
+            /* Data Management Tab */
+            #vs-all-codes-list { width: 100%; height: 150px; background: #2d333b; color: #fff; border: 1px solid #444c56; border-radius: 8px; padding: 10px; font-size: 14px; resize: vertical; margin-top: 5px; }
+        `;
+        document.head.appendChild(style);
     }
 
-    // ==== FILE SAVE ====
-    function saveCodesToFile(codes) {
-        const blob = new Blob([codes.join('\n')], {type: 'text/plain'});
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        const now = new Date();
-        const name = `vsphone_codes_${now.getFullYear()}${(now.getMonth()+1).toString().padStart(2,'0')}${now.getDate().toString().padStart(2,'0')}_${now.getHours().toString().padStart(2,'0')}${now.getMinutes().toString().padStart(2,'0')}${now.getSeconds().toString().padStart(2,'0')}.txt`;
-        a.download = name;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-        }, 1000);
-    }
-
-    // ==== UI MOBILE MENU ====
-    function createMobileMenu() {
-        // Xóa menu cũ nếu có
-        const old = document.getElementById('vsphone-menu');
-        if (old) old.remove();
+    function createMenuAndBlob() {
+        document.getElementById('vsphone-blob-container')?.remove();
+        document.getElementById('vsphone-menu-panel')?.remove();
+        
+        const blobContainer = document.createElement('div');
+        blobContainer.id = 'vsphone-blob-container';
+        blobContainer.innerHTML = `<div id="vsphone-blob" title="Mở VSPhone Tool">⚙️</div>`;
 
         const panel = document.createElement('div');
-        panel.id = 'vsphone-menu';
+        panel.id = 'vsphone-menu-panel';
         panel.innerHTML = `
-            <style>
-                #vsphone-menu {
-                    position: fixed; left: 0; top: 0; width: 100vw; height: 100vh; background: #181c24;
-                    color: #fff; z-index: 99999; font-family: 'Segoe UI',sans-serif; display: flex; flex-direction: column;
-                }
-                #vsphone-menu .vs-header {
-                    padding: 18px 0 10px 0; text-align: center; font-size: 22px; font-weight: 700; color: #00b894;
-                    background: #23272f; border-bottom: 1px solid #333;
-                }
-                #vsphone-menu .vs-tabs {
-                    display: flex; border-bottom: 1px solid #333; background: #23272f;
-                }
-                #vsphone-menu .vs-tab {
-                    flex: 1; text-align: center; padding: 12px 0; font-size: 17px; cursor: pointer;
-                    color: #b2bec3; border-bottom: 2px solid transparent; transition: 0.2s;
-                }
-                #vsphone-menu .vs-tab.active {
-                    color: #00b894; border-bottom: 2.5px solid #00b894; background: #181c24;
-                }
-                #vsphone-menu .vs-content {
-                    flex: 1; overflow-y: auto; padding: 18px 18px 30px 18px; font-size: 16px;
-                }
-                #vsphone-menu .vs-btn {
-                    width: 100%; background: linear-gradient(90deg,#00b894,#0984e3); color: #fff; border: none;
-                    border-radius: 8px; padding: 15px 0; font-size: 18px; font-weight: 600; margin: 12px 0;
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.08); cursor: pointer; transition: background 0.2s;
-                }
-                #vsphone-menu .vs-btn.stop { background: #d63031; }
-                #vsphone-menu .vs-btn.reset { background: #636e72; }
-                #vsphone-menu .vs-btn.export { background: #00b894; }
-                #vsphone-menu .vs-btn.view { background: #0984e3; }
-                #vsphone-menu .vs-status {
-                    margin: 18px 0 0 0; font-size: 16px; min-height: 24px; color: #00b894; text-align: center;
-                }
-                #vsphone-menu .vs-select {
-                    width: 100%; padding: 12px; font-size: 17px; border-radius: 8px; border: 1px solid #636e72;
-                    background: #23272f; color: #fff; margin-bottom: 18px;
-                }
-                #vsphone-menu .vs-list {
-                    background: #23272f; border-radius: 8px; padding: 12px; margin-top: 10px; max-height: 300px; overflow-y: auto;
-                    font-size: 15px; color: #fff;
-                }
-                #vsphone-menu .vs-close {
-                    position: absolute; right: 18px; top: 18px; font-size: 28px; color: #b2bec3; cursor: pointer;
-                }
-                @media (min-width: 600px) {
-                    #vsphone-menu { width: 400px; left: auto; right: 30px; top: 30px; height: auto; border-radius: 18px; }
-                }
-            </style>
-            <div class="vs-header">VSPhone Tool</div>
-            <div class="vs-close" id="vs-close-btn">&times;</div>
-            <div class="vs-tabs">
-                <div class="vs-tab active" id="tab-random">Random</div>
-                <div class="vs-tab" id="tab-view">Xem/Xuất</div>
-                <div class="vs-tab" id="tab-reset">Reset</div>
-            </div>
-            <div class="vs-content" id="vs-content-random">
-                <select class="vs-select" id="vsphone-mode">
-                    <option value="batch">Random 100 mã/lần (delay 3s)</option>
-                    <option value="onebyone">Từng mã 1s (auto reload lỗi)</option>
-                </select>
-                <button class="vs-btn" id="vsphone-start">Bắt đầu</button>
-                <button class="vs-btn stop" id="vsphone-stop">Dừng</button>
-                <div class="vs-status" id="vsphone-status"></div>
-            </div>
-            <div class="vs-content" id="vs-content-view" style="display:none;">
-                <button class="vs-btn export" id="vsphone-export">Xuất file mã đã random</button>
-                <button class="vs-btn view" id="vsphone-view">Xem 100 mã cuối</button>
-                <div class="vs-list" id="vsphone-list" style="margin-top:10px;"></div>
-            </div>
-            <div class="vs-content" id="vs-content-reset" style="display:none;">
-                <button class="vs-btn reset" id="vsphone-reset">Reset mã đã random</button>
+            <div id="vsphone-menu">
+                <div class="vs-header">
+                    <span>VSPhone Tool</span>
+                    <div class="vs-close" id="vs-close-btn">&times;</div>
+                </div>
+                <div class="vs-tabs">
+                    <div class="vs-tab active" data-tab="random">Random</div>
+                    <div class="vs-tab" data-tab="data">Quản lý Dữ liệu</div>
+                </div>
+
+                <div class="vs-content" id="vs-content-random">
+                    <div class="action-grid">
+                        <button class="vs-btn" id="vsphone-start">Bắt đầu</button>
+                        <button class="vs-btn stop" id="vsphone-stop">Dừng</button>
+                    </div>
+                    <div class="vs-status-area">
+                        <div class="vs-status-text" id="vsphone-status">Đã random: <span id="vs-total-codes">0</span> mã</div>
+                        <div class="progress-bar-container">
+                            <div id="vs-progress-bar"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="vs-content" id="vs-content-data" style="display:none;">
+                    <strong>Toàn bộ mã đã thử:</strong>
+                    <textarea id="vs-all-codes-list" readonly placeholder="Chưa có mã nào..."></textarea>
+                    <div class="action-grid" style="margin-top: 15px;">
+                        <button class="vs-btn secondary" id="vs-copy-codes">Chép tất cả</button>
+                        <button class="vs-btn secondary" id="vs-export-codes">Xuất ra File</button>
+                    </div>
+                    <button class="vs-btn danger-outline" id="vs-reset-codes">Xóa toàn bộ Lịch sử</button>
+                </div>
             </div>
         `;
+        document.body.appendChild(blobContainer);
         document.body.appendChild(panel);
-
-        // Tab switching
-        document.getElementById('tab-random').onclick = function() {
-            setTab('random');
-        };
-        document.getElementById('tab-view').onclick = function() {
-            setTab('view');
-            showList();
-        };
-        document.getElementById('tab-reset').onclick = function() {
-            setTab('reset');
-        };
-        document.getElementById('vs-close-btn').onclick = function() {
-            panel.style.display = 'none';
-        };
     }
 
-    function setTab(tab) {
-        document.getElementById('tab-random').classList.remove('active');
-        document.getElementById('tab-view').classList.remove('active');
-        document.getElementById('tab-reset').classList.remove('active');
-        document.getElementById('vs-content-random').style.display = 'none';
-        document.getElementById('vs-content-view').style.display = 'none';
-        document.getElementById('vs-content-reset').style.display = 'none';
-        if (tab === 'random') {
-            document.getElementById('tab-random').classList.add('active');
-            document.getElementById('vs-content-random').style.display = '';
-        } else if (tab === 'view') {
-            document.getElementById('tab-view').classList.add('active');
-            document.getElementById('vs-content-view').style.display = '';
-        } else {
-            document.getElementById('tab-reset').classList.add('active');
-            document.getElementById('vs-content-reset').style.display = '';
-        }
-    }
-
-    function logStatus(msg) {
-        const el = document.getElementById('vsphone-status');
-        if (el) el.innerText = msg;
-    }
-
-    async function showList() {
-        const saved = await GM_getValue('vsphone_tried_codes', []);
-        document.getElementById('vsphone-list').innerText = saved.length
-            ? saved.slice(-100).join('\n')
-            : 'Chưa có mã nào!';
-    }
-
-    // ==== AUTO CLICK MENU ====
-    async function clickGiaHan() {
-        for (let i = 0; i < 20; i++) {
-            const divs = document.querySelectorAll('div.item');
-            for (const div of divs) {
-                if (div.textContent.trim().toLowerCase().includes('gia hạn hàng loạt')) {
-                    div.click();
-                    await new Promise(r => setTimeout(r, 500));
-                    return true;
-                }
-            }
-            await new Promise(r => setTimeout(r, 300));
-        }
-        return false;
-    }
-
-    // ==== MAIN RANDOM LOOP ====
+    // ... Other functions (CodeRandom, makeDraggable, etc.) remain the same
+    class CodeRandom { constructor(charset, length, prefix) { this.charset = charset; this.length = length; this.prefix = prefix; this.triedCodes = new Set(); } async loadTriedCodes() { const saved = await GM_getValue('vsphone_tried_codes', []); this.triedCodes = new Set(saved); } async saveTriedCodes() { await GM_setValue('vsphone_tried_codes', Array.from(this.triedCodes)); } randomCode() { let code = ''; for (let i = 0; i < this.length; i++) { code += this.charset.charAt(Math.floor(Math.random() * this.charset.length)); } return this.prefix + code; } randomBatch(size) { const batch = []; let tries = 0; const maxTries = size * 200; while (batch.length < size && tries < maxTries) { const code = this.randomCode(); if (!this.triedCodes.has(code)) { batch.push(code); this.triedCodes.add(code); } tries++; } return batch; } }
+    const codeRandom = new CodeRandom(CONFIG.CHARSET, CONFIG.LENGTH, CONFIG.PREFIX);
     let stopFlag = false;
-    let reloadFlag = false;
+    function makeDraggable(element) { let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0; const dragTarget = element.querySelector('#vsphone-blob') || element; dragTarget.onmousedown = function(e) { e.preventDefault(); pos3 = e.clientX; pos4 = e.clientY; document.onmouseup = closeDragElement; document.onmousemove = elementDrag; }; function elementDrag(e) { e.preventDefault(); pos1 = pos3 - e.clientX; pos2 = pos4 - e.clientY; pos3 = e.clientX; pos4 = e.clientY; element.style.top = (element.offsetTop - pos2) + "px"; element.style.left = (element.offsetLeft - pos1) + "px"; } function closeDragElement() { document.onmouseup = null; document.onmousemove = null; } }
 
+    // =========================================================================
+    // ==== CORE & NEW FUNCTIONS ====
+    // =========================================================================
+    
     async function startRandomLoop() {
-        stopFlag = false;
-        reloadFlag = false;
-        const mode = document.getElementById('vsphone-mode').value;
-        const codeRandom = new CodeRandom(CONFIG.CHARSET, CONFIG.LENGTH, CONFIG.PREFIX);
-        logStatus('Đang tải mã đã random...');
-        await codeRandom.loadTriedCodes();
-        logStatus('Bắt đầu random...');
+        if (!document.querySelector('.wrapper textarea')) {
+            logStatus('Trang không hợp lệ. Cần ở trang có ô nhập mã.');
+            return;
+        }
 
-        if (mode === "batch") {
+        stopFlag = false;
+        const blob = document.getElementById('vsphone-blob');
+        const progressBar = document.getElementById('vs-progress-bar');
+        blob?.classList.add('is-running');
+
+        try {
             let batchCount = 0;
             while (!stopFlag) {
-                try {
-                    const batch = codeRandom.randomBatch(CONFIG.BATCH_SIZE);
-                    if (batch.length === 0) {
-                        logStatus('Hết mã random!');
-                        break;
-                    }
-                    const textarea = document.querySelector('.wrapper textarea');
-                    const button = document.querySelector('.wrapper .el-button.submit');
-                    if (!textarea || !button) {
-                        logStatus('Không tìm thấy textarea hoặc nút submit!');
-                        break;
-                    }
-                    textarea.value = batch.join('\n');
-                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-                    await new Promise(r => setTimeout(r, 500));
-                    button.click();
-                    batchCount++;
-                    logStatus(`Đã submit batch ${batchCount} (100 mã), chờ 3s...`);
-                    await codeRandom.saveTriedCodes();
+                batchCount++;
+                logStatus(`Đang tạo batch #${batchCount}...`);
+                const batch = codeRandom.randomBatch(CONFIG.BATCH_SIZE);
 
-                    for (let i = 0; i < 3; i++) {
-                        if (stopFlag) break;
-                        logStatus(`Đã submit batch ${batchCount}, đợi ${3-i}s...`);
-                        await new Promise(r => setTimeout(r, 1000));
-                    }
-                } catch (err) {
-                    logStatus('Lỗi: ' + err);
-                    console.error(err);
+                if (batch.length === 0) {
+                    logStatus('Hết mã random hoặc không thể tạo thêm!');
                     break;
                 }
-            }
-            logStatus('Đã dừng!');
-        } else if (mode === "onebyone") {
-            if (location.pathname === '/' || location.pathname === '/index') {
-                logStatus('Đang tự động vào Gia hạn hàng loạt...');
-                await new Promise(r => setTimeout(r, 1500));
-                await clickGiaHan();
-                await new Promise(r => setTimeout(r, 800));
-            }
-            let count = 0;
-            while (!stopFlag) {
-                try {
-                    const code = codeRandom.randomOne();
-                    if (!code) {
-                        logStatus('Hết mã random!');
-                        break;
-                    }
-                    const textarea = document.querySelector('.wrapper textarea');
-                    const button = document.querySelector('.wrapper .el-button.submit');
-                    if (!textarea || !button) {
-                        logStatus('Không tìm thấy textarea hoặc nút submit!');
-                        break;
-                    }
-                    textarea.value = code;
-                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-                    await new Promise(r => setTimeout(r, 300));
-                    button.click();
-                    count++;
-                    logStatus(`Đã submit mã thứ ${count}, chờ 1s...`);
-                    await codeRandom.saveTriedCodes();
 
-                    await new Promise(r => setTimeout(r, 1000));
-                    if (document.querySelector('.err-tip') && document.querySelector('.err-tip').textContent.includes('không thể kích hoạt')) {
-                        logStatus('Phát hiện lỗi mã không thể kích hoạt, sẽ reload...');
-                        reloadFlag = true;
-                        setTimeout(() => location.reload(), 800);
-                        break;
-                    }
-                } catch (err) {
-                    logStatus('Lỗi: ' + err);
-                    console.error(err);
+                const textarea = document.querySelector('.wrapper textarea');
+                const button = document.querySelector('.wrapper .el-button.submit');
+                if (!textarea || !button) {
+                    logStatus('Lỗi: Không tìm thấy UI trang!');
                     break;
                 }
+
+                textarea.value = batch.join('\n');
+                textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                await new Promise(r => setTimeout(r, 200));
+                button.click();
+                logStatus(`Đã submit batch #${batchCount}...`);
+                await codeRandom.saveTriedCodes();
+                await updateTotalCodesDisplay();
+                
+                // Delay loop with progress bar
+                const delaySteps = CONFIG.DELAY_MS / 100; // 15 steps for 1500ms
+                for (let i = 0; i <= delaySteps; i++) {
+                    if (stopFlag) break;
+                    const percent = Math.round((i / delaySteps) * 100);
+                    if (progressBar) progressBar.style.width = percent + '%';
+                    logStatus(`Đợi ${((delaySteps - i) * 0.1).toFixed(1)}s...`);
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                if (progressBar) progressBar.style.width = '0%'; // Reset for next run
             }
-            if (!reloadFlag) logStatus('Đã dừng!');
+        } catch (err) {
+            logStatus('Lỗi: ' + err.message);
+            console.error(err);
+        } finally {
+            // Cleanup on exit
+            if (!stopFlag) logStatus('Hoàn thành!');
+            else logStatus('Đã dừng!');
+            blob?.classList.remove('is-running');
+            if (progressBar) progressBar.style.width = '0%';
         }
     }
 
     function stopRandomLoop() {
         stopFlag = true;
     }
+    
+    // Other functions (setTab, data management, etc.)
+    function setTab(tabName) { document.querySelectorAll('.vs-tab').forEach(tab => tab.classList.remove('active')); document.querySelectorAll('.vs-content').forEach(content => content.style.display = 'none'); const activeTab = document.querySelector(`.vs-tab[data-tab="${tabName}"]`); const activeContent = document.getElementById(`vs-content-${tabName}`); if(activeTab) activeTab.classList.add('active'); if(activeContent) activeContent.style.display = 'block'; if (tabName === 'data') { displayAllCodes(); } }
+    async function displayAllCodes() { const textarea = document.getElementById('vs-all-codes-list'); if (!textarea) return; const codes = await GM_getValue('vsphone_tried_codes', []); textarea.value = codes.join('\n'); textarea.scrollTop = textarea.scrollHeight; }
+    async function copyAllCodes() { const textarea = document.getElementById('vs-all-codes-list'); const button = document.getElementById('vs-copy-codes'); if (!textarea || !button) return; try { await navigator.clipboard.writeText(textarea.value); const originalText = button.textContent; button.textContent = 'Đã chép!'; setTimeout(() => { button.textContent = originalText; }, 2000); } catch (err) { console.error('Failed to copy codes: ', err); alert('Lỗi khi sao chép.'); } }
+    async function exportAllCodes() { const codes = await GM_getValue('vsphone_tried_codes', []); if (codes.length === 0) { alert('Chưa có mã nào để xuất!'); return; } const blob = new Blob([codes.join('\n')], {type: 'text/plain'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; const now = new Date(); a.download = `vsphone_codes_${now.getFullYear()}${(now.getMonth()+1).toString().padStart(2,'0')}${now.getDate().toString().padStart(2,'0')}.txt`; document.body.appendChild(a); a.click(); setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100); }
+    async function resetAllCodes() { if (confirm('CẢNH BÁO:\nBạn có chắc muốn XÓA VĨNH VIỄN toàn bộ lịch sử mã đã random?\nThao tác này không thể hoàn tác.')) { await GM_deleteValue('vsphone_tried_codes'); await codeRandom.loadTriedCodes(); await updateTotalCodesDisplay(); await displayAllCodes(); logStatus('Đã xóa toàn bộ lịch sử mã!'); } }
+    function toggleMenu(show) { const panel = document.getElementById('vsphone-menu-panel'); const blob = document.getElementById('vsphone-blob-container'); if (panel && blob) { if (show) { panel.style.display = 'flex'; blob.style.display = 'none'; updateTotalCodesDisplay(); } else { panel.style.display = 'none'; blob.style.display = 'block'; } } }
+    function logStatus(msg) { const el = document.getElementById('vsphone-status'); if (el) el.innerText = msg; }
+    async function updateTotalCodesDisplay() { const count = codeRandom.triedCodes.size; const totalEl = document.getElementById('vs-total-codes'); if (totalEl) { totalEl.innerText = count.toLocaleString('vi-VN'); } const statusEl = document.getElementById('vsphone-status'); if (statusEl && !stopFlag && !document.querySelector('#vsphone-blob.is-running')) { statusEl.innerHTML = `Đã random: <span id="vs-total-codes">${count.toLocaleString('vi-VN')}</span> mã`; } }
 
-    async function resetTriedCodes() {
-        if (confirm('Bạn có chắc muốn xóa toàn bộ mã đã random?')) {
-            await GM_deleteValue('vsphone_tried_codes');
-            logStatus('Đã xóa toàn bộ mã đã random!');
-            showList();
-        }
+    // =========================================================================
+    // ==== ENTRY POINT ====
+    // =========================================================================
+    async function initialize() {
+        console.log('[VSPhone Tool] Initializing...');
+        injectGlobalStyles();
+        createMenuAndBlob();
+        await codeRandom.loadTriedCodes();
+        await updateTotalCodesDisplay();
+
+        // Attach event listeners
+        makeDraggable(document.getElementById('vsphone-blob-container'));
+        document.getElementById('vsphone-blob').onclick = () => toggleMenu(true);
+        document.getElementById('vs-close-btn').onclick = () => toggleMenu(false);
+        document.querySelectorAll('.vs-tab').forEach(tab => tab.addEventListener('click', () => setTab(tab.dataset.tab)));
+        document.getElementById('vsphone-start').onclick = startRandomLoop;
+        document.getElementById('vsphone-stop').onclick = stopRandomLoop;
+        document.getElementById('vs-copy-codes').onclick = copyAllCodes;
+        document.getElementById('vs-export-codes').onclick = exportAllCodes;
+        document.getElementById('vs-reset-codes').onclick = resetAllCodes;
+
+        console.log('[VSPhone Tool] Initialization complete. Ready to use.');
     }
 
-    async function exportTriedCodes() {
-        const saved = await GM_getValue('vsphone_tried_codes', []);
-        if (saved.length === 0) {
-            alert('Chưa có mã nào để xuất!');
-            return;
-        }
-        saveCodesToFile(saved);
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+        initialize();
+    } else {
+        window.addEventListener('DOMContentLoaded', initialize, { once: true });
     }
-
-    async function viewTriedCodes() {
-        const saved = await GM_getValue('vsphone_tried_codes', []);
-        if (saved.length === 0) {
-            alert('Chưa có mã nào!');
-            return;
-        }
-        alert('Đã random tổng cộng: ' + saved.length + ' mã\n\n' + saved.slice(-100).join('\n'));
-    }
-
-    // ==== AUTO VÀO GIA HẠN HÀNG LOẠT SAU KHI RELOAD ====
-    function autoAfterReload() {
-        if (sessionStorage.getItem('vsphone_auto_giahan') === '1') {
-            sessionStorage.removeItem('vsphone_auto_giahan');
-            setTimeout(async () => {
-                await clickGiaHan();
-                setTimeout(() => {
-                    startRandomLoop();
-                }, 800);
-            }, 1200);
-        }
-    }
-
-    // ==== KHỞI ĐỘNG MENU & AUTO ====
-    (function waitForReady() {
-        if (document.querySelector('.wrapper textarea') && document.querySelector('.wrapper .el-button.submit')) {
-            createMobileMenu();
-            document.getElementById('vsphone-start').onclick = function() {
-                sessionStorage.setItem('vsphone_auto_giahan', '1');
-                startRandomLoop();
-            };
-            document.getElementById('vsphone-stop').onclick = stopRandomLoop;
-            document.getElementById('vsphone-reset').onclick = resetTriedCodes;
-            document.getElementById('vsphone-export').onclick = exportTriedCodes;
-            document.getElementById('vsphone-view').onclick = viewTriedCodes;
-            autoAfterReload();
-        } else {
-            setTimeout(waitForReady, 1000);
-        }
-    })();
 
 })();
