@@ -164,7 +164,7 @@
             
             const alertMsg = `Dung lượng lưu trữ gần đầy! Đã tự động xóa ${numberToClean.toLocaleString('vi-VN')} mã cũ nhất để giải phóng bộ nhớ.`;
             logStatus(alertMsg);
-            alert(alertMsg);
+            // alert(alertMsg); // Đã tắt thông báo popup để script mượt hơn
             console.log(`[VSPhone Tool] Cleaned up ${numberToClean} oldest codes.`);
         }
     }
