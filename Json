@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VSPhone - Quản lý dung lượng, Tự động dọn dẹp
 // @namespace    http://tampermonkey.net/
-// @version      9.0
+// @version      9.1
 // @description  Hiển thị dung lượng lưu trữ, số mã. Tự động xóa mã cũ nhất khi dung lượng gần đầy (4MB) để tránh lỗi.
 // @author       OpenAI & Gemini
 // @match        https://cloud.vsphone.com/*
