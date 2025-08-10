@@ -3,24 +3,24 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from collections import deque, defaultdict
 from flask import Flask
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CommandHandler, Defaults
 from openai import OpenAI
 
-# ====== ENV / CONFIG ======
+# ========== ENV ==========
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ["VERCEL_API_KEY"]
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 MODEL = os.getenv("MODEL", "openai/gpt-oss-120b")
 
-SYSTEM_PROMPT = os.getenv(
-    "SYSTEM_PROMPT",
-    """Bạn là Linh – mồm mép, bộc trực, thông minh kiểu Grok: nhanh trí, châm biếm duyên dáng, thỉnh thoảng cà khịa nhẹ cho tỉnh ngủ. Giọng tự nhiên, có thể dùng tiếng lóng/chửi nhẹ đúng lúc (không tục, không 18+). Ưu tiên ngắn gọn, sắc sảo, có thể hỏi xoáy lại khi đề bài mơ hồ. Luôn hữu ích và chính xác; tránh phán bừa, không tiết lộ dữ liệu nhạy cảm."""
+SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT",
+    "Bạn là Linh – mồm mép, bộc trực, thông minh kiểu Grok: nhanh trí, châm biếm duyên dáng, thỉnh thoảng cà khịa nhẹ cho tỉnh ngủ. "
+    "Giọng tự nhiên, có thể dùng tiếng lóng/chửi nhẹ đúng lúc (không tục, không 18+). Ưu tiên ngắn gọn, sắc sảo; luôn hữu ích và chính xác. "
+    "Luôn bắt kịp xu thế của thời đại, là người tiên phong cho các trend trên mạng xã hội. Lâu lâu hay sử dụng meme và trend để đùa giỡn."                      
 )
-SYSTEM_PROMPT_CODE = os.getenv(
-    "SYSTEM_PROMPT_CODE",
-    "Bạn là một lập trình viên kỳ cựu. Viết code đầy đủ, sạch, chuẩn best practice, giải thích ngắn gọn bằng tiếng Việt sau khi đưa code. Không giới hạn độ dài nội dung; nếu dài, cứ trả hết (bot sẽ tự chia phần)."
+SYSTEM_PROMPT_CODE = os.getenv("SYSTEM_PROMPT_CODE",
+    "Bạn là một lập trình viên kỳ cựu. Viết code đầy đủ, sạch, chuẩn best practice, giải thích ngắn gọn. Không giới hạn độ dài; nếu dài, cứ trả hết."
 )
 
 WORD_LIMIT = int(os.getenv("WORD_LIMIT", "350"))
@@ -32,21 +32,24 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 CLEAN_INTERVAL_HOURS = int(os.getenv("CLEAN_INTERVAL_HOURS", "6"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "700"))
 MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE", "4000"))
-CTX_TURNS = int(os.getenv("CTX_TURNS", "4"))
+CTX_TURNS = int(os.getenv("CTX_TURNS", "6"))  # số lượt trước đó (user+assistant)
 MAX_DOC_BYTES = int(os.getenv("MAX_DOC_BYTES", str(2 * 1024 * 1024)))
+
+# điều khiển stream/hiển thị
+EDIT_INTERVAL = float(os.getenv("EDIT_INTERVAL", "1.0"))   # giãn nhịp edit preview
+MAX_EDITS = int(os.getenv("MAX_EDITS", "60"))               # tối đa số lần edit preview
+PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))           # độ dài 1 trang khi gửi nhiều tin
 
 client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL)
 app = Flask(__name__)
 
-histories = defaultdict(lambda: deque(maxlen=16))
+histories = defaultdict(lambda: deque(maxlen=32))  # đủ cho CTX_TURNS*2
 locks = defaultdict(asyncio.Lock)
 
-# ====== Utils / Pretty ======
+# ========== Utils ==========
 def log_console(tag, payload):
-    try:
-        print(f"[{datetime.utcnow().isoformat()}][{tag}] {json.dumps(payload, ensure_ascii=False)}")
-    except Exception:
-        print(f"[{datetime.utcnow().isoformat()}][{tag}] {payload}")
+    try: print(f"[{datetime.utcnow().isoformat()}][{tag}] {json.dumps(payload, ensure_ascii=False)}")
+    except Exception: print(f"[{datetime.utcnow().isoformat()}][{tag}] {payload}")
     sys.stdout.flush()
 
 def notify_discord(title, payload):
@@ -54,16 +57,15 @@ def notify_discord(title, payload):
         try:
             text = f"**{title}**\n```json\n{json.dumps(payload, ensure_ascii=False, indent=2)}```"
             requests.post(DISCORD_WEBHOOK_URL, json={"content": text}, timeout=15)
-        except Exception:
-            pass
+        except Exception: pass
     log_console(title, payload)
 
-def strip_code(s):  # bỏ fence để lấy phần text
-    return re.sub(r"```[\w-]*\n|\n```", "", s or "").strip()
+def strip_code(s):  # bỏ fence ```lang
+    return re.sub(r"```[\w-]*\n|\n```", "", s or "", flags=re.S).strip()
 
 def word_clamp(s, limit):
-    w = (s or "").split()
-    return s if len(w) <= limit else " ".join(w[:limit]) + "…"
+    w=(s or "").split()
+    return s if len(w)<=limit else " ".join(w[:limit])+"…"
 
 def html_escape(s:str) -> str:
     return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -73,40 +75,25 @@ def pretty_text(s: str, max_lines: int = 10) -> str:
     lines = [l.strip() for l in (s or "").splitlines() if l.strip()]
     return "\n".join(lines[:max_lines])
 
-def pretty_block(title:str, bullets:list[str]) -> str:
-    title = html_escape(title)
-    items = "\n".join(f"• {html_escape(x)}" for x in bullets if x and x.strip())
-    return f"<b>{title}</b>\n{items}"
+def head_body_html(text: str) -> str:
+    lines = [l for l in text.splitlines() if l.strip()]
+    if not lines: return "…"
+    head = f"<b>{html_escape(lines[0])}</b>"
+    body = "\n".join(html_escape(l) for l in lines[1:])
+    return head + ("\n" + body if body else "")
 
-def send_long_text_sync(bot, chat_id, text):
-    chunk = 3500
-    for i in range(0, len(text), chunk):
-        bot.send_message(chat_id=chat_id, text=text[i:i+chunk], disable_web_page_preview=True)
+def paginate_html(full_text: str, per_page: int = PAGE_CHARS) -> list[str]:
+    safe = html_escape(full_text or "")
+    pages, cur, used = [], [], 0
+    for line in safe.splitlines():
+        if used + len(line) + 1 > per_page and cur:
+            pages.append("\n".join(cur)); cur=[line]; used=len(line)+1
+        else:
+            cur.append(line); used += len(line)+1
+    if cur: pages.append("\n".join(cur))
+    return pages
 
-async def send_long_text(ctx, chat_id, text):
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, send_long_text_sync, ctx.bot, chat_id, text)
-
-async def send_chunks_html(ctx, chat_id, html_text):
-    await send_long_text(ctx, chat_id, html_text)
-
-async def send_code(ctx, chat_id, code:str, lang_hint:str=""):
-    code = code.rstrip()
-    safe = html_escape(code)
-    if len(safe) <= 3500:
-        await ctx.bot.send_message(chat_id, f"<b>💻 Code {html_escape(lang_hint)}</b>\n<pre><code>{safe}</code></pre>")
-    else:
-        chunk = 3000
-        parts = [safe[i:i+chunk] for i in range(0, len(safe), chunk)]
-        await ctx.bot.send_message(chat_id, f"<b>💻 Code {html_escape(lang_hint)} (chia {len(parts)} phần)</b>")
-        for idx, p in enumerate(parts, 1):
-            await ctx.bot.send_message(chat_id, f"<b>Phần {idx}/{len(parts)}</b>\n<pre><code>{p}</code></pre>")
-        from io import BytesIO
-        bio = BytesIO(code.encode("utf-8")); bio.name = "code.txt"
-        await ctx.bot.send_document(chat_id, bio, caption="Toàn bộ code (file)")
-
-# ====== Access / housekeeping ======
-def allowed_chat(update):
+def allowed_chat(update: Update):
     chat = update.effective_chat
     if not chat: return False
     if chat.type == "private": return True
@@ -120,14 +107,13 @@ def asked_creator(text):
 def is_codey(text):
     if not text: return False
     t = text.lower()
-    keys = [
-        "viết code","code giúp","sửa code","bug","lỗi","stack trace","exception",
-        "python","java","kotlin","swift","dart","flutter","go","rust","c++","c#","php","ruby","js","ts","typescript","node","react","vue","svelte","angular","next.js","nuxt",
-        "`","```","import ","class ","def ","function","const ","let ","var "
-    ]
+    keys = ["viết code","code giúp","sửa code","bug","lỗi","stack trace","exception",
+        "python","java","kotlin","swift","dart","flutter","go","rust","c++","c#","php","ruby",
+        "js","ts","typescript","node","react","vue","svelte","angular","next.js","nuxt",
+        "`","```","import ","class ","def ","function","const ","let ","var "]
     return any(k in t for k in keys)
 
-@app.get("/")
+@app.get("/")       # keep-alive
 def root_ok(): return "OK"
 
 @app.get("/health")
@@ -170,9 +156,24 @@ def reminder_loop(bot, chat_ids):
             last_sent=now.date()
         time.sleep(20)
 
-# ====== LLM calls ======
+async def send_code(ctx, chat_id, code:str, lang_hint:str=""):
+    code = (code or "").rstrip()
+    safe = html_escape(code)
+    if len(safe) <= 3500:
+        await ctx.bot.send_message(chat_id, f"<b>💻 Code {html_escape(lang_hint)}</b>\n<pre><code>{safe}</code></pre>")
+    else:
+        chunk = 3000
+        parts = [safe[i:i+chunk] for i in range(0, len(safe), chunk)]
+        await ctx.bot.send_message(chat_id, f"<b>💻 Code {html_escape(lang_hint)} (chia {len(parts)} phần)</b>")
+        for idx, p in enumerate(parts, 1):
+            await ctx.bot.send_message(chat_id, f"<b>Phần {idx}/{len(parts)}</b>\n<pre><code>{p}</code></pre>")
+        from io import BytesIO
+        bio = BytesIO(code.encode("utf-8")); bio.name = "code.txt"
+        await ctx.bot.send_document(chat_id, bio, caption="Toàn bộ code (file)")
+
+# ========== LLM ==========
 def build_messages(chat_id, user_text, code_mode=False):
-    keep = max(1, CTX_TURNS*3-6)
+    keep = max(2, CTX_TURNS * 2)
     conv = list(histories[chat_id])[-keep:]
     sys_prompt = SYSTEM_PROMPT_CODE if code_mode else SYSTEM_PROMPT
     tail = "\nGiữ giọng tự nhiên." if code_mode else "\nGiữ giọng tự nhiên, 1–4 câu, <350 từ."
@@ -210,7 +211,7 @@ def complete_block(messages, max_tokens):
     )
     return (cmp.choices[0].message.content or "").strip()
 
-# ====== Files & Weather ======
+# ========== Files & Weather ==========
 async def get_document_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not doc: return None, None
@@ -272,19 +273,20 @@ def weather_vn(q):
 def try_weather_from_text(text):
     t = (text or "").lower()
     if "thời tiết" not in t: return None
-    known = ["hà nội","hn","ha noi","hồ chí minh","tp.hcm","tphcm","sài gòn","đà nẵng","hải phòng","cần thơ","nha trang","đà lạt","huế","quy nhơn","vũng tàu","hạ long","phú quốc","biên hòa","thủ đức"]
+    known = ["hà nội","hn","ha noi","hồ chí minh","tp.hcm","tphcm","sài gòn","đà nẵng","hải phòng","cần thơ","nha trang",
+             "đà lạt","huế","quy nhơn","vũng tàu","hạ long","phú quốc","biên hòa","thủ đức"]
     for k in known:
         if k in t: return k
     return "Hà Nội"
 
-# ====== Handlers ======
+# ========== Handlers ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if allowed_chat(update):
         await update.message.reply_text("<b>Em là Linh đây ✨</b>\nCứ nhắn là tám nha!")
 
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if allowed_chat(update):
-        await update.message.reply_text(f"<b>Gateway:</b> Vercel AI\n<b>Model:</b> {MODEL}\n<b>Context turns:</b> {CTX_TURNS}\n<b>Code:</b> không giới hạn (chia phần gửi)")
+        await update.message.reply_text(f"<b>Gateway:</b> Vercel AI\n<b>Model:</b> {MODEL}\n<b>Context turns:</b> {CTX_TURNS}\n<b>Code:</b> stream + chia trang")
 
 async def cmd_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if allowed_chat(update):
@@ -321,59 +323,89 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         try:
             messages = build_messages(chat_id, q, code_mode=code_mode)
-            # ----- CODE MODE: gửi đẹp -----
+
+            # ----- CODE MODE: stream + edit + chia trang + gửi code đầy đủ -----
             if code_mode:
-                text = complete_block(messages, MAX_TOKENS_CODE) or "Không nhận được phản hồi."
-                # tách code fence nếu có
-                m = re.search(r"```(\w+)?\n(.*?)```", text, flags=re.S)
+                msg = await update.message.reply_text("…")
+                acc, last_edit, edits = "", time.monotonic(), 0
+                buffer_all = ""
+
+                async for chunk in call_stream(messages, MAX_TOKENS_CODE):
+                    acc += chunk; buffer_all += chunk
+                    now = time.monotonic()
+
+                    if len(strip_code(acc)) >= PAGE_CHARS:
+                        try:
+                            preview = pretty_text(strip_code(acc), max_lines=10)
+                            await msg.edit_text(head_body_html(preview))
+                        except Exception: pass
+                        acc = ""; break
+
+                    if (now - last_edit) >= EDIT_INTERVAL and edits < MAX_EDITS:
+                        tmp = word_clamp(strip_code(acc), max(WORD_LIMIT, 800)) or "…"
+                        try:
+                            await msg.edit_text(head_body_html(tmp))
+                            last_edit = now; edits += 1
+                        except Exception: pass
+
+                plain = strip_code(buffer_all)
+                if len(plain) >= PAGE_CHARS:
+                    pages = paginate_html(plain, PAGE_CHARS)
+                    for i, p in enumerate(pages, 1):
+                        await update.message.reply_text(f"<b>📄 Phần {i}/{len(pages)}</b>\n{p}")
+                else:
+                    final_txt = word_clamp(plain, max(WORD_LIMIT, 800)) or "…"
+                    try: await msg.edit_text(head_body_html(final_txt))
+                    except Exception: await update.message.reply_text(head_body_html(final_txt))
+
+                m = re.search(r"```(\w+)?\n(.*?)```", buffer_all, flags=re.S)
                 if m:
-                    lang = m.group(1) or ""
-                    await send_code(context, chat_id, m.group(2), lang_hint=lang)
-                    explain = (text[:m.start()] + "\n" + text[m.end():]).strip()
+                    await send_code(context, chat_id, m.group(2), lang_hint=m.group(1) or "")
+                    explain = (buffer_all[:m.start()] + "\n" + buffer_all[m.end():]).strip()
                     explain = pretty_text(explain)
                     if explain:
-                        await send_chunks_html(context, chat_id, f"<b>📝 Giải thích</b>\n{html_escape(explain)}")
-                else:
-                    await send_chunks_html(context, chat_id, f"<b>💻 Code/Output</b>\n<pre><code>{html_escape(text)}</code></pre>")
+                        await update.message.reply_text(f"<b>📝 Giải thích</b>\n{html_escape(explain)}")
+
                 histories[chat_id].append(("user", q))
-                histories[chat_id].append(("assistant", text[:1000]))
+                histories[chat_id].append(("assistant", (plain or "")[:1000]))
                 return
 
-            # ----- NORMAL STREAM -----
+            # ----- NORMAL STREAM: edit + chia trang -----
             msg = await update.message.reply_text("…")
-            acc, last_edit = "", time.monotonic()
-            async for chunk in call_stream(messages, MAX_TOKENS):
-                acc += chunk
-                now = time.monotonic()
-                if now - last_edit >= 0.5 or "\n" in chunk:
-                    tmp = word_clamp(strip_code(acc), WORD_LIMIT) or "…"
-                    # format gọn: đậm dòng đầu
-                    lines = [l for l in tmp.splitlines() if l.strip()]
-                    if lines:
-                        head = f"<b>{html_escape(lines[0])}</b>"
-                        body = "\n".join(html_escape(l) for l in lines[1:])
-                        html = head + ("\n" + body if body else "")
-                    else:
-                        html = "…"
-                    try:
-                        await msg.edit_text(html)
-                        last_edit = now
-                    except Exception:
-                        pass
+            acc, last_edit, edits = "", time.monotonic(), 0
+            buffer_all = ""
 
-            final_txt = word_clamp(strip_code(acc), WORD_LIMIT) or "Em bị lag mất rồi, nhắn lại giúp em nha."
-            lines = [l for l in final_txt.splitlines() if l.strip()]
-            if lines:
-                head = f"<b>{html_escape(lines[0])}</b>"
-                body = "\n".join(html_escape(l) for l in lines[1:])
-                html_final = head + ("\n" + body if body else "")
+            async for chunk in call_stream(messages, MAX_TOKENS):
+                acc += chunk; buffer_all += chunk
+                now = time.monotonic()
+
+                if len(strip_code(acc)) >= PAGE_CHARS:
+                    try:
+                        preview = pretty_text(strip_code(acc), max_lines=10)
+                        await msg.edit_text(head_body_html(preview))
+                    except Exception: pass
+                    acc = ""; break
+
+                if (now - last_edit) >= EDIT_INTERVAL and edits < MAX_EDITS:
+                    tmp = word_clamp(strip_code(acc), WORD_LIMIT) or "…"
+                    try:
+                        await msg.edit_text(head_body_html(tmp))
+                        last_edit = now; edits += 1
+                    except Exception: pass
+
+            final_plain = strip_code(buffer_all)
+            if len(final_plain) >= PAGE_CHARS:
+                pages = paginate_html(final_plain, PAGE_CHARS)
+                for i, p in enumerate(pages, 1):
+                    await update.message.reply_text(f"<b>📄 Phần {i}/{len(pages)}</b>\n{p}")
             else:
-                html_final = "…"
-            try: await msg.edit_text(html_final)
-            except Exception: await update.message.reply_text(html_final)
+                final_txt = word_clamp(final_plain, WORD_LIMIT) or "Em bị lag mất rồi, nhắn lại giúp em nha."
+                try: await msg.edit_text(head_body_html(final_txt))
+                except Exception: await update.message.reply_text(head_body_html(final_txt))
 
             histories[chat_id].append(("user", q))
-            histories[chat_id].append(("assistant", final_txt))
+            histories[chat_id].append(("assistant", final_plain[:1000]))
+
         except Exception as e:
             notify_discord("gateway_stream_error", {"error": str(e), "trace": traceback.format_exc()})
             await update.message.reply_text("Có lỗi kết nối, thử lại giúp em nhé.")
@@ -385,34 +417,33 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         try:
             text, err = await get_document_text(update, context)
-            if err:
-                await update.message.reply_text(html_escape(err)); return
-            if not text or not text.strip():
+            if err: await update.message.reply_text(html_escape(err)); return
+            if not text.strip():
                 await update.message.reply_text("Không đọc được nội dung tệp (có thể là nhị phân)."); return
 
-            prompt = (
-                "Phân tích tệp mã nguồn dưới đây: chỉ ra lỗi tiềm ẩn, bug, vấn đề hiệu năng/bảo mật, style, và đề xuất cải thiện.\n"
-                "Nếu hợp lý, đưa luôn bản vá dạng unified diff hoặc code đã sửa.\n\n"
-                "=== NỘI DUNG TỆP ===\n" + text[:MAX_DOC_BYTES].rstrip()
-            )
+            prompt = ("Phân tích tệp mã nguồn dưới đây: liệt kê lỗi, vấn đề hiệu năng/bảo mật, style, đề xuất cải thiện. "
+                      "Nếu hợp lý, đưa bản vá (diff) hoặc code đã sửa.\n\n=== NỘI DUNG TỆP ===\n" + text[:MAX_DOC_BYTES].rstrip())
             messages = [{"role":"system","content": SYSTEM_PROMPT_CODE},{"role":"user","content": prompt}]
             result = complete_block(messages, MAX_TOKENS_CODE) or "Không nhận được phản hồi."
-            # cố gắng tách code
+
             m = re.search(r"```(\w+)?\n(.*?)```", result, flags=re.S)
             if m:
                 await send_code(context, chat_id, m.group(2), lang_hint=m.group(1) or "")
                 explain = (result[:m.start()] + "\n" + result[m.end():]).strip()
                 if explain:
-                    await send_chunks_html(context, chat_id, f"<b>📝 Giải thích</b>\n{html_escape(pretty_text(explain))}")
+                    await update.message.reply_text(f"<b>📝 Giải thích</b>\n{html_escape(pretty_text(explain, 20))}")
             else:
-                await send_chunks_html(context, chat_id, f"<b>🔎 Phân tích tệp</b>\n{html_escape(pretty_text(result, 20))}")
+                pages = paginate_html(result, PAGE_CHARS)
+                for i, p in enumerate(pages, 1):
+                    await update.message.reply_text(f"<b>🔎 Phân tích ({i}/{len(pages)})</b>\n{p}")
+
             histories[chat_id].append(("user", "[tệp đính kèm]"))
             histories[chat_id].append(("assistant", result[:1000]))
         except Exception as e:
             notify_discord("doc_analyze_error", {"error": str(e), "trace": traceback.format_exc()})
             await update.message.reply_text("Phân tích tệp bị lỗi, thử lại giúp mình nhé.")
 
-# ====== Boot ======
+# ========== Boot ==========
 def main():
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     threading.Thread(target=auto_ping, daemon=True).start()
