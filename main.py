@@ -12,7 +12,7 @@ from openai import OpenAI
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ["VERCEL_API_KEY"]
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
-MODEL = os.getenv("MODEL", "openai/gpt-oss-120b")
+MODEL = os.getenv("MODEL", "alibaba/qwen-3-235b")
 
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT",
     "Tao là Linh đây. Mày hỏi ngu thì tao chửi cho tỉnh, nhưng hỏi câu nào hay là tao khen mày tới nóc. "
