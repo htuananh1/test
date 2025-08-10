@@ -10,9 +10,9 @@ from openai import OpenAI
 
 # ========= ENV =========
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-VERCEL_API_KEY = os.environ["VERCEL_API_KEY"]
+VERCEL_API_KEY = os.environ["VERCEL_API_KEY"]                   # chỉ dùng key của Vercel
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
-MODEL = os.getenv("MODEL", "alibaba/qwen-3-235b")
+MODEL = os.getenv("MODEL", "openai/gpt-oss-120b")
 
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT",
     "Bạn là Linh – mồm mép, bộc trực, thông minh kiểu Grok: nhanh trí, châm biếm duyên dáng, thỉnh thoảng cà khịa nhẹ. "
@@ -26,7 +26,7 @@ WORD_LIMIT = int(os.getenv("WORD_LIMIT", "350"))
 SELF_PING_URL = os.getenv("SELF_PING_URL", "").strip()
 ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID", "0"))   # 0 = mọi group
 ALLOWED_TOPIC_ID = int(os.getenv("ALLOWED_TOPIC_ID", "0")) # 0 = mọi topic
-OWNER_ID = 2026797305
+OWNER_ID = 2026797305                                      # chỉ ID này được /set
 
 REMIND_CHAT_IDS = [s.strip() for s in os.getenv("REMIND_CHAT_IDS", "").split(",") if s.strip()]
 REMIND_TEXT = os.getenv("REMIND_TEXT", "23h rồi đó, ngủ sớm cho khoẻ nha 🌙")
@@ -38,14 +38,15 @@ MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE", "4000"))
 CTX_TURNS = int(os.getenv("CTX_TURNS", "7"))
 MAX_DOC_BYTES = int(os.getenv("MAX_DOC_BYTES", str(2 * 1024 * 1024)))
 
-# Giới hạn hiển thị & tạo trang
+# Hiển thị & tạo trang
 EDIT_INTERVAL = float(os.getenv("EDIT_INTERVAL", "1.0"))
-MAX_EDITS = int(os.getenv("MAX_EDITS", "60"))
-PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))  # mỗi trang
+MAX_EDITS = int(os.getenv("MAX_EDITS", "5000000"))
+PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))  # mỗi trang cho Telegram an toàn
 
+# --- OpenAI client qua Vercel AI Gateway ---
 client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL)
-app = Flask(__name__)
 
+app = Flask(__name__)
 histories = defaultdict(lambda: deque(maxlen=32))
 locks = defaultdict(asyncio.Lock)
 
@@ -70,7 +71,7 @@ def word_clamp(s, limit):
     w=(s or "").split()
     return s if len(w)<=limit else " ".join(w[:limit])+"…"
 
-def html(s):  # escape đơn giản cho HTML parse_mode
+def html(s):  # escape đơn giản cho parse_mode=HTML
     return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
 def chunk_pages(raw: str, per_page: int = PAGE_CHARS) -> list[str]:
@@ -86,14 +87,12 @@ def chunk_pages(raw: str, per_page: int = PAGE_CHARS) -> list[str]:
     return pages
 
 async def send_pages(ctx, chat_id: int, header: str, raw: str, *, is_code=False, lang_hint="", thread_id=None):
-    """Gửi nhiều tin nhắn mới theo trang."""
     raw = raw.rstrip()
     pages = chunk_pages(raw, PAGE_CHARS) if len(raw) > PAGE_CHARS else [raw]
     total = len(pages)
     for i, p in enumerate(pages, 1):
         title = f"{header} — Phần {i}/{total}" if total > 1 else header
         if is_code:
-            # dùng parse_mode=None để giữ nguyên fence
             await ctx.bot.send_message(chat_id, f"<b>{title}</b>", message_thread_id=thread_id, parse_mode=ParseMode.HTML)
             await ctx.bot.send_message(chat_id, f"```{lang_hint}\n{p}\n```", message_thread_id=thread_id, parse_mode=None)
         else:
@@ -112,15 +111,17 @@ def is_codey(text):
         "`","```","import ","class ","def ","function","const ","let ","var "]
     return any(k in t for k in keys)
 
-def thread_id_of(update: Update):  # topic id (forum)
+def thread_id_of(update: Update):
     msg = update.effective_message
     return getattr(msg, "message_thread_id", None)
 
 def allowed_chat(update: Update):
     chat = update.effective_chat
     if not chat: return False
+    # Private: chỉ owner mới dùng
     if chat.type == "private":
         return update.effective_user and update.effective_user.id == OWNER_ID
+    # Group/Supergroup
     if chat.type in ("group","supergroup"):
         if ALLOWED_CHAT_ID and chat.id != ALLOWED_CHAT_ID: return False
         if ALLOWED_TOPIC_ID:
@@ -314,12 +315,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with locks[chat_id]:
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING, message_thread_id=thread_id)
         try:
-            # CODE MODE: lấy full rồi chia trang, gửi nhiều tin nhắn mới
+            # CODE MODE: lấy full rồi chia trang, gửi nhiều tin nhắn mới (không stream)
             if code_mode:
                 messages = build_messages(chat_id, q, code_mode=True)
                 result = complete_block(messages, MAX_TOKENS_CODE) or "Không nhận được phản hồi."
 
-                # Nếu model từ chối vì nội dung trước đó -> reset history 1 lần rồi thử lại
+                # nếu bị từ chối do context cũ → reset 1 lần
                 if "can't comply" in result.lower() or "cannot help" in result.lower():
                     histories[chat_id].clear()
                     result = complete_block(build_messages(chat_id, q, code_mode=True), MAX_TOKENS_CODE) or result
@@ -340,7 +341,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 histories[chat_id].append(("assistant", strip_code(result)[:1000]))
                 return
 
-            # CHAT THƯỜNG: stream nhẹ -> nếu dài thì chuyển sang gửi theo trang
+            # CHAT THƯỜNG: stream nhẹ, xong chuyển sang gửi nhiều trang nếu dài
             messages = build_messages(chat_id, q, code_mode=False)
             msg = await update.message.reply_text("…")
             acc, last_edit, edits = "", time.monotonic(), 0
