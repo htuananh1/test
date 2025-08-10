@@ -15,7 +15,7 @@ from openai import OpenAI
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ["VERCEL_API_KEY"]
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
-MODEL = os.getenv("MODEL", "openai/gpt-oss-120b")
+MODEL = os.getenv("MODEL", "openai/gpt-5")
 
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT",
     "Bạn là Linh – mồm mép, bộc trực, thông minh kiểu Grok: nhanh trí, châm biếm duyên dáng, thỉnh thoảng cà khịa nhẹ cho tỉnh ngủ. "
