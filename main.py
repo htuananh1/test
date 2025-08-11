@@ -5,7 +5,7 @@ from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CommandHandler, CallbackQueryHandler
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Forbidden
 from openai import OpenAI
 
 try:
@@ -25,8 +25,10 @@ except Exception:
     PyPDF2 = None
 try:
     import docx
+    from docx import Document as DocxDocument
 except Exception:
     docx = None
+    DocxDocument = None
 try:
     import openpyxl
 except Exception:
@@ -46,6 +48,7 @@ BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "alibaba/qwen-3-235b")
 CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-3.7-sonnet")
 FILE_MODEL = os.getenv("FILE_MODEL", "anthropic/claude-3.7-sonnet")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "2026797305"))
 
 PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "900"))
@@ -60,7 +63,8 @@ MAX_EMIT_CHARS = int(os.getenv("MAX_EMIT_CHARS", "800000"))
 CHUNK_CHARS = int(os.getenv("CHUNK_CHARS", "180000"))
 
 ARCHIVES = (".zip",".rar",".7z",".tar",".tar.gz",".tgz",".tar.bz2",".tar.xz")
-TEXT_LIKE = (".txt",".md",".log",".csv",".tsv",".json",".yaml",".yml",".ini",".cfg",".env",".xml",".html",".htm",".py",".js",".ts",".java",".c",".cpp",".cs",".go",".php",".rb",".rs",".sh",".bat",".ps1",".sql")
+TEXT_LIKE = (".txt",".md",".log",".csv",".tsv",".json",".yaml",".yml",".ini",".cfg",".env",".xml",".html",".htm",
+             ".py",".js",".ts",".java",".c",".cpp",".cs",".go",".php",".rb",".rs",".sh",".bat",".ps1",".sql")
 
 client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL) if VERCEL_API_KEY else None
 app = Flask(__name__)
@@ -224,9 +228,25 @@ def split_text_smart(text: str, chunk_chars: int = CHUNK_CHARS):
 def _safe_name(s):
     return re.sub(r"[^\w\-]+","_", s).strip("_") or "output"
 
-def _emit_file(base, suffix, text):
-    out_name = f"{_safe_name(base)}{suffix}.txt"
-    buf = io.BytesIO(text.encode("utf-8")); buf.name = out_name
+def make_docx_from_text(text: str) -> bytes:
+    if DocxDocument is None:
+        raise RuntimeError("Thiếu python-docx")
+    doc = DocxDocument()
+    for line in (text or "").splitlines():
+        doc.add_paragraph(line if line.strip() else "")
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+def _emit_text_file(base, ext, text):
+    out_name = f"{_safe_name(base)}{ext}"
+    buf = io.BytesIO((text or "").encode("utf-8")); buf.name = out_name
+    return out_name, buf
+
+def _emit_docx_file(base, text):
+    data = make_docx_from_text(text)
+    out_name = f"{_safe_name(base)}.docx"
+    buf = io.BytesIO(data); buf.name = out_name
     return out_name, buf
 
 def _get_gem_client():
@@ -245,36 +265,58 @@ def create_image_bytes_gemini(prompt: str):
             return part.inline_data.data, part.inline_data.mime_type or "image/png"
     raise RuntimeError("Gemini không trả ảnh.")
 
+async def send_note(context, chat_id: int, text: str):
+    body = f"📝 <i>Lời nhắn</i>\n{htmlesc(text)}"
+    try:
+        await context.bot.send_message(chat_id, body, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except BadRequest:
+        await context.bot.send_message(chat_id, f"📝 {text}")
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "Lệnh:\n"
         "/help – trợ giúp\n"
         "/img <mô tả> – tạo ảnh (Gemini)\n"
         "/code <yêu cầu> – code (Claude)\n"
-        "Gửi file .txt/.md/.json/.csv/.pdf/.docx/.xlsx/.pptx/.html để Linh đọc và gửi lại .txt.\n"
-        "Sau đó gõ: 'sửa lại' | 'nâng cấp' | 'tối ưu' | 'refactor' | 'tóm tắt' | 'dịch sang <ngôn ngữ>' | 'sửa chính tả' | 'chuẩn hoá markdown'.\n"
-        "Linh mặc định thẳng tính, hơi bựa nhưng tôn trọng."
+        "/addlink <CHAT_ID> – tạo link mời (chỉ admin)\n"
+        "Gửi file .txt/.md/.json/.csv/.pdf/.docx/.xlsx/.pptx/.html để Linh đọc và trả cùng định dạng nếu là text; DOCX trả DOCX; còn lại fallback .txt.\n"
+        "Sau đó gõ: 'sửa lại' | 'nâng cấp' | 'tối ưu' | 'refactor' | 'tóm tắt' | 'dịch sang <ngôn ngữ>' | 'sửa chính tả' | 'chuẩn hoá markdown'."
     )
     await update.message.reply_text(txt)
+
+async def cmd_addlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != ADMIN_ID:
+        return await send_note(context, update.effective_chat.id, "Xin lỗi, lệnh này chỉ cho chủ bot.")
+    if not context.args:
+        return await send_note(context, update.effective_chat.id, "Dùng: /addlink <CHAT_ID> (bot phải là admin trong nhóm đó).")
+    chat_id = int(context.args[0])
+    try:
+        link = await context.bot.create_chat_invite_link(chat_id, name="Linh auto invite")
+        return await send_note(context, update.effective_chat.id, f"Link mời: {link.invite_link}")
+    except Forbidden:
+        return await send_note(context, update.effective_chat.id, "Bot không phải admin ở nhóm đó hoặc không có quyền tạo link.")
+    except BadRequest as e:
+        return await send_note(context, update.effective_chat.id, f"Lỗi tạo link: {e}")
 
 async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     prompt = " ".join(context.args).strip()
     if not prompt:
-        return await update.message.reply_text("Dùng: /img <mô tả>")
+        return await send_note(context, chat_id, "Dùng: /img <mô tả>")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
     try:
         data, mime = create_image_bytes_gemini(prompt)
         buf = io.BytesIO(data); buf.name = "gen.png"
         await context.bot.send_photo(chat_id, buf, caption=prompt)
     except Exception as e:
-        await update.message.reply_text(f"Lỗi tạo ảnh: {e}")
+        await send_note(context, chat_id, f"Lỗi tạo ảnh: {e}")
 
 async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     q = " ".join(context.args).strip()
     if not q:
-        return await update.message.reply_text("Dùng: /code <yêu cầu>")
+        return await send_note(context, chat_id, "Dùng: /code <yêu cầu>")
     async with locks[chat_id]:
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         msgs = build_messages(chat_id, q, sys_prompt_linh()+" Bạn là lập trình viên kỳ cựu. Viết code sạch, best practice.")
@@ -285,12 +327,16 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         histories[chat_id].append(("user", q))
         histories[chat_id].append(("assistant", result[:1000]))
 
+def want_image(t):
+    t=(t or "").lower()
+    return any(k in t for k in ["tạo ảnh","vẽ","generate image","draw image","vẽ giúp","create image","/img "])
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     q = (update.message.text or "").strip()
     low = q.lower()
 
-    if any(k in low for k in ["tạo ảnh","vẽ","generate image","draw image"]) or low.startswith("/img"):
+    if want_image(q):
         prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)\s*[:\-]*", "", q).strip() or "A cute cat in space suit, 3D render"
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         try:
@@ -298,7 +344,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buf = io.BytesIO(data); buf.name = "gen.png"
             await context.bot.send_photo(chat_id, buf, caption=prompt)
         except Exception as e:
-            return await update.message.reply_text(f"Lỗi tạo ảnh: {e}")
+            return await send_note(context, chat_id, f"Lỗi tạo ảnh: {e}")
         return
 
     if chat_id in LAST_DOC:
@@ -323,9 +369,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action:
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
             out = await process_action(src_text, action, target_lang)
-            base = src_name.rsplit(".",1)[0]
-            suf = {"upgrade":"_upgraded","rewrite":"_rewritten","summarize":"_summary","translate":"_translated","proof":"_proofed","markdown":"_md"}[action]
-            out_name, buf = _emit_file(base, suf, out)
+            base, ext = os.path.splitext(src_name)
+            if ext.lower() in TEXT_LIKE:
+                out_name, buf = _emit_text_file(base, ext, out)
+            elif ext.lower() == ".docx":
+                out_name, buf = _emit_docx_file(base, out)
+            else:
+                out_name, buf = _emit_text_file(base, ".txt", out)
             await context.bot.send_document(chat_id, document=buf, caption=f"{action} → {out_name}")
             LAST_DOC[chat_id] = {"name": out_name, "text": out}
             await start_pager(context, chat_id, out, is_code=False)
@@ -337,34 +387,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start_pager(context, chat_id, result, is_code=False)
     histories[chat_id].append(("user", q))
     histories[chat_id].append(("assistant", result[:1000]))
-
-async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    doc = update.message.document
-    name = doc.file_name or "file"
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-    try:
-        if is_archive(name):
-            return await update.message.reply_text("Không nhận file nén (.zip, .rar, .7z, .tar.*).")
-        f = await context.bot.get_file(doc.file_id)
-        bio = io.BytesIO(); await f.download_to_memory(out=bio)
-        data = bio.getvalue()
-        text, kind = read_any_file(name, data)
-        if kind == "error":
-            return await start_pager(context, chat_id, text, is_code=False)
-        if not text:
-            return await update.message.reply_text("Không trích được nội dung từ file.")
-        text = (text or "")[:MAX_EMIT_CHARS]
-        base = name.rsplit(".",1)[0]
-        out_name, buf = _emit_file(base, "", text)
-        await context.bot.send_document(chat_id, document=buf, caption=f"Đã đọc: {name} → {out_name}")
-        LAST_DOC[chat_id] = {"name": out_name, "text": text}
-        await warmup_long_context(text)
-        await start_pager(context, chat_id, "Đã tải file. Gõ: 'sửa lại' | 'nâng cấp' | 'tối ưu' | 'refactor' | 'tóm tắt' | 'dịch sang <ngôn ngữ>' | 'sửa chính tả' | 'chuẩn hoá markdown'.", is_code=False)
-    except BadRequest:
-        await start_pager(context, chat_id, "Đã gửi file .txt.", is_code=True)
-    except Exception as e:
-        await update.message.reply_text(f"Lỗi đọc file: {e}")
 
 async def warmup_long_context(text: str):
     if not client: return
@@ -411,15 +433,45 @@ async def process_action(text: str, action: str, target_lang: str | None):
     msgs=[{"role":"system","content":"Hợp nhất các phần thành một tài liệu hoàn chỉnh, liền mạch, không lặp."},{"role":"user","content":merge_prompt}]
     return complete_with_model(FILE_MODEL, msgs, max_tokens=MAX_TOKENS_FILE, temperature=0.2)
 
-def want_image(t):
-    t=(t or "").lower()
-    return any(k in t for k in ["tạo ảnh","vẽ","generate image","draw image","vẽ giúp","create image","/img "])
+async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    doc = update.message.document
+    name = doc.file_name or "file"
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    try:
+        if is_archive(name):
+            return await send_note(context, chat_id, "Không nhận file nén (.zip, .rar, .7z, .tar.*).")
+        f = await context.bot.get_file(doc.file_id)
+        bio = io.BytesIO(); await f.download_to_memory(out=bio)
+        data = bio.getvalue()
+        text, kind = read_any_file(name, data)
+        if kind == "error":
+            return await start_pager(context, chat_id, text, is_code=False)
+        if not text:
+            return await send_note(context, chat_id, "Không trích được nội dung từ file.")
+        text = (text or "")[:MAX_EMIT_CHARS]
+        base, ext = os.path.splitext(name)
+        if ext.lower() in TEXT_LIKE:
+            out_name, buf = _emit_text_file(base, ext, text)
+        elif ext.lower()==".docx" and DocxDocument is not None:
+            out_name, buf = _emit_docx_file(base, text)
+        else:
+            out_name, buf = _emit_text_file(base, ".txt", text)
+        await context.bot.send_document(chat_id, document=buf, caption=f"Đã đọc: {name} → {out_name}")
+        LAST_DOC[chat_id] = {"name": out_name, "text": text}
+        await warmup_long_context(text)
+        await send_note(context, chat_id, "Đã tải file. Gõ: 'sửa lại' | 'nâng cấp' | 'tối ưu' | 'refactor' | 'tóm tắt' | 'dịch sang <ngôn ngữ>' | 'sửa chính tả' | 'chuẩn hoá markdown'.")
+    except BadRequest:
+        await start_pager(context, chat_id, "Đã gửi file .txt.", is_code=True)
+    except Exception as e:
+        await send_note(context, chat_id, f"Lỗi đọc file: {e}")
 
 def main():
     app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
     app_tg.add_handler(CommandHandler("help", cmd_help))
     app_tg.add_handler(CommandHandler("img", cmd_img))
     app_tg.add_handler(CommandHandler("code", cmd_code))
+    app_tg.add_handler(CommandHandler("addlink", cmd_addlink))
     app_tg.add_handler(CallbackQueryHandler(on_page_nav, pattern=r"^pg_"))
     app_tg.add_handler(MessageHandler(filters.Document.ALL, on_file))
     app_tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
