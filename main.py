@@ -1,6 +1,6 @@
-import os, re, json, time, threading, asyncio, requests, io
+import os, re, json, threading, asyncio, requests, io
 from collections import deque, defaultdict
-from flask import Flask
+from flask import Flask, request, jsonify, abort
 from telegram import Update as TUpdate, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ApplicationBuilder as TAppBuilder, ContextTypes as TContext, MessageHandler as TMsgHandler, filters as tfilters, CommandHandler as TCmd, CallbackQueryHandler as TCB
@@ -10,27 +10,22 @@ try:
     from google.genai import types
 except ImportError:
     genai = None; types = None
-try:
-    # tên module hợp lệ trong Python phải dùng gạch dưới
-    from zalo_bot import Update as ZUpdate
-    from zalo_bot.ext import ApplicationBuilder as ZAppBuilder, CommandHandler as ZCmd, MessageHandler as ZMsgHandler, filters as zfilters
-except Exception:
-    ZUpdate = ZAppBuilder = ZCmd = ZMsgHandler = zfilters = None
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-ZALO_TOKEN = os.environ.get("ZALO_TOKEN","")
-VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY","")
+VERCEL_API_KEY = os.environ["VERCEL_API_KEY"]
 BASE_URL = os.getenv("BASE_URL","https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL","alibaba/qwen-3-235b")
 CODE_MODEL = os.getenv("CODE_MODEL","anthropic/claude-4-sonnet")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY","")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY","")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL","gemini-2.0-flash-preview-image-generation")
+ZALO_OA_ACCESS_TOKEN = os.environ["ZALO_OA_ACCESS_TOKEN"]
+ZALO_VERIFY_TOKEN = os.environ["ZALO_VERIFY_TOKEN"]
 PAGE_CHARS = int(os.getenv("PAGE_CHARS","3200"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS","700"))
 MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE","4000"))
 CTX_TURNS = int(os.getenv("CTX_TURNS","7"))
 
-client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL) if VERCEL_API_KEY else None
+client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL)
 app = Flask(__name__)
 histories = defaultdict(lambda: deque(maxlen=32))
 locks = defaultdict(asyncio.Lock)
@@ -83,14 +78,8 @@ def build_messages(cid, user_text, sys_prompt):
     return msgs
 
 def complete_with_model(model, messages, max_tokens):
-    if not client: return "Thiếu VERCEL_API_KEY."
     res = client.chat.completions.create(model=model, max_tokens=max_tokens, temperature=0.7, messages=messages)
     return (res.choices[0].message.content or "").strip()
-
-def is_codey(t):
-    if not t: return False
-    t=t.lower(); keys=["```","import ","class ","def ","function","const ","let ","var ","#include","public static","<script","</script>"]
-    return any(k in t for k in keys)
 
 def _gem_client():
     if genai is None or types is None: raise RuntimeError("Thiếu google-genai")
@@ -103,7 +92,7 @@ def create_image_bytes_gemini(prompt: str):
     parts = resp.candidates[0].content.parts if resp and resp.candidates else []
     for part in parts:
         if getattr(part, "inline_data", None) and getattr(part.inline_data, "data", None):
-            return part.inline_data.data, part.inline_data.mime_type or "image/png"
+            return part.inline_data.data
     raise RuntimeError("Gemini không trả ảnh.")
 
 def want_image(t):
@@ -155,7 +144,7 @@ async def cmd_img_tg(update: TUpdate, context: TContext.DEFAULT_TYPE):
     if not prompt: return await update.message.reply_text("Dùng: /img <mô tả>")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
     try:
-        data = create_image_bytes_gemini(prompt)[0]
+        data = create_image_bytes_gemini(prompt)
         buf = io.BytesIO(data); buf.name = "gen.png"
         await context.bot.send_photo(chat_id, buf, caption=prompt)
     except Exception as e:
@@ -192,7 +181,7 @@ async def on_text_tg(update: TUpdate, context: TContext.DEFAULT_TYPE):
         prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)[:\-]*", "", q).strip() or "A cute cat in space suit, 3D render"
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         try:
-            data = create_image_bytes_gemini(prompt)[0]
+            data = create_image_bytes_gemini(prompt)
             buf = io.BytesIO(data); buf.name = "gen.png"
             await context.bot.send_photo(chat_id, buf, caption=prompt)
         except Exception as e:
@@ -215,78 +204,71 @@ async def on_text_tg(update: TUpdate, context: TContext.DEFAULT_TYPE):
         except Exception:
             await update.message.reply_text("Lỗi kết nối.")
 
-# ===== Zalo: KHÔNG dùng type hint để tránh crash khi SDK vắng mặt
-async def cmd_help_z(update, context):
-    name = getattr(getattr(update, "effective_user", None), "display_name", "bạn")
-    txt = f"Chào {name}. Lệnh Zalo:\n/help – trợ giúp (@cuocdoivandep)\n/img <mô tả> – tạo ảnh (Gemini)\n/weather <địa danh VN>\n/code <yêu cầu> – code (Claude)\nChat thường dùng Qwen\nBạn đang nói chuyện với trợ lý của Hoàng Tuấn Anh (Zalo)."
-    await update.message.reply_text(txt)
+def zalo_send_text(user_id: str, text: str):
+    url = f"https://openapi.zalo.me/v3.0/oa/message/dispatch?access_token={ZALO_OA_ACCESS_TOKEN}"
+    h = {"Content-Type":"application/json"}
+    body = {"recipient":{"user_id":user_id},"message":{"text":text}}
+    requests.post(url, headers=h, data=json.dumps(body), timeout=15)
 
-async def cmd_img_z(update, context):
-    prompt = " ".join(getattr(context, "args", [])).strip()
-    if not prompt: return await update.message.reply_text("Dùng: /img <mô tả>")
-    try:
-        data = create_image_bytes_gemini(prompt)[0]
-        if hasattr(update.message, "reply_photo"):
-            buf = io.BytesIO(data); buf.name = "gen.png"
-            await update.message.reply_photo(buf, caption=prompt)
-        else:
-            await update.message.reply_text("Ảnh đã tạo.")
-    except Exception as e:
-        await update.message.reply_text(f"Lỗi tạo ảnh: {e}")
-
-async def cmd_weather_z(update, context):
-    args = getattr(context, "args", [])
-    place = " ".join(args).strip() or "Hà Nội"
-    try:
-        await update.message.reply_text(weather_vn(place))
-    except Exception:
-        await update.message.reply_text("Lỗi lấy thời tiết.")
-
-async def cmd_code_z(update, context):
-    q = " ".join(getattr(context, "args", [])).strip()
-    if not q: return await update.message.reply_text("Dùng: /code <yêu cầu>")
-    cid = f"zalo:{getattr(getattr(update, 'effective_chat', None), 'id', '0')}"
-    async with locks[cid]:
+def handle_zalo_text(user_id: str, text: str):
+    cid = f"zalo:{user_id}"
+    if want_image(text):
+        prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)[:\-]*", "", text).strip() or "A cute cat in space suit, 3D render"
+        try:
+            create_image_bytes_gemini(prompt)
+            zalo_send_text(user_id, "Ảnh đã tạo xong.")
+        except Exception as e:
+            zalo_send_text(user_id, f"Lỗi tạo ảnh: {e}")
+        return
+    place = want_weather(text)
+    if place:
+        zalo_send_text(user_id, weather_vn(place)); return
+    if text.strip().startswith("/code"):
+        q = text.strip()[5:].strip() or "Hello"
         msgs = build_messages(cid, q, sys_prompt="Bạn là lập trình viên kỳ cựu. Viết code đầy đủ, sạch, best practice. Không giới hạn độ dài; nếu dài, cứ trả hết.")
         try:
-            result = complete_with_model(CODE_MODEL, msgs, MAX_TOKENS_CODE) or "..."
-            m = re.search(r"```(\w+)?\n(.*?)```", result, flags=re.S)
-            out = m.group(2).rstrip() if m else result
-            await update.message.reply_text(out if len(out)<=3500 else out[:3500])
-            histories[cid].append(("user", q)); histories[cid].append(("assistant", result[:1000]))
+            out = complete_with_model(CODE_MODEL, msgs, MAX_TOKENS_CODE) or "..."
+            m = re.search(r"```(\w+)?\n(.*?)```", out, flags=re.S)
+            out = m.group(2).rstrip() if m else out
+            zalo_send_text(user_id, out[:3500])
         except Exception:
-            await update.message.reply_text("Lỗi kết nối.")
-
-async def on_text_z(update, context):
-    q = getattr(update.message, "text", "") or ""
-    cid = f"zalo:{getattr(getattr(update, 'effective_chat', None), 'id', '0')}"
-    if want_image(q):
-        prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)[:\-]*", "", q).strip() or "A cute cat in space suit, 3D render"
-        try:
-            data = create_image_bytes_gemini(prompt)[0]
-            if hasattr(update.message, "reply_photo"):
-                buf = io.BytesIO(data); buf.name = "gen.png"
-                await update.message.reply_photo(buf, caption=prompt)
-            else:
-                await update.message.reply_text("Ảnh đã tạo.")
-        except Exception as e:
-            return await update.message.reply_text(f"Lỗi tạo ảnh: {e}")
+            zalo_send_text(user_id, "Lỗi kết nối.")
         return
-    place = want_weather(q)
-    if place:
-        try:
-            return await update.message.reply_text(weather_vn(place))
-        except Exception:
-            return await update.message.reply_text("Lỗi lấy thời tiết.")
-    async with locks[cid]:
-        sys_prompt = "Bạn là trợ lý của Hoàng Tuấn Anh (Zalo). Nói chuyện tự nhiên, ngắn gọn, thân thiện."
-        msgs = build_messages(cid, q, sys_prompt=sys_prompt)
-        try:
-            result = complete_with_model(CHAT_MODEL, msgs, MAX_TOKENS) or "..."
-            await update.message.reply_text(result if len(result)<=3500 else result[:3500])
-            histories[cid].append(("user", q)); histories[cid].append(("assistant", result[:1000]))
-        except Exception:
-            await update.message.reply_text("Lỗi kết nối.")
+    sys_prompt = "Bạn là trợ lý của Hoàng Tuấn Anh (Zalo). Nói chuyện tự nhiên, ngắn gọn, thân thiện."
+    msgs = build_messages(cid, text, sys_prompt=sys_prompt)
+    try:
+        out = complete_with_model(CHAT_MODEL, msgs, MAX_TOKENS) or "..."
+        zalo_send_text(user_id, out[:3500])
+    except Exception:
+        zalo_send_text(user_id, "Lỗi kết nối.")
+
+@app.get("/")
+def root_ok():
+    return "ok"
+
+@app.get("/zalo/webhook")
+def zalo_verify():
+    v = request.args.get("verify","")
+    return v if v==ZALO_VERIFY_TOKEN else abort(403)
+
+@app.post("/zalo/webhook")
+def zalo_events():
+    try:
+        data = request.get_json(force=True, silent=False) or {}
+    except Exception:
+        return jsonify({"ok":False}), 400
+    user_id = ""
+    text = ""
+    if "sender" in data and "message" in data:
+        user_id = str(data["sender"].get("id") or data["sender"].get("user_id") or "")
+        msg = data["message"]
+        text = msg.get("text","") if isinstance(msg,dict) else ""
+    elif "from" in data and "text" in data:
+        user_id = str(data["from"].get("id") or "")
+        text = data.get("text","")
+    if user_id and text:
+        threading.Thread(target=handle_zalo_text, args=(user_id, text), daemon=True).start()
+    return jsonify({"ok":True})
 
 def run_telegram():
     app_tg = TAppBuilder().token(BOT_TOKEN).build()
@@ -296,20 +278,8 @@ def run_telegram():
     app_tg.add_handler(TCmd("code", cmd_code_tg))
     app_tg.add_handler(TCB(on_page_nav_tg, pattern=r"^pg_"))
     app_tg.add_handler(TMsgHandler(tfilters.TEXT & ~tfilters.COMMAND, on_text_tg))
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     app_tg.run_polling()
 
-def run_zalo():
-    if not (ZAppBuilder and ZCmd and ZMsgHandler and zfilters and ZALO_TOKEN):
-        print("Zalo disabled: thiếu SDK hoặc ZALO_TOKEN"); return
-    app_z = ZAppBuilder().token(ZALO_TOKEN).build()
-    app_z.add_handler(ZCmd("help", cmd_help_z))
-    app_z.add_handler(ZCmd("img", cmd_img_z))
-    app_z.add_handler(ZCmd("weather", cmd_weather_z))
-    app_z.add_handler(ZCmd("code", cmd_code_z))
-    app_z.add_handler(ZMsgHandler(zfilters.TEXT & ~zfilters.COMMAND, on_text_z))
-    app_z.run_polling()
-
 if __name__ == "__main__":
-    threading.Thread(target=run_zalo, daemon=True).start()
-    run_telegram()
+    threading.Thread(target=run_telegram, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT","8080")))
