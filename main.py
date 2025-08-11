@@ -7,13 +7,16 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from openai import OpenAI
 try:
     from google import genai
+    from google.genai import types
 except ImportError:
     genai = None
+    types = None
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
-MODEL = os.getenv("MODEL", "alibaba/qwen-3-235b")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "alibaba/qwen-3-235b")
+CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-4-sonnet")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-image-generation")
 PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
@@ -70,64 +73,43 @@ async def on_page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: return await q.answer()
     await send_or_update(context, q.message.chat_id, q.message, p); await q.answer()
 
-def is_codey(t):
-    if not t: return False
-    t=t.lower(); keys=["```","import ","class ","def ","function","const ","let ","var ","#include","public static","<script","</script>"]
-    return any(k in t for k in keys)
-
-def build_messages(cid, user_text, code_mode=False):
-    sys_prompt = ("Bạn là lập trình viên kỳ cựu. Viết code đầy đủ, sạch, best practice. Không giới hạn độ dài; nếu dài, cứ trả hết."
-                  if code_mode else
-                  "Bạn là Linh – mồm mép, bộc trực kiểu Grok; trả lời ngắn gọn, tự nhiên.")
+def build_messages(cid, user_text, sys_prompt):
     msgs=[{"role":"system","content":sys_prompt}]
     keep=max(2, CTX_TURNS*2)
     msgs += [{"role":r,"content":c} for r,c in list(histories[cid])[-keep:]]
     msgs.append({"role":"user","content":user_text})
     return msgs
 
-def complete_block(messages, max_tokens):
+def complete_with_model(model, messages, max_tokens):
     if not client:
-        return "Chưa cấu hình VERCEL_API_KEY cho chat."
-    res = client.chat.completions.create(model=MODEL, max_tokens=max_tokens, temperature=0.7, messages=messages)
+        return "Thiếu VERCEL_API_KEY."
+    res = client.chat.completions.create(model=model, max_tokens=max_tokens, temperature=0.7, messages=messages)
     return (res.choices[0].message.content or "").strip()
 
-def create_image_url_via_gateway(prompt, size="1024x1024"):
-    if not VERCEL_API_KEY:
-        return None
-    url = f"{BASE_URL}/images/generations"
-    headers = {"Authorization": f"Bearer {VERCEL_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": MODEL, "prompt": prompt, "size": size}
-    r = requests.post(url, headers=headers, json=payload, timeout=60)
-    r.raise_for_status()
-    j=r.json()
-    return (j.get("data") or [{}])[0].get("url")
+def is_codey(t):
+    if not t: return False
+    t=t.lower(); keys=["```","import ","class ","def ","function","const ","let ","var ","#include","public static","<script","</script>"]
+    return any(k in t for k in keys)
 
-_gem_client = None
 def _get_gem_client():
-    global _gem_client
-    if _gem_client is None:
-        if genai is None:
-            raise RuntimeError("Thiếu package google-genai. Cài: pip install google-genai")
-        if not GEMINI_API_KEY:
-            raise RuntimeError("Thiếu GEMINI_API_KEY.")
-        _gem_client = genai.Client(api_key=GEMINI_API_KEY)
-    return _gem_client
+    if genai is None or types is None:
+        raise RuntimeError("Thiếu package google-genai")
+    if not GEMINI_API_KEY:
+        raise RuntimeError("Thiếu GEMINI_API_KEY")
+    return genai.Client(api_key=GEMINI_API_KEY)
 
-def create_image_bytes_gemini(prompt: str, size: str = "1024x1024"):
-    w,h = (int(x) for x in size.lower().split("x"))
+def create_image_bytes_gemini(prompt: str):
     cli = _get_gem_client()
-    resp = cli.models.generate_images(
+    resp = cli.models.generate_content(
         model=GEMINI_IMAGE_MODEL,
-        prompt=prompt,
-        image_size={"width": w, "height": h},
-        safety_filter_level="block_few",
+        contents=prompt,
+        config=types.GenerateContentConfig(response_modalities=['TEXT','IMAGE'])
     )
-    if not getattr(resp, "generated_images", None):
-        raise RuntimeError("Gemini không trả ảnh.")
-    img = resp.generated_images[0]
-    mime = img.mime_type or "image/png"
-    data = img.image_bytes
-    return data, mime
+    parts = resp.candidates[0].content.parts if resp and resp.candidates else []
+    for part in parts:
+        if getattr(part, "inline_data", None) and getattr(part.inline_data, "data", None):
+            return part.inline_data.data, part.inline_data.mime_type or "image/png"
+    raise RuntimeError("Gemini không trả ảnh.")
 
 def want_image(t):
     t=(t or "").lower()
@@ -176,22 +158,27 @@ def want_weather(t):
         if k in t: return k
     return "Hà Nội"
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (
+        "Lệnh:\n"
+        "/help – trợ giúp (@cuocdoivandep)\n"
+        "/img <mô tả> – tạo ảnh (Gemini)\n"
+        "/weather <địa danh VN> – thời tiết\n"
+        "/code <yêu cầu> – code (Claude)\n"
+        "Chat thường dùng Qwen\n"
+    )
+    await update.message.reply_text(txt)
+
 async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     prompt = " ".join(context.args).strip()
     if not prompt:
         return await update.message.reply_text("Dùng: /img <mô tả>")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-    use_gemini = bool(GEMINI_API_KEY)
     try:
-        if use_gemini:
-            data, mime = create_image_bytes_gemini(prompt, size="1024x1024")
-            buf = io.BytesIO(data); buf.name = "gen.png"
-            await context.bot.send_photo(chat_id, buf, caption=prompt)
-        else:
-            url = create_image_url_via_gateway(prompt)
-            if url: await context.bot.send_photo(chat_id, url, caption=prompt)
-            else:   await update.message.reply_text("Không có GEMINI_API_KEY, và gateway không hỗ trợ images.")
+        data, mime = create_image_bytes_gemini(prompt)
+        buf = io.BytesIO(data); buf.name = "gen.png"
+        await context.bot.send_photo(chat_id, buf, caption=prompt)
     except Exception as e:
         await update.message.reply_text(f"Lỗi tạo ảnh: {e}")
 
@@ -203,6 +190,24 @@ async def cmd_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("Lỗi lấy thời tiết.")
 
+async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    q = " ".join(context.args).strip()
+    if not q:
+        return await update.message.reply_text("Dùng: /code <yêu cầu>")
+    async with locks[chat_id]:
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        try:
+            msgs = build_messages(chat_id, q, sys_prompt="Bạn là lập trình viên kỳ cựu. Viết code đầy đủ, sạch, best practice. Không giới hạn độ dài; nếu dài, cứ trả hết.")
+            result = complete_with_model(CODE_MODEL, msgs, MAX_TOKENS_CODE) or "..."
+            m = re.search(r"```(\w+)?\n(.*?)```", result, flags=re.S)
+            if m: await start_pager(context, chat_id, m.group(2).rstrip(), is_code=True, lang_hint=m.group(1) or "")
+            else: await start_pager(context, chat_id, result, is_code=True)
+            histories[chat_id].append(("user", q))
+            histories[chat_id].append(("assistant", result[:1000]))
+        except Exception:
+            await update.message.reply_text("Lỗi kết nối.")
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     q = update.message.text or ""
@@ -210,14 +215,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)[:\-]*", "", q).strip() or "A cute cat in space suit, 3D render"
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         try:
-            if GEMINI_API_KEY:
-                data, mime = create_image_bytes_gemini(prompt, size="1024x1024")
-                buf = io.BytesIO(data); buf.name = "gen.png"
-                await context.bot.send_photo(chat_id, buf, caption=prompt)
-            else:
-                url = create_image_url_via_gateway(prompt)
-                if url: await context.bot.send_photo(chat_id, url, caption=prompt)
-                else:   await update.message.reply_text("Không có GEMINI_API_KEY, và gateway không hỗ trợ images.")
+            data, mime = create_image_bytes_gemini(prompt)
+            buf = io.BytesIO(data); buf.name = "gen.png"
+            await context.bot.send_photo(chat_id, buf, caption=prompt)
         except Exception as e:
             return await update.message.reply_text(f"Lỗi tạo ảnh: {e}")
         return
@@ -228,18 +228,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await start_pager(context, chat_id, txt, is_code=False)
         except Exception:
             return await update.message.reply_text("Lỗi lấy thời tiết.")
-    code_mode = is_codey(q)
     async with locks[chat_id]:
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         try:
-            msgs = build_messages(chat_id, q, code_mode=code_mode)
-            result = complete_block(msgs, MAX_TOKENS_CODE if code_mode else MAX_TOKENS) or "..."
-            if code_mode:
-                m = re.search(r"```(\w+)?\n(.*?)```", result, flags=re.S)
-                if m: await start_pager(context, chat_id, m.group(2).rstrip(), is_code=True, lang_hint=m.group(1) or "")
-                else: await start_pager(context, chat_id, result, is_code=True)
-            else:
-                await start_pager(context, chat_id, result, is_code=False)
+            msgs = build_messages(chat_id, q, sys_prompt="Bạn là Linh – mồm mép, bộc trực kiểu Grok; trả lời ngắn gọn, tự nhiên.")
+            result = complete_with_model(CHAT_MODEL, msgs, MAX_TOKENS) or "..."
+            await start_pager(context, chat_id, result, is_code=False)
             histories[chat_id].append(("user", q))
             histories[chat_id].append(("assistant", result[:1000]))
         except Exception:
@@ -247,8 +241,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
+    app_tg.add_handler(CommandHandler("help", cmd_help))
     app_tg.add_handler(CommandHandler("img", cmd_img))
     app_tg.add_handler(CommandHandler("weather", cmd_weather))
+    app_tg.add_handler(CommandHandler("code", cmd_code))
     app_tg.add_handler(CallbackQueryHandler(on_page_nav, pattern=r"^pg_"))
     app_tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
