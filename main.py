@@ -11,10 +11,11 @@ try:
 except ImportError:
     genai = None; types = None
 try:
+    # tên module hợp lệ trong Python phải dùng gạch dưới
     from zalo_bot import Update as ZUpdate
-    from zalo_bot.ext import ApplicationBuilder as ZAppBuilder, CommandHandler as ZCmd, ContextTypes as ZContext, MessageHandler as ZMsgHandler, filters as zfilters, CallbackQueryHandler as ZCB
-except ImportError:
-    ZUpdate = None; ZAppBuilder = None; ZCmd = None; ZContext = None; ZMsgHandler = None; zfilters = None; ZCB = None
+    from zalo_bot.ext import ApplicationBuilder as ZAppBuilder, CommandHandler as ZCmd, MessageHandler as ZMsgHandler, filters as zfilters
+except Exception:
+    ZUpdate = ZAppBuilder = ZCmd = ZMsgHandler = zfilters = None
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ZALO_TOKEN = os.environ.get("ZALO_TOKEN","")
@@ -154,7 +155,7 @@ async def cmd_img_tg(update: TUpdate, context: TContext.DEFAULT_TYPE):
     if not prompt: return await update.message.reply_text("Dùng: /img <mô tả>")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
     try:
-        data, mime = create_image_bytes_gemini(prompt)
+        data = create_image_bytes_gemini(prompt)[0]
         buf = io.BytesIO(data); buf.name = "gen.png"
         await context.bot.send_photo(chat_id, buf, caption=prompt)
     except Exception as e:
@@ -191,7 +192,7 @@ async def on_text_tg(update: TUpdate, context: TContext.DEFAULT_TYPE):
         prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)[:\-]*", "", q).strip() or "A cute cat in space suit, 3D render"
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         try:
-            data, mime = create_image_bytes_gemini(prompt)
+            data = create_image_bytes_gemini(prompt)[0]
             buf = io.BytesIO(data); buf.name = "gen.png"
             await context.bot.send_photo(chat_id, buf, caption=prompt)
         except Exception as e:
@@ -214,36 +215,37 @@ async def on_text_tg(update: TUpdate, context: TContext.DEFAULT_TYPE):
         except Exception:
             await update.message.reply_text("Lỗi kết nối.")
 
-async def cmd_help_z(update: ZUpdate, context: ZContext.DEFAULT_TYPE):
-    name = getattr(update.effective_user, "display_name", "bạn")
+# ===== Zalo: KHÔNG dùng type hint để tránh crash khi SDK vắng mặt
+async def cmd_help_z(update, context):
+    name = getattr(getattr(update, "effective_user", None), "display_name", "bạn")
     txt = f"Chào {name}. Lệnh Zalo:\n/help – trợ giúp (@cuocdoivandep)\n/img <mô tả> – tạo ảnh (Gemini)\n/weather <địa danh VN>\n/code <yêu cầu> – code (Claude)\nChat thường dùng Qwen\nBạn đang nói chuyện với trợ lý của Hoàng Tuấn Anh (Zalo)."
     await update.message.reply_text(txt)
 
-async def cmd_img_z(update: ZUpdate, context: ZContext.DEFAULT_TYPE):
-    prompt = " ".join(context.args).strip()
+async def cmd_img_z(update, context):
+    prompt = " ".join(getattr(context, "args", [])).strip()
     if not prompt: return await update.message.reply_text("Dùng: /img <mô tả>")
     try:
-        data, mime = create_image_bytes_gemini(prompt)
+        data = create_image_bytes_gemini(prompt)[0]
         if hasattr(update.message, "reply_photo"):
             buf = io.BytesIO(data); buf.name = "gen.png"
             await update.message.reply_photo(buf, caption=prompt)
         else:
-            await update.message.reply_text("Ảnh đã tạo, nhưng kênh hiện không hỗ trợ gửi ảnh.")
+            await update.message.reply_text("Ảnh đã tạo.")
     except Exception as e:
         await update.message.reply_text(f"Lỗi tạo ảnh: {e}")
 
-async def cmd_weather_z(update: ZUpdate, context: ZContext.DEFAULT_TYPE):
-    place = " ".join(context.args).strip() or "Hà Nội"
+async def cmd_weather_z(update, context):
+    args = getattr(context, "args", [])
+    place = " ".join(args).strip() or "Hà Nội"
     try:
-        txt = weather_vn(place)
-        await update.message.reply_text(txt)
+        await update.message.reply_text(weather_vn(place))
     except Exception:
         await update.message.reply_text("Lỗi lấy thời tiết.")
 
-async def cmd_code_z(update: ZUpdate, context: ZContext.DEFAULT_TYPE):
-    q = " ".join(context.args).strip()
+async def cmd_code_z(update, context):
+    q = " ".join(getattr(context, "args", [])).strip()
     if not q: return await update.message.reply_text("Dùng: /code <yêu cầu>")
-    cid = f"zalo:{update.effective_chat.id}"
+    cid = f"zalo:{getattr(getattr(update, 'effective_chat', None), 'id', '0')}"
     async with locks[cid]:
         msgs = build_messages(cid, q, sys_prompt="Bạn là lập trình viên kỳ cựu. Viết code đầy đủ, sạch, best practice. Không giới hạn độ dài; nếu dài, cứ trả hết.")
         try:
@@ -255,26 +257,25 @@ async def cmd_code_z(update: ZUpdate, context: ZContext.DEFAULT_TYPE):
         except Exception:
             await update.message.reply_text("Lỗi kết nối.")
 
-async def on_text_z(update: ZUpdate, context: ZContext.DEFAULT_TYPE):
-    q = update.message.text or ""
-    cid = f"zalo:{update.effective_chat.id}"
+async def on_text_z(update, context):
+    q = getattr(update.message, "text", "") or ""
+    cid = f"zalo:{getattr(getattr(update, 'effective_chat', None), 'id', '0')}"
     if want_image(q):
         prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)[:\-]*", "", q).strip() or "A cute cat in space suit, 3D render"
         try:
-            data, mime = create_image_bytes_gemini(prompt)
+            data = create_image_bytes_gemini(prompt)[0]
             if hasattr(update.message, "reply_photo"):
                 buf = io.BytesIO(data); buf.name = "gen.png"
                 await update.message.reply_photo(buf, caption=prompt)
             else:
-                await update.message.reply_text("Ảnh đã tạo, nhưng kênh hiện không hỗ trợ gửi ảnh.")
+                await update.message.reply_text("Ảnh đã tạo.")
         except Exception as e:
             return await update.message.reply_text(f"Lỗi tạo ảnh: {e}")
         return
     place = want_weather(q)
     if place:
         try:
-            txt = weather_vn(place)
-            return await update.message.reply_text(txt)
+            return await update.message.reply_text(weather_vn(place))
         except Exception:
             return await update.message.reply_text("Lỗi lấy thời tiết.")
     async with locks[cid]:
@@ -299,7 +300,8 @@ def run_telegram():
     app_tg.run_polling()
 
 def run_zalo():
-    if not (ZAppBuilder and ZALO_TOKEN): return
+    if not (ZAppBuilder and ZCmd and ZMsgHandler and zfilters and ZALO_TOKEN):
+        print("Zalo disabled: thiếu SDK hoặc ZALO_TOKEN"); return
     app_z = ZAppBuilder().token(ZALO_TOKEN).build()
     app_z.add_handler(ZCmd("help", cmd_help_z))
     app_z.add_handler(ZCmd("img", cmd_img_z))
