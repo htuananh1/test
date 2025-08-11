@@ -11,15 +11,15 @@ try:
 except ImportError:
     genai = None; types = None
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 VERCEL_API_KEY = os.environ["VERCEL_API_KEY"]
 BASE_URL = os.getenv("BASE_URL","https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL","alibaba/qwen-3-235b")
 CODE_MODEL = os.getenv("CODE_MODEL","anthropic/claude-4-sonnet")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY","")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY","")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL","gemini-2.0-flash-preview-image-generation")
-ZALO_OA_ACCESS_TOKEN = os.environ["ZALO_OA_ACCESS_TOKEN"]
-ZALO_VERIFY_TOKEN = os.environ["ZALO_VERIFY_TOKEN"]
+ZALO_OA_ACCESS_TOKEN = os.getenv("ZALO_OA_ACCESS_TOKEN","")
+ZALO_VERIFY_TOKEN = os.getenv("ZALO_VERIFY_TOKEN","")
 PAGE_CHARS = int(os.getenv("PAGE_CHARS","3200"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS","700"))
 MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE","4000"))
@@ -205,18 +205,21 @@ async def on_text_tg(update: TUpdate, context: TContext.DEFAULT_TYPE):
             await update.message.reply_text("Lỗi kết nối.")
 
 def zalo_send_text(user_id: str, text: str):
+    if not ZALO_OA_ACCESS_TOKEN: 
+        print("[ZALO] missing access token"); 
+        return
     url = f"https://openapi.zalo.me/v3.0/oa/message/dispatch?access_token={ZALO_OA_ACCESS_TOKEN}"
     h = {"Content-Type":"application/json"}
     body = {"recipient":{"user_id":user_id},"message":{"text":text}}
-    requests.post(url, headers=h, data=json.dumps(body), timeout=15)
+    r = requests.post(url, headers=h, data=json.dumps(body), timeout=15)
+    print("[ZALO] dispatch:", r.status_code, r.text[:200])
 
 def handle_zalo_text(user_id: str, text: str):
     cid = f"zalo:{user_id}"
     if want_image(text):
         prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)[:\-]*", "", text).strip() or "A cute cat in space suit, 3D render"
         try:
-            create_image_bytes_gemini(prompt)
-            zalo_send_text(user_id, "Ảnh đã tạo xong.")
+            create_image_bytes_gemini(prompt); zalo_send_text(user_id, "Ảnh đã tạo xong.")
         except Exception as e:
             zalo_send_text(user_id, f"Lỗi tạo ảnh: {e}")
         return
@@ -232,7 +235,7 @@ def handle_zalo_text(user_id: str, text: str):
             out = m.group(2).rstrip() if m else out
             zalo_send_text(user_id, out[:3500])
         except Exception:
-            zalo_send_text(user_id, "Lỗi kết nối.")
+            zalo_send_text(user_id, "Lỗi kết nối."); 
         return
     sys_prompt = "Bạn là trợ lý của Hoàng Tuấn Anh (Zalo). Nói chuyện tự nhiên, ngắn gọn, thân thiện."
     msgs = build_messages(cid, text, sys_prompt=sys_prompt)
@@ -249,28 +252,35 @@ def root_ok():
 @app.get("/zalo/webhook")
 def zalo_verify():
     v = request.args.get("verify","")
-    return v if v==ZALO_VERIFY_TOKEN else abort(403)
+    return (v,200) if v==ZALO_VERIFY_TOKEN else ("Verify token mismatch",403)
 
 @app.post("/zalo/webhook")
 def zalo_events():
     try:
         data = request.get_json(force=True, silent=False) or {}
-    except Exception:
+        print("[ZALO] incoming:", json.dumps(data, ensure_ascii=False)[:500])
+    except Exception as e:
+        print("[ZALO] bad json:", e); 
         return jsonify({"ok":False}), 400
-    user_id = ""
-    text = ""
+    user_id = ""; text = ""
     if "sender" in data and "message" in data:
         user_id = str(data["sender"].get("id") or data["sender"].get("user_id") or "")
-        msg = data["message"]
-        text = msg.get("text","") if isinstance(msg,dict) else ""
+        msg = data["message"]; text = msg.get("text","") if isinstance(msg,dict) else ""
     elif "from" in data and "text" in data:
         user_id = str(data["from"].get("id") or "")
         text = data.get("text","")
     if user_id and text:
         threading.Thread(target=handle_zalo_text, args=(user_id, text), daemon=True).start()
+    else:
+        print("[ZALO] no user_id/text parsed")
     return jsonify({"ok":True})
 
 def run_telegram():
+    if not BOT_TOKEN: 
+        print("[TG] disabled: missing BOT_TOKEN"); 
+        return
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     app_tg = TAppBuilder().token(BOT_TOKEN).build()
     app_tg.add_handler(TCmd("help", cmd_help_tg))
     app_tg.add_handler(TCmd("img", cmd_img_tg))
@@ -278,7 +288,7 @@ def run_telegram():
     app_tg.add_handler(TCmd("code", cmd_code_tg))
     app_tg.add_handler(TCB(on_page_nav_tg, pattern=r"^pg_"))
     app_tg.add_handler(TMsgHandler(tfilters.TEXT & ~tfilters.COMMAND, on_text_tg))
-    app_tg.run_polling()
+    app_tg.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     threading.Thread(target=run_telegram, daemon=True).start()
