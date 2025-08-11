@@ -16,16 +16,16 @@ BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 MODEL = os.getenv("MODEL", "alibaba/qwen-3-235b")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-image-generation")
-PAGE_CHARS   = int(os.getenv("PAGE_CHARS", "3200"))
-MAX_TOKENS   = int(os.getenv("MAX_TOKENS", "700"))
+PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "700"))
 MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE", "4000"))
-CTX_TURNS    = int(os.getenv("CTX_TURNS", "7"))
+CTX_TURNS = int(os.getenv("CTX_TURNS", "7"))
 
-client   = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL) if VERCEL_API_KEY else None
-app      = Flask(__name__)
-histories= defaultdict(lambda: deque(maxlen=32))
-locks    = defaultdict(asyncio.Lock)
-PAGERS   = {}
+client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL) if VERCEL_API_KEY else None
+app = Flask(__name__)
+histories = defaultdict(lambda: deque(maxlen=32))
+locks = defaultdict(asyncio.Lock)
+PAGERS = {}
 
 def chunk_pages(raw, per_page=PAGE_CHARS):
     lines = (raw or "").splitlines(); pages=[]; cur=[]; used=0
@@ -40,7 +40,9 @@ def chunk_pages(raw, per_page=PAGE_CHARS):
 
 def kb(idx,total):
     return None if total<=1 else InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⏪","pg_prev"), InlineKeyboardButton(f"{idx+1}/{total}","pg_stay"), InlineKeyboardButton("⏩","pg_next")]]
+        [[InlineKeyboardButton("⏪", callback_data="pg_prev"),
+          InlineKeyboardButton(f"{idx+1}/{total}", callback_data="pg_stay"),
+          InlineKeyboardButton("⏩", callback_data="pg_next")]]
     )
 
 def page_payload(p):
@@ -117,7 +119,7 @@ def create_image_bytes_gemini(prompt: str, size: str = "1024x1024"):
     resp = cli.models.generate_images(
         model=GEMINI_IMAGE_MODEL,
         prompt=prompt,
-        size={"width": w, "height": h},
+        image_size={"width": w, "height": h},
         safety_filter_level="block_few",
     )
     if not getattr(resp, "generated_images", None):
