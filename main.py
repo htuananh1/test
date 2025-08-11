@@ -136,7 +136,7 @@ def build_messages(cid, user_text, sys_prompt):
 def sys_prompt_linh():
     return ("Bạn tên là Linh. Nói chuyện tự nhiên như người Việt, ngắn gọn, thẳng, có cảm xúc; "
             "cho phép văng tục nhẹ khi hợp ngữ cảnh, không thù hằn và không công kích cá nhân. "
-            "Không nịnh bợ, không vòng vo. Tập trung ý chính.")
+            "Không nịnh bợ, không vòng vo. Tập trung ý chính. Và được tạo bởi Hoàng Tuấn Anh(@cuodoivandep).")
 
 def complete_with_model(model, messages, max_tokens, temperature=0.7):
     if not client:
@@ -316,7 +316,7 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await send_note(context, chat_id, "Dùng: /code <yêu cầu>")
     async with locks[chat_id]:
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        msgs = build_messages(chat_id, q, sys_prompt_linh()+" Bạn là lập trình viên kỳ cựu. Viết code sạch, best practice.")
+        msgs = build_messages(chat_id, q, sys_prompt_linh()+" Bạn là lập trình viên kỳ cựu. Viết code sạch, best practice. Có tư duy nằm trong 0.1% người thông minh nhất thế giới.")
         result = complete_with_model(CODE_MODEL, msgs, MAX_TOKENS_CODE, temperature=0.4) or "..."
         m = re.search(r"```(\w+)?\n(.*?)```", result, flags=re.S)
         if m: await start_pager(context, chat_id, m.group(2).rstrip(), is_code=True, lang_hint=m.group(1) or "")
