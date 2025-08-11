@@ -16,7 +16,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "alibaba/qwen-3-235b")
-CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-4-sonnet")
+CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-4.1-opus")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-image-generation")
 PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
@@ -161,7 +161,7 @@ def want_weather(t):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "Lệnh:\n"
-        "/help – trợ giúp (@cuocdoivandep)\n"
+        "/help – Liên hệ (@cuocdoivandep)\n"
         "/img <mô tả> – tạo ảnh (Gemini)\n"
         "/weather <địa danh VN> – thời tiết\n"
         "/code <yêu cầu> – code (Claude)\n"
