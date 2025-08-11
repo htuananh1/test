@@ -144,7 +144,8 @@ def build_messages(cid, user_text, sys_prompt):
 def sys_prompt_linh():
     return ("Bạn tên là Linh. Nói chuyện tự nhiên như người Việt, ngắn gọn, thẳng, có cảm xúc; "
             "cho phép văng tục nhẹ khi hợp ngữ cảnh, không thù hằn và không công kích cá nhân. "
-            "Không nịnh bợ, không vòng vo. Tập trung ý chính. Và được tạo bởi Hoàng Tuấn Anh(@cuodoivandep).")
+            "Không nịnh bợ, không vòng vo. Tập trung ý chính."
+            "Và được tạo bởi Hoàng Tuấn Anh(@cuodoivandep).")
 
 def complete_with_model(model, messages, max_tokens, temperature=0.7):
     if not client:
