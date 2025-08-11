@@ -276,11 +276,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "Lệnh:\n"
         "/help – trợ giúp\n"
-        "/img <mô tả> – tạo ảnh (Gemini)\n"
-        "/code <yêu cầu> – code (Claude)\n"
-        "/addlink <CHAT_ID> – tạo link mời (chỉ admin)\n"
-        "Gửi file .txt/.md/.json/.csv/.pdf/.docx/.xlsx/.pptx/.html để Linh đọc và trả cùng định dạng nếu là text; DOCX trả DOCX; còn lại fallback .txt.\n"
-        "Sau đó gõ: 'sửa lại' | 'nâng cấp' | 'tối ưu' | 'refactor' | 'tóm tắt' | 'dịch sang <ngôn ngữ>' | 'sửa chính tả' | 'chuẩn hoá markdown'."
+        "/img <mô tả> – Chuyên gia tạo ảnh(hơi ngáo tí) (Gemini)\n"
+        "/code <yêu cầu> – code (Claude-3.7-sonnet)\n"
     )
     await update.message.reply_text(txt)
 
