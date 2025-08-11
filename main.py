@@ -9,7 +9,7 @@ from openai import OpenAI
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ["VERCEL_API_KEY"]
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
-MODEL = os.getenv("MODEL", "alibaba/qwen-3-235b")  # dùng CHUNG cho chat + image
+MODEL = os.getenv("MODEL", "xai/grok-3")  # dùng CHUNG cho chat + image
 
 PAGE_CHARS   = int(os.getenv("PAGE_CHARS", "3200"))
 MAX_TOKENS   = int(os.getenv("MAX_TOKENS", "700"))
