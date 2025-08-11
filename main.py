@@ -1,4 +1,4 @@
-import os, re, json, threading, asyncio, io
+import os, re, json, threading, asyncio, io, time, gc
 from collections import deque, defaultdict
 from html import escape as htmlesc
 from flask import Flask
@@ -62,6 +62,10 @@ GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-i
 MAX_EMIT_CHARS = int(os.getenv("MAX_EMIT_CHARS", "800000"))
 CHUNK_CHARS = int(os.getenv("CHUNK_CHARS", "180000"))
 
+INACTIVE_SECS = int(os.getenv("INACTIVE_SECS", "900"))
+MAX_PAGERS = int(os.getenv("MAX_PAGERS", "2000"))
+GC_EVERY = int(os.getenv("GC_EVERY", "10"))
+
 ARCHIVES = (".zip",".rar",".7z",".tar",".tar.gz",".tgz",".tar.bz2",".tar.xz")
 TEXT_LIKE = (".txt",".md",".log",".csv",".tsv",".json",".yaml",".yml",".ini",".cfg",".env",".xml",".html",".htm",
              ".py",".js",".ts",".java",".c",".cpp",".cs",".go",".php",".rb",".rs",".sh",".bat",".ps1",".sql")
@@ -72,6 +76,8 @@ histories = defaultdict(lambda: deque(maxlen=32))
 locks = defaultdict(asyncio.Lock)
 PAGERS = {}
 LAST_DOC = {}
+LAST_SEEN = defaultdict(lambda: time.time())
+REQ_COUNT = 0
 
 def chunk_pages(raw, per_page=PAGE_CHARS):
     lines = (raw or "").splitlines(); pages=[]; cur=[]; used=0
@@ -114,17 +120,19 @@ async def send_or_update(ctx, chat_id, msg, p):
 
 async def start_pager(ctx, chat_id, raw, is_code=False, lang_hint=""):
     pages = chunk_pages(raw)
-    await send_or_update(ctx, chat_id, None, {"pages": pages, "is_code": is_code, "lang": lang_hint or "", "idx": 0})
+    await send_or_update(ctx, chat_id, None, {"pages": pages, "is_code": is_code, "lang": lang_hint or "", "idx": 0, "ts": time.time()})
 
 async def on_page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q: return
+    touch(q.message.chat_id)
     key=(q.message.chat_id, q.message.message_id); p=PAGERS.get(key)
     if not p: return await q.answer("Hết phiên.")
     if q.data=="pg_prev" and p["idx"]>0: p["idx"]-=1
     elif q.data=="pg_next" and p["idx"]<len(p["pages"])-1: p["idx"]+=1
     else: return await q.answer()
     await send_or_update(context, q.message.chat_id, q.message, p); await q.answer()
+    maybe_gc()
 
 def build_messages(cid, user_text, sys_prompt):
     msgs=[{"role":"system","content":sys_prompt}]
@@ -272,6 +280,49 @@ async def send_note(context, chat_id: int, text: str):
     except BadRequest:
         await context.bot.send_message(chat_id, f"📝 {text}")
 
+def touch(chat_id: int):
+    LAST_SEEN[chat_id] = time.time()
+
+def close_and_del(*objs):
+    for o in objs:
+        try:
+            if hasattr(o, "close"):
+                o.close()
+        except Exception:
+            pass
+        try:
+            del o
+        except Exception:
+            pass
+
+def cleanup_maps_now():
+    now = time.time()
+    for cid, ts in list(LAST_SEEN.items()):
+        if now - ts > INACTIVE_SECS:
+            histories.pop(cid, None)
+            LAST_DOC.pop(cid, None)
+            LAST_SEEN.pop(cid, None)
+    if len(PAGERS) > MAX_PAGERS:
+        items = sorted(PAGERS.items(), key=lambda kv: kv[1].get("ts", 0))
+        drop = len(PAGERS) - MAX_PAGERS
+        for k, _ in items[:drop]:
+            PAGERS.pop(k, None)
+
+def maybe_gc():
+    global REQ_COUNT
+    REQ_COUNT += 1
+    if REQ_COUNT % max(1, GC_EVERY) == 0:
+        cleanup_maps_now()
+        gc.collect()
+
+def start_janitor_thread():
+    def _loop():
+        while True:
+            cleanup_maps_now()
+            gc.collect()
+            time.sleep(30)
+    threading.Thread(target=_loop, daemon=True).start()
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "Lệnh:\n"
@@ -298,19 +349,25 @@ async def cmd_addlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    touch(chat_id)
     prompt = " ".join(context.args).strip()
     if not prompt:
         return await send_note(context, chat_id, "Dùng: /img <mô tả>")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+    buf = None
     try:
         data, mime = create_image_bytes_gemini(prompt)
         buf = io.BytesIO(data); buf.name = "gen.png"
         await context.bot.send_photo(chat_id, buf, caption=prompt)
     except Exception as e:
         await send_note(context, chat_id, f"Lỗi tạo ảnh: {e}")
+    finally:
+        close_and_del(buf)
+        maybe_gc()
 
 async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    touch(chat_id)
     q = " ".join(context.args).strip()
     if not q:
         return await send_note(context, chat_id, "Dùng: /code <yêu cầu>")
@@ -323,6 +380,7 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else: await start_pager(context, chat_id, result, is_code=True)
         histories[chat_id].append(("user", q))
         histories[chat_id].append(("assistant", result[:1000]))
+        maybe_gc()
 
 def want_image(t):
     t=(t or "").lower()
@@ -330,18 +388,23 @@ def want_image(t):
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
+    touch(chat_id)
     q = (update.message.text or "").strip()
     low = q.lower()
 
     if want_image(q):
         prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)\s*[:\-]*", "", q).strip() or "A cute cat in space suit, 3D render"
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+        buf = None
         try:
             data, mime = create_image_bytes_gemini(prompt)
             buf = io.BytesIO(data); buf.name = "gen.png"
             await context.bot.send_photo(chat_id, buf, caption=prompt)
         except Exception as e:
             return await send_note(context, chat_id, f"Lỗi tạo ảnh: {e}")
+        finally:
+            close_and_del(buf)
+            maybe_gc()
         return
 
     if chat_id in LAST_DOC:
@@ -367,15 +430,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
             out = await process_action(src_text, action, target_lang)
             base, ext = os.path.splitext(src_name)
-            if ext.lower() in TEXT_LIKE:
-                out_name, buf = _emit_text_file(base, ext, out)
-            elif ext.lower() == ".docx":
-                out_name, buf = _emit_docx_file(base, out)
-            else:
-                out_name, buf = _emit_text_file(base, ".txt", out)
-            await context.bot.send_document(chat_id, document=buf, caption=f"{action} → {out_name}")
+            out_name = None; buf = None
+            try:
+                if ext.lower() in TEXT_LIKE:
+                    out_name, buf = _emit_text_file(base, ext, out)
+                elif ext.lower() == ".docx":
+                    out_name, buf = _emit_docx_file(base, out)
+                else:
+                    out_name, buf = _emit_text_file(base, ".txt", out)
+                await context.bot.send_document(chat_id, document=buf, caption=f"{action} → {out_name}")
+            finally:
+                close_and_del(buf)
             LAST_DOC[chat_id] = {"name": out_name, "text": out}
             await start_pager(context, chat_id, out, is_code=False)
+            maybe_gc()
             return
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
@@ -384,6 +452,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start_pager(context, chat_id, result, is_code=False)
     histories[chat_id].append(("user", q))
     histories[chat_id].append(("assistant", result[:1000]))
+    maybe_gc()
 
 async def warmup_long_context(text: str):
     if not client: return
@@ -432,9 +501,11 @@ async def process_action(text: str, action: str, target_lang: str | None):
 
 async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    touch(chat_id)
     doc = update.message.document
     name = doc.file_name or "file"
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    bio = None; buf = None
     try:
         if is_archive(name):
             return await send_note(context, chat_id, "Không nhận file nén (.zip, .rar, .7z, .tar.*).")
@@ -462,8 +533,12 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_pager(context, chat_id, "Đã gửi file .txt.", is_code=True)
     except Exception as e:
         await send_note(context, chat_id, f"Lỗi đọc file: {e}")
+    finally:
+        close_and_del(bio, buf)
+        maybe_gc()
 
 def main():
+    start_janitor_thread()
     app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
     app_tg.add_handler(CommandHandler("help", cmd_help))
     app_tg.add_handler(CommandHandler("img", cmd_img))
