@@ -1,4 +1,4 @@
-import os, re, json, time, threading, asyncio, queue, requests, io
+import os, re, json, time, threading, asyncio, queue, requests, io, csv
 from collections import deque, defaultdict
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -11,6 +11,10 @@ try:
 except ImportError:
     genai = None
     types = None
+try:
+    import PyPDF2
+except Exception:
+    PyPDF2 = None
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
@@ -19,6 +23,7 @@ CHAT_MODEL = os.getenv("CHAT_MODEL", "alibaba/qwen-3-235b")
 CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-3.7-sonnet")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-image-generation")
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.0-flash-exp")
 PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "700"))
 MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE", "4000"))
@@ -86,11 +91,6 @@ def complete_with_model(model, messages, max_tokens):
     res = client.chat.completions.create(model=model, max_tokens=max_tokens, temperature=0.7, messages=messages)
     return (res.choices[0].message.content or "").strip()
 
-def is_codey(t):
-    if not t: return False
-    t=t.lower(); keys=["```","import ","class ","def ","function","const ","let ","var ","#include","public static","<script","</script>"]
-    return any(k in t for k in keys)
-
 def _get_gem_client():
     if genai is None or types is None:
         raise RuntimeError("Thiếu package google-genai")
@@ -111,9 +111,12 @@ def create_image_bytes_gemini(prompt: str):
             return part.inline_data.data, part.inline_data.mime_type or "image/png"
     raise RuntimeError("Gemini không trả ảnh.")
 
-def want_image(t):
-    t=(t or "").lower()
-    return any(k in t for k in ["tạo ảnh","vẽ","generate image","draw image","vẽ giúp","create image","/img "])
+def analyze_image_gemini(data: bytes, mime: str, user_hint: str = ""):
+    cli = _get_gem_client()
+    parts = [types.Part.from_bytes(data=data, mime_type=mime)]
+    prompt = "Mô tả ảnh chi tiết, nêu bối cảnh, hành động, đồ vật, chữ hiển thị nếu đọc được. Nói ngắn gọn, trung lập, không khẳng định danh tính người thật nếu không chắc. " + (user_hint or "")
+    resp = cli.models.generate_content(model=GEMINI_VISION_MODEL, contents=[*parts, prompt])
+    return resp.text.strip() if getattr(resp, "text", None) else "Không phân tích được ảnh."
 
 def geocode_vn(q):
     r = requests.get("https://geocoding-api.open-meteo.com/v1/search",
@@ -150,6 +153,10 @@ def weather_vn(q):
             f"Hôm nay: {tmin0}–{tmax0}°C, mưa ~{rain0} mm, xác suất {prob0}%\n"
             f"Ngày mai: {tmin1}–{tmax1}°C, mưa ~{rain1} mm, xác suất {prob1}%")
 
+def want_image(t):
+    t=(t or "").lower()
+    return any(k in t for k in ["tạo ảnh","vẽ","generate image","draw image","vẽ giúp","create image","/img "])
+
 def want_weather(t):
     t=(t or "").lower()
     if "thời tiết" not in t: return None
@@ -158,6 +165,32 @@ def want_weather(t):
         if k in t: return k
     return "Hà Nội"
 
+def guess_mime_from_name(name: str):
+    n=name.lower()
+    if n.endswith((".png",".jpg",".jpeg",".webp",".gif")): return "image"
+    if n.endswith((".txt",".md",".json",".csv",".log")): return "text"
+    if n.endswith(".pdf"): return "pdf"
+    return "other"
+
+def read_text_from_bytes(name: str, data: bytes, limit: int = 200_000):
+    kind=guess_mime_from_name(name)
+    if kind=="text":
+        try:
+            return data.decode("utf-8", errors="ignore")[:limit]
+        except Exception:
+            return data.decode("latin-1", errors="ignore")[:limit]
+    if kind=="pdf":
+        if not PyPDF2: return "Không có PyPDF2 để đọc PDF."
+        buf=io.BytesIO(data); r=PyPDF2.PdfReader(buf)
+        parts=[]
+        for i in range(min(len(r.pages), 50)):
+            try:
+                parts.append(r.pages[i].extract_text() or "")
+            except Exception:
+                parts.append("")
+        return "\n".join(parts)[:limit] or "PDF không trích được chữ."
+    return None
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "Lệnh:\n"
@@ -165,6 +198,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/img <mô tả> – tạo ảnh (Gemini)\n"
         "/weather <địa danh VN> – thời tiết\n"
         "/code <yêu cầu> – code (Claude)\n"
+        "Gửi ảnh để phân tích nội dung.\n"
+        "Gửi file .txt/.md/.json/.csv/.pdf để đọc và tóm tắt.\n"
         "BOT được tạo bởi (@cuocdoivandep)\n"
     )
     await update.message.reply_text(txt)
@@ -209,7 +244,7 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Lỗi kết nối.")
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    chat_id = update.message.chat_id
     q = update.message.text or ""
     if want_image(q):
         prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)[:\-]*", "", q).strip() or "A cute cat in space suit, 3D render"
@@ -239,6 +274,44 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.message.reply_text("Lỗi kết nối.")
 
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    try:
+        ph = update.message.photo[-1]
+        f = await context.bot.get_file(ph.file_id)
+        bio = io.BytesIO()
+        await f.download_to_memory(out=bio)
+        data=bio.getvalue()
+        desc = analyze_image_gemini(data, "image/jpeg")
+        await start_pager(context, chat_id, desc, is_code=False)
+    except Exception as e:
+        await update.message.reply_text(f"Lỗi phân tích ảnh: {e}")
+
+async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    doc = update.message.document
+    name = doc.file_name or "file"
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    try:
+        f = await context.bot.get_file(doc.file_id)
+        bio = io.BytesIO()
+        await f.download_to_memory(out=bio)
+        data=bio.getvalue()
+        kind = guess_mime_from_name(name)
+        if kind=="image":
+            desc = analyze_image_gemini(data, doc.mime_type or "image/*")
+            return await start_pager(context, chat_id, f"Ảnh: {name}\n\n{desc}", is_code=False)
+        text = read_text_from_bytes(name, data)
+        if text is None:
+            return await update.message.reply_text("File này chưa hỗ trợ. Thử .txt/.md/.json/.csv/.pdf hoặc gửi ảnh.")
+        sys = "Từ nội dung sau, tóm tắt gọn, nêu mục chính, liệt kê dữ kiện quan trọng, chỉ ra điểm bất thường nếu có."
+        msgs = [{"role":"system","content":sys},{"role":"user","content":text[:15000]}]
+        summary = complete_with_model(CHAT_MODEL, msgs, MAX_TOKENS) if client else text[:PAGE_CHARS]
+        await start_pager(context, chat_id, f"Tóm tắt {name}:\n\n{summary}", is_code=False)
+    except Exception as e:
+        await update.message.reply_text(f"Lỗi đọc file: {e}")
+
 def main():
     app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
     app_tg.add_handler(CommandHandler("help", cmd_help))
@@ -246,6 +319,8 @@ def main():
     app_tg.add_handler(CommandHandler("weather", cmd_weather))
     app_tg.add_handler(CommandHandler("code", cmd_code))
     app_tg.add_handler(CallbackQueryHandler(on_page_nav, pattern=r"^pg_"))
+    app_tg.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app_tg.add_handler(MessageHandler(filters.Document.ALL, on_file))
     app_tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
     app_tg.run_polling()
