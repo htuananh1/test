@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from telegram.error import BadRequest
 from openai import OpenAI
 
-# -------- optional deps --------
+# ---------- optional deps ----------
 try:
     from google import genai
     from google.genai import types
@@ -42,7 +42,18 @@ try:
 except Exception:
     BeautifulSoup = None
 
-# -------- env/config --------
+# ---------- Discord ----------
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
+DISCORD_ENABLED = bool(DISCORD_TOKEN)
+if DISCORD_ENABLED:
+    import discord
+    from discord import app_commands
+    intents = discord.Intents.default()
+    intents.message_content = True
+    dc = discord.Client(intents=intents)
+    tree = app_commands.CommandTree(dc)
+
+# ---------- ENV / Config ----------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
@@ -67,17 +78,19 @@ TEXT_LIKE = (".txt",".md",".log",".csv",".tsv",".json",".yaml",".yml",".ini",".c
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "3"))
 SEM = asyncio.Semaphore(MAX_CONCURRENCY)
 
-# -------- clients/runtime --------
+# ---------- Clients & runtime ----------
 client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL) if VERCEL_API_KEY else None
 app = Flask(__name__)
 histories = defaultdict(lambda: deque(maxlen=32))
 locks = defaultdict(asyncio.Lock)
 PAGERS = {}
+
+# per-platform states share same dict keys (use chat/channel id)
 PENDING_FILE = {}
 LAST_RESULT = {}
 FILE_MODE = defaultdict(lambda: False)
 
-# -------- ui helpers --------
+# ---------- UI helpers (Telegram) ----------
 def chunk_pages(raw, per_page=PAGE_CHARS):
     lines = (raw or "").splitlines(); pages=[]; cur=[]; used=0
     for line in lines:
@@ -129,7 +142,7 @@ async def on_page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: return await q.answer()
     await send_or_update(context, q.message.chat_id, q.message, p); await q.answer()
 
-# -------- llm wrappers --------
+# ---------- LLM wrappers ----------
 def build_messages(cid, user_text, sys_prompt):
     msgs=[{"role":"system","content":sys_prompt}]
     keep=max(2, CTX_TURNS*2)
@@ -151,7 +164,7 @@ async def run_llm(model, messages, max_tokens, temperature=0.7):
     async with SEM:
         return await asyncio.to_thread(complete_with_model, model, messages, max_tokens, temperature)
 
-# -------- file i/o --------
+# ---------- File I/O ----------
 def is_archive(name: str):
     return (name or "").lower().endswith(ARCHIVES)
 
@@ -232,7 +245,7 @@ def _emit_docx_file(base, text):
     buf = io.BytesIO(data); buf.name = out_name
     return out_name, buf
 
-# -------- gemini image --------
+# ---------- Gemini image ----------
 def _get_gem_client():
     if genai is None or types is None: raise RuntimeError("Thiếu package google-genai")
     if not GEMINI_API_KEY: raise RuntimeError("Thiếu GEMINI_API_KEY")
@@ -255,16 +268,10 @@ def want_image(t):
     t=(t or "").lower()
     return any(k in t for k in ["tạo ảnh","vẽ","generate image","draw image","vẽ giúp","create image","/img "])
 
-# -------- commands --------
+# ---------- Telegram commands/handlers ----------
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Lệnh:\n"
-        "/help\n"
-        "/img <mô tả>\n"
-        "/code <yêu cầu>\n"
-        "/chat – thoát FILE MODE, quay lại chat thường\n"
-        "/cancelfile – huỷ file đang làm\n"
-        "/sendfile – tải kết quả gần nhất\n"
+        "/help, /img <mô tả>, /code <yêu cầu>, /chat, /cancelfile, /sendfile\n"
         "Gửi file để vào FILE MODE, nhắn yêu cầu rồi mình xử lý."
     )
 
@@ -288,12 +295,9 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         msgs = build_messages(chat_id, q, sys_prompt_linh()+" Bạn là lập trình viên kỳ cựu. Viết code sạch, best practice.")
         result = await run_llm(CODE_MODEL, msgs, MAX_TOKENS_CODE, temperature=0.4) or "..."
-        m = re.search(r"```(\w+)?\n(.*?)```", result, flags=re.S)
-        if m: await start_pager(context, chat_id, m.group(2).rstrip(), is_code=True, lang_hint=m.group(1) or "markdown")
-        else: await start_pager(context, chat_id, result, is_code=True, lang_hint="markdown")
+        await start_pager(context, chat_id, result, is_code=True, lang_hint="markdown")
         histories[chat_id].append(("user", q)); histories[chat_id].append(("assistant", result[:1000]))
 
-# -------- core flows --------
 def split_text_smart(text: str, chunk_chars: int = CHUNK_CHARS):
     if len(text) <= chunk_chars: return [text]
     parts=[]; cur=[]; used=0
@@ -337,14 +341,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             data, _ = await run_gemini(prompt)
             buf = io.BytesIO(data); buf.name = "gen.png"
-            await context.bot.send_photo(chat_id, buf)  # no caption
+            await context.bot.send_photo(chat_id, buf)
         except Exception as e:
             await context.bot.send_message(chat_id, f"Lỗi tạo ảnh: {e}")
         return
 
     if FILE_MODE[chat_id] and chat_id in PENDING_FILE:
-        entry = PENDING_FILE[chat_id]
-        name, data = entry["name"], entry["data"]
+        entry = PENDING_FILE[chat_id]; name, data = entry["name"], entry["data"]
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         text, kind = read_any_file(name, data)
         if kind == "error" or not text:
@@ -352,19 +355,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = text[:MAX_EMIT_CHARS]
         out = await run_with_instruction(text, q)
         await start_pager(context, chat_id, out, is_code=True, lang_hint="markdown")
-        ext = os.path.splitext(name)[1].lower()
-        LAST_RESULT[chat_id] = {"name": name, "text": out, "ext": ext}
+        LAST_RESULT[chat_id] = {"name": name, "text": out, "ext": os.path.splitext(name)[1].lower()}
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     msgs = build_messages(chat_id, q, sys_prompt_linh())
     result = await run_llm(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.85) or "..."
-    # send as quote-style "note" without the label
-    body = f"“{htmlesc(result).strip()}”"
-    try:
-        await context.bot.send_message(chat_id, body, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    except BadRequest:
-        await context.bot.send_message(chat_id, result)
+    # send as plain text "lead style" without header for easy copy
+    await context.bot.send_message(chat_id, f"“{result}”", disable_web_page_preview=True)
     histories[chat_id].append(("user", q)); histories[chat_id].append(("assistant", result[:1000]))
 
 async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -411,6 +409,87 @@ async def cmd_sendfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_document(chat_id, document=buf, caption=out_name)
     buf.close()
 
+# ---------- Discord adapter ----------
+if DISCORD_ENABLED:
+    async def dc_send_lead(channel, text):
+        await channel.send(text)
+
+    @dc.event
+    async def on_ready():
+        try:
+            await tree.sync()
+        except Exception:
+            pass
+        print(f"Discord ready as {dc.user}")
+
+    @dc.event
+    async def on_message(msg):
+        if msg.author.bot: return
+        ch_id = msg.channel.id
+        q = (msg.content or "").strip()
+
+        if msg.attachments:
+            a = msg.attachments[0]
+            data = await a.read()
+            PENDING_FILE[ch_id] = {"name": a.filename, "data": data}
+            FILE_MODE[ch_id] = True
+            return await msg.channel.send("Đã nhận file. FILE MODE: gửi yêu cầu để xử lý. Dùng /chat, /cancelfile, /sendfile.")
+
+        if FILE_MODE[ch_id] and ch_id in PENDING_FILE:
+            entry = PENDING_FILE[ch_id]
+            name, data = entry["name"], entry["data"]
+            text, kind = read_any_file(name, data)
+            if kind == "error" or not text:
+                return await msg.channel.send(text or "Không trích được nội dung từ file.")
+            out = await run_with_instruction(text[:MAX_EMIT_CHARS], q)
+            LAST_RESULT[ch_id] = {"name": name, "text": out, "ext": os.path.splitext(name)[1].lower()}
+            for part in (out[i:i+1900] for i in range(0, len(out), 1900)):
+                await msg.channel.send(f"```markdown\n{part}\n```")
+            return
+
+        msgs = build_messages(ch_id, q, sys_prompt_linh())
+        resp = await run_llm(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.85)
+        await dc_send_lead(msg.channel, resp or "...")
+
+    @tree.command(name="chat", description="Thoát FILE MODE")
+    async def _chat(inter):
+        FILE_MODE[inter.channel_id] = False
+        await inter.response.send_message("Đã thoát FILE MODE.")
+
+    @tree.command(name="cancelfile", description="Huỷ file đang làm")
+    async def _cancelfile(inter):
+        ch = inter.channel_id
+        FILE_MODE[ch] = False; PENDING_FILE.pop(ch, None); LAST_RESULT.pop(ch, None)
+        await inter.response.send_message("Đã huỷ file và thoát FILE MODE.")
+
+    @tree.command(name="sendfile", description="Tải kết quả gần nhất")
+    async def _sendfile(inter):
+        r = LAST_RESULT.get(inter.channel_id)
+        if not r: return await inter.response.send_message("Chưa có kết quả.")
+        base = os.path.splitext(r["name"])[0]; ext = r["ext"] or ".txt"
+        data = r["text"].encode("utf-8")
+        fname = f"{base}{ext if ext in ('.txt','.md','.json','.csv') else '.txt'}"
+        await inter.response.send_message(file=discord.File(io.BytesIO(data), filename=fname))
+
+    @tree.command(name="img", description="Tạo ảnh (Gemini)")
+    async def _img(inter, prompt: str):
+        await inter.response.defer()
+        try:
+            data, _ = await run_gemini(prompt)
+            file = discord.File(io.BytesIO(data), filename="gen.png")
+            await inter.followup.send(file=file)
+        except Exception as e:
+            await inter.followup.send(f"Lỗi tạo ảnh: {e}")
+
+    @tree.command(name="code", description="Viết code (Claude)")
+    async def _code(inter, prompt: str):
+        await inter.response.defer()
+        msgs = build_messages(inter.channel_id, prompt, sys_prompt_linh()+" Bạn là lập trình viên kỳ cựu. Viết code sạch.")
+        res = await run_llm(CODE_MODEL, msgs, MAX_TOKENS_CODE, temperature=0.4)
+        for part in (res[i:i+1900] for i in range(0, len(res or ''), 1900)):
+            await inter.followup.send(f"```markdown\n{part}\n```")
+
+# ---------- main ----------
 def main():
     app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
     app_tg.add_handler(CommandHandler("help", cmd_help))
@@ -422,8 +501,14 @@ def main():
     app_tg.add_handler(CallbackQueryHandler(on_page_nav, pattern=r"^pg_"))
     app_tg.add_handler(MessageHandler(filters.Document.ALL, on_file))
     app_tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
-    app_tg.run_polling()
+    threading.Thread(target=app_tg.run_polling, daemon=True).start()
+
+    if DISCORD_ENABLED:
+        dc.run(DISCORD_TOKEN)
+    else:
+        threading.Event().wait()
 
 if __name__ == "__main__":
     main()
