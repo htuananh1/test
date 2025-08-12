@@ -52,8 +52,8 @@ VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 
 CHAT_MODEL = os.getenv("CHAT_MODEL", "anthropic/claude-3.5-haiku")
-CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-4-opus")
-FILE_MODEL = os.getenv("FILE_MODEL", "anthropic/claude-4-sonnet")
+CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-4-sonnet")
+FILE_MODEL = os.getenv("FILE_MODEL", "anthropic/claude-4.1-opus")
 
 PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "900"))
