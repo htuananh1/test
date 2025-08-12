@@ -267,7 +267,7 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data, mime = await run_gemini(prompt)
         buf = io.BytesIO(data); buf.name = "gen.png"
-        await context.bot.send_photo(chat_id, buf, caption=prompt)
+        await context.bot.send_photo(chat_id, buf)
     except Exception as e:
         await context.bot.send_message(chat_id, f"Lỗi tạo ảnh: {e}")
 
@@ -281,7 +281,7 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await run_llm(CODE_MODEL, msgs, MAX_TOKENS_CODE, temperature=0.4) or "..."
         m = re.search(r"```(\w+)?\n(.*?)```", result, flags=re.S)
         if m: await start_pager(context, chat_id, m.group(2).rstrip(), is_code=True, lang_hint=m.group(1) or "")
-        else: await start_pager(context, chat_id, result, is_code=True)
+        else: await start_pager(context, chat_id, result, is_code=True, lang_hint="markdown")
         histories[chat_id].append(("user", q)); histories[chat_id].append(("assistant", result[:1000]))
 
 def split_text_smart(text: str, chunk_chars: int = CHUNK_CHARS):
@@ -327,7 +327,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             data, _ = await run_gemini(prompt)
             buf = io.BytesIO(data); buf.name = "gen.png"
-            await context.bot.send_photo(chat_id, buf, caption=prompt)
+            await context.bot.send_photo(chat_id, buf)
         except Exception as e:
             await context.bot.send_message(chat_id, f"Lỗi tạo ảnh: {e}")
         return
@@ -341,7 +341,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await context.bot.send_message(chat_id, text or "Không trích được nội dung từ file.")
         text = text[:MAX_EMIT_CHARS]
         out = await run_with_instruction(text, q)
-        await start_pager(context, chat_id, out, is_code=False)
+        await start_pager(context, chat_id, out, is_code=True, lang_hint="markdown")
         ext = os.path.splitext(name)[1].lower()
         LAST_RESULT[chat_id] = {"name": name, "text": out, "ext": ext}
         return
@@ -349,7 +349,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     msgs = build_messages(chat_id, q, sys_prompt_linh())
     result = await run_llm(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.85) or "..."
-    await start_pager(context, chat_id, result, is_code=False)
+    await context.bot.send_message(chat_id, f"📝 <i>Lời dẫn</i>\n{htmlesc(result)}", parse_mode=ParseMode.HTML)
     histories[chat_id].append(("user", q)); histories[chat_id].append(("assistant", result[:1000]))
 
 async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
