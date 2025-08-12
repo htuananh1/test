@@ -8,6 +8,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from telegram.error import BadRequest
 from openai import OpenAI
 
+# Optional deps
 try:
     from google import genai
     from google.genai import types
@@ -41,15 +42,19 @@ try:
 except Exception:
     BeautifulSoup = None
 
+# Logging
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("linh")
 
+# ENV / Config
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
+
 CHAT_MODEL = os.getenv("CHAT_MODEL", "anthropic/claude-3.5-haiku")
 CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-4-opus")
 FILE_MODEL = os.getenv("FILE_MODEL", "anthropic/claude-4-sonnet")
+
 PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "900"))
 MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE", "4000"))
@@ -62,9 +67,12 @@ MAX_EMIT_CHARS = int(os.getenv("MAX_EMIT_CHARS", "800000"))
 ARCHIVES = (".zip",".rar",".7z",".tar",".tar.gz",".tgz",".tar.bz2",".tar.xz")
 TEXT_LIKE = (".txt",".md",".log",".csv",".tsv",".json",".yaml",".yml",".ini",".cfg",".env",".xml",".html",".htm",
              ".py",".js",".ts",".java",".c",".cpp",".cs",".go",".php",".rb",".rs",".sh",".bat",".ps1",".sql")
+
+# Concurrency limiter
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "3"))
 SEM = asyncio.Semaphore(MAX_CONCURRENCY)
 
+# Clients & runtime
 client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL) if VERCEL_API_KEY else None
 app = Flask(__name__)
 histories = defaultdict(lambda: deque(maxlen=32))
@@ -74,6 +82,7 @@ PENDING_FILE = {}
 LAST_RESULT = {}
 FILE_MODE = defaultdict(lambda: False)
 
+# UI helpers (pager for code/file mode)
 def chunk_pages(raw, per_page=PAGE_CHARS):
     lines = (raw or "").splitlines(); pages=[]; cur=[]; used=0
     for line in lines:
@@ -125,6 +134,7 @@ async def on_page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: return await q.answer()
     await send_or_update(context, q.message.chat_id, q.message, p); await q.answer()
 
+# LLM helpers
 def build_messages(cid, user_text, sys_prompt):
     msgs=[{"role":"system","content":sys_prompt}]
     keep=max(2, CTX_TURNS*2)
@@ -146,6 +156,7 @@ async def run_llm(model, messages, max_tokens, temperature=0.7):
     async with SEM:
         return await asyncio.to_thread(complete_with_model, model, messages, max_tokens, temperature)
 
+# File I/O
 def is_archive(name: str):
     return (name or "").lower().endswith(ARCHIVES)
 
@@ -226,6 +237,7 @@ def _emit_docx_file(base, text):
     buf = io.BytesIO(data); buf.name = out_name
     return out_name, buf
 
+# Gemini image
 def _get_gem_client():
     if genai is None or types is None: raise RuntimeError("Thiếu package google-genai")
     if not GEMINI_API_KEY: raise RuntimeError("Thiếu GEMINI_API_KEY")
@@ -248,16 +260,25 @@ def want_image(t):
     t=(t or "").lower()
     return any(k in t for k in ["tạo ảnh","vẽ","generate image","draw image","vẽ giúp","create image","/img "])
 
-async def send_quote_native(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str):
-    try:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            api_kwargs={"quote": {"text": text, "is_manual": True}}
-        )
-    except BadRequest:
-        await context.bot.send_message(chat_id, text, disable_web_page_preview=True)
+# MarkdownV2 quote helpers
+MD2_ESC = r"_*[]()~`>#+-=|{}.!"
+def md2_escape(s: str) -> str:
+    out=[]
+    for ch in s:
+        out.append("\\"+ch if ch in MD2_ESC else ch)
+    return "".join(out)
 
+def to_blockquote_md2(text: str) -> str:
+    lines = (text or "").splitlines()
+    out_lines=[]
+    for line in lines:
+        if line.strip():
+            out_lines.append("> "+md2_escape(line))
+        else:
+            out_lines.append("")
+    return "\n".join(out_lines)
+
+# Commands
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/help\n"
@@ -277,6 +298,7 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data, _ = await run_gemini(prompt)
         buf = io.BytesIO(data); buf.name = "gen.png"
+        # Send image without caption
         await context.bot.send_photo(chat_id, buf)
     except Exception as e:
         await context.bot.send_message(chat_id, f"Lỗi tạo ảnh: {e}")
@@ -289,9 +311,11 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         msgs = build_messages(chat_id, q, sys_prompt_linh()+" Bạn là lập trình viên kỳ cựu. Viết code sạch, best practice.")
         result = await run_llm(CODE_MODEL, msgs, MAX_TOKENS_CODE, temperature=0.4) or "..."
+        # show as code block via pager
         await start_pager(context, chat_id, result, is_code=True, lang_hint="markdown")
         histories[chat_id].append(("user", q)); histories[chat_id].append(("assistant", result[:1000]))
 
+# Core flows
 def split_text_smart(text: str, chunk_chars: int = CHUNK_CHARS):
     if len(text) <= chunk_chars: return [text]
     parts=[]; cur=[]; used=0
@@ -329,17 +353,19 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     q = (update.message.text or "").strip()
 
+    # image creation (works in any mode)
     if want_image(q):
         prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)\s*[:\-]*", "", q).strip() or "A cute cat in space suit, 3D render"
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         try:
             data, _ = await run_gemini(prompt)
             buf = io.BytesIO(data); buf.name = "gen.png"
-            await context.bot.send_photo(chat_id, buf)
+            await context.bot.send_photo(chat_id, buf)  # no caption
         except Exception as e:
             await context.bot.send_message(chat_id, f"Lỗi tạo ảnh: {e}")
         return
 
+    # FILE MODE: treat text as instruction for pending file
     if FILE_MODE[chat_id] and chat_id in PENDING_FILE:
         entry = PENDING_FILE[chat_id]
         name, data = entry["name"], entry["data"]
@@ -354,10 +380,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         LAST_RESULT[chat_id] = {"name": name, "text": out, "ext": ext}
         return
 
+    # Normal chat → MarkdownV2 blockquote (stable on all clients)
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     msgs = build_messages(chat_id, q, sys_prompt_linh())
     result = await run_llm(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.85) or "..."
-    await send_quote_native(context, chat_id, result)
+    quote_md = to_blockquote_md2(result)
+    await context.bot.send_message(chat_id, text=quote_md, parse_mode=ParseMode.MARKDOWN_V2, disable_web_page_preview=True)
     histories[chat_id].append(("user", q)); histories[chat_id].append(("assistant", result[:1000]))
 
 async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
