@@ -282,13 +282,13 @@ def to_blockquote_md2(text: str) -> str:
 # Commands
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "/help Hiện lệnh\n"
-        "/img <mô tả> GEMINI\n"
-        "/code <yêu cầu> CLAUDE-4-SONNET\n"
-        "chat – Dùng CLAUDE-3.5-HAIKU \n"
-        "/cancelfile – Thoát chế độ FILE MODE\n"
-        "/sendfile – tải kết quả gần nhất\n"
-        "Gửi file để vào FILE MODE(CLAUDE-4.1-OPUS, nhắn yêu cầu rồi mình xử lý."
+    "/help – Hiện danh sách lệnh\n"
+    "/img <mô tả> – Tạo ảnh (GEMINI)\n"
+    "/code <yêu cầu> – Viết code (CLAUDE-4-SONNET)\n"
+    "/cancelfile – Thoát FILE MODE\n"
+    "/sendfile – Tải kết quả gần nhất\n"
+    "chat – Chat nhanh (CLAUDE-3.5-HAIKU)\n"
+    "Gửi file – Vào FILE MODE (CLAUDE-4.1-OPUS), nhắn yêu cầu để xử lý.\n"
     )
 
 async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
