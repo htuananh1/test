@@ -529,7 +529,13 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_document(chat_id, document=buf, caption=f"Đã đọc: {name} → {out_name}")
         LAST_DOC[chat_id] = {"name": out_name, "text": text}
         await warmup_long_context(text)
-        await send_note(context, chat_id, "Đã tải file. Gõ: 'sửa lại' | 'nâng cấp' | 'tối ưu' | 'refactor' | 'tóm tắt' | 'dịch sang <ngôn ngữ>' | 'sửa chính tả' | 'chuẩn hoá markdown' | 'giải toán' | 'sửa bug' | 'thêm tính năng' | 'tối ưu hiệu năng code' | 'viết lại code cho gọn' | 'viết test case' | 'chuyển code sang <ngôn ngữ>' | 'thêm comment code' | 'phân tích lỗi' | 'viết tài liệu code'.)
+        await send_note(context, chat_id,
+    "Đã tải file. Gõ: 'sửa lại' | 'nâng cấp' | 'tối ưu' | 'refactor' | 'tóm tắt' | "
+    "'dịch sang <ngôn ngữ>' | 'sửa chính tả' | 'chuẩn hoá markdown' | 'giải toán' | "
+    "'sửa bug' | 'thêm tính năng' | 'tối ưu hiệu năng code' | 'viết lại code cho gọn' | "
+    "'viết test case' | 'chuyển code sang <ngôn ngữ>' | 'thêm comment code' | 'phân tích lỗi' | "
+    "'viết tài liệu code'."
+)
     except BadRequest:
         await start_pager(context, chat_id, "Đã gửi file .txt.", is_code=True)
     except Exception as e:
