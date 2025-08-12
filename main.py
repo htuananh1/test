@@ -46,8 +46,8 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "anthropic/claude-3.5-haiku")
-CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-3.7-sonnet")
-FILE_MODEL = os.getenv("FILE_MODEL", "openai/gpt-4.1")
+CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-4-opus")
+FILE_MODEL = os.getenv("FILE_MODEL", "anthropic/claude-4-sonnet")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2026797305"))
 
 PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
