@@ -8,7 +8,6 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from telegram.error import BadRequest
 from openai import OpenAI
 
-# ---------- optional deps ----------
 try:
     from google import genai
     from google.genai import types
@@ -42,7 +41,6 @@ try:
 except Exception:
     BeautifulSoup = None
 
-# ---------- Discord ----------
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 DISCORD_ENABLED = bool(DISCORD_TOKEN)
 if DISCORD_ENABLED:
@@ -53,7 +51,6 @@ if DISCORD_ENABLED:
     dc = discord.Client(intents=intents)
     tree = app_commands.CommandTree(dc)
 
-# ---------- ENV / Config ----------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
@@ -74,23 +71,19 @@ ARCHIVES = (".zip",".rar",".7z",".tar",".tar.gz",".tgz",".tar.bz2",".tar.xz")
 TEXT_LIKE = (".txt",".md",".log",".csv",".tsv",".json",".yaml",".yml",".ini",".cfg",".env",".xml",".html",".htm",
              ".py",".js",".ts",".java",".c",".cpp",".cs",".go",".php",".rb",".rs",".sh",".bat",".ps1",".sql")
 
-# concurrency limiter
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "3"))
 SEM = asyncio.Semaphore(MAX_CONCURRENCY)
 
-# ---------- Clients & runtime ----------
 client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL) if VERCEL_API_KEY else None
 app = Flask(__name__)
 histories = defaultdict(lambda: deque(maxlen=32))
 locks = defaultdict(asyncio.Lock)
 PAGERS = {}
 
-# per-platform states share same dict keys (use chat/channel id)
 PENDING_FILE = {}
 LAST_RESULT = {}
 FILE_MODE = defaultdict(lambda: False)
 
-# ---------- UI helpers (Telegram) ----------
 def chunk_pages(raw, per_page=PAGE_CHARS):
     lines = (raw or "").splitlines(); pages=[]; cur=[]; used=0
     for line in lines:
@@ -142,7 +135,6 @@ async def on_page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: return await q.answer()
     await send_or_update(context, q.message.chat_id, q.message, p); await q.answer()
 
-# ---------- LLM wrappers ----------
 def build_messages(cid, user_text, sys_prompt):
     msgs=[{"role":"system","content":sys_prompt}]
     keep=max(2, CTX_TURNS*2)
@@ -164,7 +156,6 @@ async def run_llm(model, messages, max_tokens, temperature=0.7):
     async with SEM:
         return await asyncio.to_thread(complete_with_model, model, messages, max_tokens, temperature)
 
-# ---------- File I/O ----------
 def is_archive(name: str):
     return (name or "").lower().endswith(ARCHIVES)
 
@@ -245,7 +236,6 @@ def _emit_docx_file(base, text):
     buf = io.BytesIO(data); buf.name = out_name
     return out_name, buf
 
-# ---------- Gemini image ----------
 def _get_gem_client():
     if genai is None or types is None: raise RuntimeError("Thiếu package google-genai")
     if not GEMINI_API_KEY: raise RuntimeError("Thiếu GEMINI_API_KEY")
@@ -268,7 +258,6 @@ def want_image(t):
     t=(t or "").lower()
     return any(k in t for k in ["tạo ảnh","vẽ","generate image","draw image","vẽ giúp","create image","/img "])
 
-# ---------- Telegram commands/handlers ----------
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/help, /img <mô tả>, /code <yêu cầu>, /chat, /cancelfile, /sendfile\n"
@@ -283,7 +272,7 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data, mime = await run_gemini(prompt)
         buf = io.BytesIO(data); buf.name = "gen.png"
-        await context.bot.send_photo(chat_id, buf)  # no caption
+        await context.bot.send_photo(chat_id, buf)
     except Exception as e:
         await context.bot.send_message(chat_id, f"Lỗi tạo ảnh: {e}")
 
@@ -361,7 +350,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     msgs = build_messages(chat_id, q, sys_prompt_linh())
     result = await run_llm(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.85) or "..."
-    # send as plain text "lead style" without header for easy copy
     await context.bot.send_message(chat_id, f"“{result}”", disable_web_page_preview=True)
     histories[chat_id].append(("user", q)); histories[chat_id].append(("assistant", result[:1000]))
 
@@ -409,7 +397,6 @@ async def cmd_sendfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_document(chat_id, document=buf, caption=out_name)
     buf.close()
 
-# ---------- Discord adapter ----------
 if DISCORD_ENABLED:
     async def dc_send_lead(channel, text):
         await channel.send(text)
@@ -489,8 +476,7 @@ if DISCORD_ENABLED:
         for part in (res[i:i+1900] for i in range(0, len(res or ''), 1900)):
             await inter.followup.send(f"```markdown\n{part}\n```")
 
-# ---------- main ----------
-def main():
+async def main():
     app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
     app_tg.add_handler(CommandHandler("help", cmd_help))
     app_tg.add_handler(CommandHandler("img", cmd_img))
@@ -502,13 +488,14 @@ def main():
     app_tg.add_handler(MessageHandler(filters.Document.ALL, on_file))
     app_tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
-    threading.Thread(target=app_tg.run_polling, daemon=True).start()
-
+    flask_thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True)
+    flask_thread.start()
+    
     if DISCORD_ENABLED:
-        dc.run(DISCORD_TOKEN)
-    else:
-        threading.Event().wait()
+        discord_thread = threading.Thread(target=dc.run, args=(DISCORD_TOKEN,), daemon=True)
+        discord_thread.start()
+    
+    await app_tg.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
