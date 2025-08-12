@@ -8,6 +8,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from telegram.error import BadRequest
 from openai import OpenAI
 
+# -------- optional deps --------
 try:
     from google import genai
     from google.genai import types
@@ -41,6 +42,7 @@ try:
 except Exception:
     BeautifulSoup = None
 
+# -------- env/config --------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
@@ -61,9 +63,11 @@ ARCHIVES = (".zip",".rar",".7z",".tar",".tar.gz",".tgz",".tar.bz2",".tar.xz")
 TEXT_LIKE = (".txt",".md",".log",".csv",".tsv",".json",".yaml",".yml",".ini",".cfg",".env",".xml",".html",".htm",
              ".py",".js",".ts",".java",".c",".cpp",".cs",".go",".php",".rb",".rs",".sh",".bat",".ps1",".sql")
 
+# concurrency limiter
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "3"))
 SEM = asyncio.Semaphore(MAX_CONCURRENCY)
 
+# -------- clients/runtime --------
 client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL) if VERCEL_API_KEY else None
 app = Flask(__name__)
 histories = defaultdict(lambda: deque(maxlen=32))
@@ -73,6 +77,7 @@ PENDING_FILE = {}
 LAST_RESULT = {}
 FILE_MODE = defaultdict(lambda: False)
 
+# -------- ui helpers --------
 def chunk_pages(raw, per_page=PAGE_CHARS):
     lines = (raw or "").splitlines(); pages=[]; cur=[]; used=0
     for line in lines:
@@ -124,6 +129,7 @@ async def on_page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: return await q.answer()
     await send_or_update(context, q.message.chat_id, q.message, p); await q.answer()
 
+# -------- llm wrappers --------
 def build_messages(cid, user_text, sys_prompt):
     msgs=[{"role":"system","content":sys_prompt}]
     keep=max(2, CTX_TURNS*2)
@@ -145,6 +151,7 @@ async def run_llm(model, messages, max_tokens, temperature=0.7):
     async with SEM:
         return await asyncio.to_thread(complete_with_model, model, messages, max_tokens, temperature)
 
+# -------- file i/o --------
 def is_archive(name: str):
     return (name or "").lower().endswith(ARCHIVES)
 
@@ -225,6 +232,7 @@ def _emit_docx_file(base, text):
     buf = io.BytesIO(data); buf.name = out_name
     return out_name, buf
 
+# -------- gemini image --------
 def _get_gem_client():
     if genai is None or types is None: raise RuntimeError("Thiếu package google-genai")
     if not GEMINI_API_KEY: raise RuntimeError("Thiếu GEMINI_API_KEY")
@@ -247,15 +255,16 @@ def want_image(t):
     t=(t or "").lower()
     return any(k in t for k in ["tạo ảnh","vẽ","generate image","draw image","vẽ giúp","create image","/img "])
 
+# -------- commands --------
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Lệnh:\n"
         "/help\n"
         "/img <mô tả>\n"
         "/code <yêu cầu>\n"
-        "/chat – thoát FILE MODE\n"
-        "/cancelfile – huỷ file\n"
-        "/sendfile – tải kết quả\n"
+        "/chat – thoát FILE MODE, quay lại chat thường\n"
+        "/cancelfile – huỷ file đang làm\n"
+        "/sendfile – tải kết quả gần nhất\n"
         "Gửi file để vào FILE MODE, nhắn yêu cầu rồi mình xử lý."
     )
 
@@ -267,7 +276,7 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data, mime = await run_gemini(prompt)
         buf = io.BytesIO(data); buf.name = "gen.png"
-        await context.bot.send_photo(chat_id, buf)
+        await context.bot.send_photo(chat_id, buf)  # no caption
     except Exception as e:
         await context.bot.send_message(chat_id, f"Lỗi tạo ảnh: {e}")
 
@@ -280,10 +289,11 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msgs = build_messages(chat_id, q, sys_prompt_linh()+" Bạn là lập trình viên kỳ cựu. Viết code sạch, best practice.")
         result = await run_llm(CODE_MODEL, msgs, MAX_TOKENS_CODE, temperature=0.4) or "..."
         m = re.search(r"```(\w+)?\n(.*?)```", result, flags=re.S)
-        if m: await start_pager(context, chat_id, m.group(2).rstrip(), is_code=True, lang_hint=m.group(1) or "")
+        if m: await start_pager(context, chat_id, m.group(2).rstrip(), is_code=True, lang_hint=m.group(1) or "markdown")
         else: await start_pager(context, chat_id, result, is_code=True, lang_hint="markdown")
         histories[chat_id].append(("user", q)); histories[chat_id].append(("assistant", result[:1000]))
 
+# -------- core flows --------
 def split_text_smart(text: str, chunk_chars: int = CHUNK_CHARS):
     if len(text) <= chunk_chars: return [text]
     parts=[]; cur=[]; used=0
@@ -327,7 +337,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             data, _ = await run_gemini(prompt)
             buf = io.BytesIO(data); buf.name = "gen.png"
-            await context.bot.send_photo(chat_id, buf)
+            await context.bot.send_photo(chat_id, buf)  # no caption
         except Exception as e:
             await context.bot.send_message(chat_id, f"Lỗi tạo ảnh: {e}")
         return
@@ -349,7 +359,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     msgs = build_messages(chat_id, q, sys_prompt_linh())
     result = await run_llm(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.85) or "..."
-    await context.bot.send_message(chat_id, f"📝 <i>Lời dẫn</i>\n{htmlesc(result)}", parse_mode=ParseMode.HTML)
+    # send as quote-style "note" without the label
+    body = f"“{htmlesc(result).strip()}”"
+    try:
+        await context.bot.send_message(chat_id, body, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except BadRequest:
+        await context.bot.send_message(chat_id, result)
     histories[chat_id].append(("user", q)); histories[chat_id].append(("assistant", result[:1000]))
 
 async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
