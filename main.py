@@ -16,7 +16,7 @@ BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 
 CHAT_MODEL = os.getenv("CHAT_MODEL", "anthropic/claude-3.5-haiku")
 CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-4-opus")
-FILE_MODEL = os.getenv("FILE_MODEL", "anthropic/claude-4-sonnet")
+FILE_MODEL = os.getenv("FILE_MODEL", "anthropic/claude-4-opus")
 
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "900"))
 MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE", "2500"))
