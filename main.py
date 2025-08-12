@@ -47,6 +47,7 @@ BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "anthropic/claude-3.5-haiku")
 CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-4-opus")
 FILE_MODEL = os.getenv("FILE_MODEL", "anthropic/claude-4-sonnet")
+
 PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "900"))
 MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE", "4000"))
@@ -60,14 +61,17 @@ ARCHIVES = (".zip",".rar",".7z",".tar",".tar.gz",".tgz",".tar.bz2",".tar.xz")
 TEXT_LIKE = (".txt",".md",".log",".csv",".tsv",".json",".yaml",".yml",".ini",".cfg",".env",".xml",".html",".htm",
              ".py",".js",".ts",".java",".c",".cpp",".cs",".go",".php",".rb",".rs",".sh",".bat",".ps1",".sql")
 
+MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "3"))
+SEM = asyncio.Semaphore(MAX_CONCURRENCY)
+
 client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL) if VERCEL_API_KEY else None
 app = Flask(__name__)
 histories = defaultdict(lambda: deque(maxlen=32))
 locks = defaultdict(asyncio.Lock)
 PAGERS = {}
 PENDING_FILE = {}
-FILE_MODE = defaultdict(lambda: False)
 LAST_RESULT = {}
+FILE_MODE = defaultdict(lambda: False)
 
 def chunk_pages(raw, per_page=PAGE_CHARS):
     lines = (raw or "").splitlines(); pages=[]; cur=[]; used=0
@@ -136,6 +140,10 @@ def complete_with_model(model, messages, max_tokens, temperature=0.7):
     if not client: return "Thiếu VERCEL_API_KEY."
     res = client.chat.completions.create(model=model, max_tokens=max_tokens, temperature=temperature, messages=messages)
     return (res.choices[0].message.content or "").strip()
+
+async def run_llm(model, messages, max_tokens, temperature=0.7):
+    async with SEM:
+        return await asyncio.to_thread(complete_with_model, model, messages, max_tokens, temperature)
 
 def is_archive(name: str):
     return (name or "").lower().endswith(ARCHIVES)
@@ -231,13 +239,25 @@ def create_image_bytes_gemini(prompt: str):
             return part.inline_data.data, part.inline_data.mime_type or "image/png"
     raise RuntimeError("Gemini không trả ảnh.")
 
+async def run_gemini(prompt: str):
+    async with SEM:
+        return await asyncio.to_thread(create_image_bytes_gemini, prompt)
+
 def want_image(t):
     t=(t or "").lower()
     return any(k in t for k in ["tạo ảnh","vẽ","generate image","draw image","vẽ giúp","create image","/img "])
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = "Lệnh:\n/help\n/img <mô tả>\n/code <yêu cầu>\nGửi file để vào FILE MODE. Nhắn yêu cầu để xử lý. /chat thoát, /cancelfile huỷ, /sendfile tải kết quả."
-    await update.message.reply_text(txt)
+    await update.message.reply_text(
+        "Lệnh:\n"
+        "/help\n"
+        "/img <mô tả>\n"
+        "/code <yêu cầu>\n"
+        "/chat – thoát FILE MODE\n"
+        "/cancelfile – huỷ file\n"
+        "/sendfile – tải kết quả\n"
+        "Gửi file để vào FILE MODE, nhắn yêu cầu rồi mình xử lý."
+    )
 
 async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -245,7 +265,7 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not prompt: return await context.bot.send_message(chat_id, "Dùng: /img <mô tả>")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
     try:
-        data, _ = create_image_bytes_gemini(prompt)
+        data, mime = await run_gemini(prompt)
         buf = io.BytesIO(data); buf.name = "gen.png"
         await context.bot.send_photo(chat_id, buf, caption=prompt)
     except Exception as e:
@@ -258,38 +278,11 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with locks[chat_id]:
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         msgs = build_messages(chat_id, q, sys_prompt_linh()+" Bạn là lập trình viên kỳ cựu. Viết code sạch, best practice.")
-        result = complete_with_model(CODE_MODEL, msgs, MAX_TOKENS_CODE, temperature=0.4) or "..."
+        result = await run_llm(CODE_MODEL, msgs, MAX_TOKENS_CODE, temperature=0.4) or "..."
         m = re.search(r"```(\w+)?\n(.*?)```", result, flags=re.S)
         if m: await start_pager(context, chat_id, m.group(2).rstrip(), is_code=True, lang_hint=m.group(1) or "")
         else: await start_pager(context, chat_id, result, is_code=True)
         histories[chat_id].append(("user", q)); histories[chat_id].append(("assistant", result[:1000]))
-
-async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    FILE_MODE[chat_id] = False
-    await context.bot.send_message(chat_id, "Đã thoát FILE MODE.")
-
-async def cmd_cancelfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    FILE_MODE[chat_id] = False
-    PENDING_FILE.pop(chat_id, None)
-    LAST_RESULT.pop(chat_id, None)
-    await context.bot.send_message(chat_id, "Đã huỷ file.")
-
-async def cmd_sendfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    r = LAST_RESULT.get(chat_id)
-    if not r: return await context.bot.send_message(chat_id, "Chưa có kết quả để gửi.")
-    base = os.path.splitext(r["name"])[0]
-    ext = r.get("ext") or ".txt"
-    if ext.lower() in TEXT_LIKE:
-        out_name, buf = _emit_text_file(base, ext, r["text"])
-    elif ext.lower()==".docx" and DocxDocument is not None:
-        out_name, buf = _emit_docx_file(base, r["text"])
-    else:
-        out_name, buf = _emit_text_file(base, ".txt", r["text"])
-    await context.bot.send_document(chat_id, document=buf, caption=out_name)
-    buf.close()
 
 def split_text_smart(text: str, chunk_chars: int = CHUNK_CHARS):
     if len(text) <= chunk_chars: return [text]
@@ -305,7 +298,7 @@ def split_text_smart(text: str, chunk_chars: int = CHUNK_CHARS):
 
 def system_for_instruction():
     return ("Bạn là Linh. Áp dụng đúng yêu cầu người dùng lên tài liệu được cung cấp. "
-            "Chỉ trả kết quả đã xử lý, không giải thích. Giữ cấu trúc rõ ràng.")
+            "Chỉ trả kết quả đã xử lý, không giải thích. Giữ cấu trúc hợp lý, rõ ràng.")
 
 async def run_with_instruction(document_text: str, instruction: str):
     chunks = split_text_smart(document_text, CHUNK_CHARS)
@@ -313,30 +306,32 @@ async def run_with_instruction(document_text: str, instruction: str):
     if len(chunks)==1:
         user = f"Yêu cầu:\n{instruction}\n\nTài liệu:\n{chunks[0]}"
         msgs=[{"role":"system","content":system_for_instruction()},{"role":"user","content":user}]
-        return complete_with_model(FILE_MODEL, msgs, max_tokens=FILE_OUTPUT_TOKENS, temperature=0.3)
+        return await run_llm(FILE_MODEL, msgs, FILE_OUTPUT_TOKENS, temperature=0.3)
     partials=[]
     for i,ck in enumerate(chunks,1):
         user = f"Yêu cầu:\n{instruction}\n\nTài liệu - phần {i}/{len(chunks)}:\n{ck}"
         msgs=[{"role":"system","content":system_for_instruction()},{"role":"user","content":user}]
-        part = complete_with_model(FILE_MODEL, msgs, max_tokens=min(FILE_OUTPUT_TOKENS,8000), temperature=0.3)
+        part = await run_llm(FILE_MODEL, msgs, min(FILE_OUTPUT_TOKENS,8000), temperature=0.3)
         partials.append(part)
     merge_user = "Hợp nhất các phần sau thành một phiên bản thống nhất:\n\n" + "\n\n-----\n\n".join(f"[PHẦN {i+1}]\n{p}" for i,p in enumerate(partials))
     msgs=[{"role":"system","content":"Hợp nhất văn bản, liền mạch, không lặp, trung thành với yêu cầu."},{"role":"user","content":merge_user}]
-    return complete_with_model(FILE_MODEL, msgs, max_tokens=FILE_OUTPUT_TOKENS, temperature=0.2)
+    return await run_llm(FILE_MODEL, msgs, FILE_OUTPUT_TOKENS, temperature=0.2)
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     q = (update.message.text or "").strip()
+
     if want_image(q):
         prompt = re.sub(r"(?i)(tạo ảnh|vẽ|generate image|draw image|vẽ giúp|create image|/img)\s*[:\-]*", "", q).strip() or "A cute cat in space suit, 3D render"
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         try:
-            data, _ = create_image_bytes_gemini(prompt)
+            data, _ = await run_gemini(prompt)
             buf = io.BytesIO(data); buf.name = "gen.png"
             await context.bot.send_photo(chat_id, buf, caption=prompt)
         except Exception as e:
             await context.bot.send_message(chat_id, f"Lỗi tạo ảnh: {e}")
         return
+
     if FILE_MODE[chat_id] and chat_id in PENDING_FILE:
         entry = PENDING_FILE[chat_id]
         name, data = entry["name"], entry["data"]
@@ -350,9 +345,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ext = os.path.splitext(name)[1].lower()
         LAST_RESULT[chat_id] = {"name": name, "text": out, "ext": ext}
         return
+
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     msgs = build_messages(chat_id, q, sys_prompt_linh())
-    result = complete_with_model(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.85) or "..."
+    result = await run_llm(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.85) or "..."
     await start_pager(context, chat_id, result, is_code=False)
     histories[chat_id].append(("user", q)); histories[chat_id].append(("assistant", result[:1000]))
 
@@ -368,9 +364,37 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = bio.getvalue(); bio.close()
         PENDING_FILE[chat_id] = {"name": name, "data": data}
         FILE_MODE[chat_id] = True
-        await context.bot.send_message(chat_id, "Đã nhận file. Đang ở FILE MODE. Nhắn yêu cầu để xử lý. /chat thoát, /cancelfile huỷ, /sendfile tải kết quả.")
+        await context.bot.send_message(chat_id, "Đã nhận file. Đang ở FILE MODE. Gửi yêu cầu để xử lý. /chat để thoát, /cancelfile để huỷ, /sendfile để tải kết quả.")
     except Exception as e:
         await context.bot.send_message(chat_id, f"Lỗi nhận file: {e}")
+
+async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    FILE_MODE[chat_id] = False
+    await context.bot.send_message(chat_id, "Đã thoát FILE MODE. Quay lại chat thường.")
+
+async def cmd_cancelfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    FILE_MODE[chat_id] = False
+    PENDING_FILE.pop(chat_id, None)
+    LAST_RESULT.pop(chat_id, None)
+    await context.bot.send_message(chat_id, "Đã huỷ file và thoát FILE MODE.")
+
+async def cmd_sendfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    r = LAST_RESULT.get(chat_id)
+    if not r:
+        return await context.bot.send_message(chat_id, "Chưa có kết quả để gửi.")
+    base = os.path.splitext(r["name"])[0]
+    ext = r["ext"] or ".txt"
+    if ext.lower() in TEXT_LIKE:
+        out_name, buf = _emit_text_file(base, ext, r["text"])
+    elif ext.lower()==".docx" and DocxDocument is not None:
+        out_name, buf = _emit_docx_file(base, r["text"])
+    else:
+        out_name, buf = _emit_text_file(base, ".txt", r["text"])
+    await context.bot.send_document(chat_id, document=buf, caption=out_name)
+    buf.close()
 
 def main():
     app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
