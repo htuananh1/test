@@ -8,6 +8,22 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from telegram.error import BadRequest
 from openai import OpenAI
 
+# Load .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # Fallback: manually load .env
+    try:
+        with open('.env', 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    os.environ[key] = value
+    except FileNotFoundError:
+        pass
+
 try:
     from google import genai
     from google.genai import types
@@ -476,7 +492,7 @@ if DISCORD_ENABLED:
         for part in (res[i:i+1900] for i in range(0, len(res or ''), 1900)):
             await inter.followup.send(f"```markdown\n{part}\n```")
 
-async def main():
+def main():
     app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
     app_tg.add_handler(CommandHandler("help", cmd_help))
     app_tg.add_handler(CommandHandler("img", cmd_img))
@@ -495,7 +511,7 @@ async def main():
         discord_thread = threading.Thread(target=dc.run, args=(DISCORD_TOKEN,), daemon=True)
         discord_thread.start()
     
-    await app_tg.run_polling()
+    app_tg.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
