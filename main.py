@@ -1,9 +1,3 @@
-"""
-Telegram AI Bot - Enhanced Version
-Author: Hoàng Tuấn Anh
-Telegram: @cucodoivandep
-"""
-
 import os
 import re
 import asyncio
