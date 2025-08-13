@@ -1,35 +1,10 @@
-import os, re, threading, asyncio, io, logging, random, datetime
-import base64
-from collections import deque, defaultdict
+
+import os, re, asyncio, io, logging, random, datetime, base64, json
+from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode, ChatAction
+from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CommandHandler, CallbackQueryHandler
-from telegram.error import BadRequest
 from openai import OpenAI
-
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("linh")
-
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
-BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
-
-CHAT_MODEL = os.getenv("CHAT_MODEL", "anthropic/claude-3.5-haiku")
-CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-4-sonnet")
-FILE_MODEL = os.getenv("FILE_MODEL", "anthropic/claude-4.1-opus")
-
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "900"))
-MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE", "4000"))
-FILE_OUTPUT_TOKENS = int(os.getenv("FILE_OUTPUT_TOKENS", "6000"))
-CHUNK_CHARS = int(os.getenv("CHUNK_CHARS", "120000"))
-PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
-CTX_TURNS = int(os.getenv("CTX_TURNS", "15"))
-MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "3"))
-REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "90"))
-MAX_EMIT_CHARS = int(os.getenv("MAX_EMIT_CHARS", "800000"))
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-image-generation")
 
 try:
     from google import genai
@@ -42,200 +17,92 @@ try:
     import chardet
 except Exception:
     chardet = None
-
 try:
     import PyPDF2
 except Exception:
     PyPDF2 = None
-
 try:
     import docx
     from docx import Document as DocxDocument
 except Exception:
     docx = None
     DocxDocument = None
-
 try:
     import openpyxl
 except Exception:
     openpyxl = None
-
 try:
     from pptx import Presentation
 except Exception:
     Presentation = None
-
 try:
     from bs4 import BeautifulSoup
 except Exception:
     BeautifulSoup = None
 
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("bot")
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+VERCEL_API_KEY = os.getenv("VERCEL_API_KEY", "")
+BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "anthropic/claude-3.5-haiku")
+CODE_MODEL = os.getenv("CODE_MODEL", "anthropic/claude-4-sonnet")
+FILE_MODEL = os.getenv("FILE_MODEL", "anthropic/claude-4.1-opus")
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "900"))
+MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE", "4000"))
+FILE_OUTPUT_TOKENS = int(os.getenv("FILE_OUTPUT_TOKENS", "6000"))
+CHUNK_CHARS = int(os.getenv("CHUNK_CHARS", "120000"))
+PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
+CTX_TURNS = int(os.getenv("CTX_TURNS", "12"))
+MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "3"))
+REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "90"))
+MAX_EMIT_CHARS = int(os.getenv("MAX_EMIT_CHARS", "800000"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-image-generation")
+
 client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL, timeout=REQUEST_TIMEOUT) if VERCEL_API_KEY else None
 SEM = asyncio.Semaphore(MAX_CONCURRENCY)
-histories = defaultdict(lambda: deque(maxlen=32))
-locks = defaultdict(asyncio.Lock)
-PAGERS = {}
 FILE_MODE = defaultdict(lambda: False)
-PENDING_FILE = {}
-LAST_RESULT = {}
-
-ARCHIVES = (".zip",".rar",".7z",".tar",".tar.gz",".tgz",".tar.bz2",".tar.xz")
-TEXT_LIKE = (".txt",".md",".log",".csv",".tsv",".json",".yaml",".yml",".ini",".cfg",".env",".xml",".html",".htm",
-             ".py",".js",".ts",".java",".c",".cpp",".cs",".go",".php",".rb",".rs",".sh",".bat",".ps1",".sql")
-
-def chunk_code_pages(code: str, per_page: int = PAGE_CHARS) -> list:
-    if len(code) <= per_page:
-        return [code]
-
-    pages = []
-    current_page = []
-    current_size = 0
-    blocks = []
-    current_block = []
-
-    for line in code.splitlines():
-        if line and not line.startswith(' ') and not line.startswith('\t'):
-            if current_block:
-                blocks.append('\n'.join(current_block))
-            current_block = [line]
-        else:
-            current_block.append(line)
-
-    if current_block:
-        blocks.append('\n'.join(current_block))
-
-    for block in blocks:
-        block_size = len(block) + 1
-
-        if current_size + block_size > per_page:
-            if current_page:
-                pages.append('\n'.join(current_page))
-                current_page = []
-                current_size = 0
-
-        if block_size > per_page:
-            lines = block.splitlines()
-            current_lines = []
-            current_lines_size = 0
-
-            for line in lines:
-                line_size = len(line) + 1
-                if current_lines_size + line_size > per_page:
-                    pages.append('\n'.join(current_lines))
-                    current_lines = [line]
-                    current_lines_size = line_size
-                else:
-                    current_lines.append(line)
-                    current_lines_size += line_size
-
-            if current_lines:
-                pages.append('\n'.join(current_lines))
-        else:
-            current_page.append(block)
-            current_size += block_size
-
-    if current_page:
-        pages.append('\n'.join(current_page))
-
-    return pages
-
-def chunk_pages(raw: str, per_page: int = PAGE_CHARS) -> list:
-    if len(raw) <= per_page:
-        return [raw]
-    pages = []
-    current = []
-    current_size = 0
-
-    for line in raw.splitlines():
-        line_size = len(line) + 1
-        if current_size + line_size > per_page and current:
-            pages.append('\n'.join(current))
-            current = [line]
-            current_size = line_size
-        else:
-            current.append(line)
-            current_size += line_size
-
-    if current:
-        pages.append('\n'.join(current))
-    return pages
-
-def kb(idx: int, total: int) -> InlineKeyboardMarkup:
-    return None if total <= 1 else InlineKeyboardMarkup([[
-        InlineKeyboardButton("⏪", callback_data="pg_prev"),
-        InlineKeyboardButton(f"{idx+1}/{total}", callback_data="pg_stay"),
-        InlineKeyboardButton("⏩", callback_data="pg_next")
-    ]])
-
-def page_payload(p: dict) -> tuple:
-    txt = p["pages"][p["idx"]]
-    return (f"```{p['lang']}\n{txt}\n```", ParseMode.MARKDOWN_V2) if p["is_code"] else (txt, ParseMode.HTML)
-
-async def send_or_update(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, msg: Update, p: dict):
-    text, mode = page_payload(p)
-    keyboard = kb(p["idx"], len(p["pages"]))
-
-    async def try_send(text: str, mode: str, keyboard: InlineKeyboardMarkup, retry_without_format: bool = True) -> bool:
-        try:
-            if msg:
-                await msg.edit_text(text, parse_mode=mode, reply_markup=keyboard)
-            else:
-                m = await ctx.bot.send_message(chat_id, text, parse_mode=mode, reply_markup=keyboard)
-                PAGERS[(m.chat_id, m.message_id)] = p
-            return True
-        except BadRequest as e:
-            if retry_without_format and "can't parse entities" in str(e).lower():
-                await try_send(text, None, keyboard, False)
-            else:
-                raise e
-        return False
-
-    try:
-        await try_send(text, mode, keyboard)
-    except Exception:
-        p["is_code"] = not p["is_code"]
-        text, mode = page_payload(p)
-        await try_send(text, mode, keyboard)
-
-async def start_pager(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, raw: str, is_code: bool = False, lang_hint: str = ""):
-    pages = chunk_code_pages(raw) if is_code else chunk_pages(raw)
-    await send_or_update(ctx, chat_id, None, {
-        "pages": pages,
-        "is_code": is_code,
-        "lang": lang_hint or "markdown",
-        "idx": 0
-    })
-
-def build_messages(cid: int, user_text: str, sys_prompt: str) -> list:
-    msgs = [{"role": "system", "content": sys_prompt}]
-    keep = max(2, CTX_TURNS * 2)
-    msgs += [{"role": "user" if r == 'user' else 'assistant', "content": c}
-             for r, c in list(histories[cid])[-keep:]]
-    msgs.append({"role": "user", "content": user_text})
-    return msgs
+PAGERS = {}
+LAST_RESULT = defaultdict(lambda: None)
 
 def sys_prompt_linh() -> str:
     current_time = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     return (
-        f"Bạn tên là Linh. Nói chuyện tự nhiên như người Việt, ngắn gọn, thẳng, có cảm xúc.\n"
-        f"Cho phép văng tục khi hợp ngữ cảnh, không thù hằn và không công kích cá nhân.\n"
-        f"Không nịnh bợ, không vòng vo. Tập trung ý chính.\n"
-        f"Thời gian hiện tại (UTC): {current_time}\n"
-        f"Được làm ra bởi Hoàng Tuấn Anh. Telegram: @cucodoivandep."
+        f"Bạn tên là Linh. Nói chuyện tự nhiên tiếng Việt, ngắn gọn, thẳng. "
+        f"Không dùng Markdown. Thời gian UTC: {current_time}."
     )
+
+def build_msgs(sys_prompt: str, user_text: str, kind: str = "chat") -> list:
+    sys = {"role": "system", "content": sys_prompt}
+    if kind == "code":
+        user = {"role": "user", "content": f"Viết code theo yêu cầu sau, trả lời chỉ văn bản thuần, không markdown:\n{user_text}"}
+    else:
+        user = {"role": "user", "content": user_text}
+    return [sys, user]
 
 def complete_with_model(model: str, messages: list, max_tokens: int, temperature: float = 0.7) -> str:
     if not client:
         return "Thiếu VERCEL_API_KEY."
-    res = client.chat.completions.create(
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        messages=messages
-    )
-    return (res.choices[0].message.content or "").strip()
+    try:
+        res = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+        txt = res.choices[0].message.content if res and res.choices else ""
+        if not txt:
+            return ""
+        if len(txt) > MAX_EMIT_CHARS:
+            txt = txt[:MAX_EMIT_CHARS]
+        return txt
+    except Exception as e:
+        return f"Lỗi gọi model: {e}"
 
-async def _run_llm_retry(model: str, messages: list, max_tokens: int, temperature: float, tries: int = 3) -> str:
+async def run_llm(model: str, messages: list, max_tokens: int, temperature: float = 0.7) -> str:
+    tries = 2
     last = None
     for i in range(tries):
         try:
@@ -248,47 +115,157 @@ async def _run_llm_retry(model: str, messages: list, max_tokens: int, temperatur
             )
         except Exception as e:
             last = e
-            await asyncio.sleep(1.2 * (i + 1) + random.random())
-    raise last
-
-async def run_llm(model: str, messages: list, max_tokens: int, temperature: float = 0.7) -> str:
-    async with SEM:
-        return await asyncio.wait_for(
-            _run_llm_retry(model, messages, max_tokens, temperature),
-            timeout=REQUEST_TIMEOUT + 10
-        )
-
-def is_archive(name: str) -> bool:
-    return (name or "").lower().endswith(ARCHIVES)
+            await asyncio.sleep(1.0 + random.random())
+    if last:
+        raise last
+    return ""
 
 def detect_decode(data: bytes) -> str:
     if not data:
         return ""
+    enc = None
     if chardet:
-        enc = (chardet.detect(data) or {}).get("encoding") or "utf-8"
         try:
-            return data.decode(enc, errors="ignore")
+            info = chardet.detect(data)
+            enc = info.get("encoding")
         except Exception:
-            pass
-    try:
-        return data.decode("utf-8", errors="ignore")
-    except Exception:
-        return data.decode("latin-1", errors="ignore")
+            enc = None
+    for codec in [enc, "utf-8", "utf-16", "latin-1"]:
+        if not codec:
+            continue
+        try:
+            return data.decode(codec, errors="replace")
+        except Exception:
+            continue
+    return data.decode("utf-8", errors="replace")
 
-def read_any_file(name: str, data: bytes) -> tuple:
+TEXT_LIKE = (".txt", ".md", ".py", ".js", ".ts", ".json", ".csv", ".yaml", ".yml", ".html", ".htm", ".css", ".xml")
+ARCHIVE_LIKE = (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2")
+
+def is_archive(name: str) -> bool:
+    name = (name or "").lower()
+    return any(name.endswith(ext) for ext in ARCHIVE_LIKE)
+
+def extract_text_from_file(name: str, data: bytes) -> tuple[str, str]:
     n = (name or "").lower()
     if is_archive(n):
-        return None, "archive"
+        return "Định dạng nén chưa hỗ trợ.", "error"
     if any(n.endswith(ext) for ext in TEXT_LIKE):
         raw = detect_decode(data)
         if n.endswith((".html", ".htm")) and BeautifulSoup:
-            soup = BeautifulSoup(raw, "html.parser")
-            raw = soup.get_text(separator="\n")
+            try:
+                soup = BeautifulSoup(raw, "html.parser")
+                raw = soup.get_text(separator="\n")
+            except Exception:
+                pass
         return raw, "text"
+    if n.endswith(".pdf"):
+        if not PyPDF2:
+            return "Chưa cài PyPDF2.", "error"
+        try:
+            reader = PyPDF2.PdfReader(io.BytesIO(data))
+            texts = []
+            for page in reader.pages:
+                try:
+                    texts.append(page.extract_text() or "")
+                except Exception:
+                    texts.append("")
+            return "\n".join(texts), "text"
+        except Exception as e:
+            return f"Lỗi đọc PDF: {e}", "error"
+    if n.endswith((".docx", ".doc")):
+        if not DocxDocument:
+            return "Chưa cài python-docx.", "error"
+        try:
+            bio = io.BytesIO(data)
+            doc = DocxDocument(bio)
+            txt = "\n".join([p.text for p in doc.paragraphs])
+            return txt, "text"
+        except Exception as e:
+            return f"Lỗi đọc DOCX: {e}", "error"
+    if n.endswith((".xlsx", ".xls")):
+        if not openpyxl:
+            return "Chưa cài openpyxl.", "error"
+        try:
+            bio = io.BytesIO(data)
+            wb = openpyxl.load_workbook(bio, data_only=True)
+            rows = []
+            for ws in wb.worksheets:
+                for r in ws.iter_rows(values_only=True):
+                    rows.append("\t".join("" if v is None else str(v) for v in r))
+            return "\n".join(rows), "text"
+        except Exception as e:
+            return f"Lỗi đọc XLSX: {e}", "error"
+    if n.endswith((".pptx", ".ppt")):
+        if not Presentation:
+            return "Chưa cài python-pptx.", "error"
+        try:
+            prs = Presentation(io.BytesIO(data))
+            texts = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        texts.append(shape.text or "")
+            return "\n".join(texts), "text"
+        except Exception as e:
+            return f"Lỗi đọc PPTX: {e}", "error"
+    return "Định dạng này chưa hỗ trợ.", "error"
 
+def split_pages(text: str, page_chars: int = PAGE_CHARS) -> list[str]:
+    text = text or ""
+    if len(text) <= page_chars:
+        return [text]
+    pages = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(n, start + page_chars)
+        pages.append(text[start:end])
+        start = end
+    return pages
 
-    return "Định dạng này chưa hỗ trợ. Hãy gửi văn bản, PDF, DOCX, XLSX, PPTX, HTML, JSON, CSV, v.v.", "error"
+def make_pager(chat_id: int, pages: list[str], page_idx: int = 0):
+    PAGERS[chat_id] = {"pages": pages, "i": page_idx}
+    btns = []
+    total = len(pages)
+    left = InlineKeyboardButton("←", callback_data=f"pg_{chat_id}_{max(0, page_idx-1)}")
+    right = InlineKeyboardButton("→", callback_data=f"pg_{chat_id}_{min(total-1, page_idx+1)}")
+    btns.append([left, right])
+    kb = InlineKeyboardMarkup(btns)
+    return pages[page_idx], kb
 
+async def on_page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.data:
+        return
+    try:
+        _, cid, idx = q.data.split("_")
+        cid = int(cid)
+        idx = int(idx)
+    except Exception:
+        await q.answer()
+        return
+    info = PAGERS.get(cid)
+    if not info:
+        await q.answer()
+        return
+    pages = info["pages"]
+    idx = max(0, min(len(pages)-1, idx))
+    PAGERS[cid]["i"] = idx
+    await q.edit_message_text(pages[idx], disable_web_page_preview=True, reply_markup=make_pager(cid, pages, idx)[1])
+    await q.answer()
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "/help – Hiện lệnh\n"
+        "/img <mô tả> – Tạo ảnh (Gemini)\n"
+        "/code <yêu cầu> – Viết code\n"
+        "/chat <hỏi> – Chat nhanh\n"
+        "/cancelfile – Thoát FILE MODE\n"
+        "/sendfile – Tải kết quả gần nhất\n"
+        "Gửi file để vào FILE MODE."
+    )
 
 async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -296,34 +273,67 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not q:
         await context.bot.send_message(chat_id, "Dùng: /img <mô tả>")
         return
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
     if not GEMINI_API_KEY:
         await context.bot.send_message(chat_id, "Thiếu GEMINI_API_KEY.")
         return
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
     try:
-        if genai is None:
-            await context.bot.send_message(chat_id, "Chưa cài thư viện google.genai.")
+        if genai is None or types is None:
+            await context.bot.send_message(chat_id, "Chưa cài google-genai.")
             return
-        client_gemini = genai.Client(api_key=GEMINI_API_KEY)
-        resp = client_gemini.models.generate_images(model=GEMINI_IMAGE_MODEL, prompt=q)
-        sent = 0
-        if hasattr(resp, "images") and resp.images:
-            for img in resp.images:
-                if hasattr(img, "url") and img.url:
-                    await context.bot.send_photo(chat_id, photo=img.url)
-                    sent += 1
-                else:
-                    b64 = getattr(img, "image", None) or getattr(img, "data", None)
-                    if b64:
-                        data = base64.b64decode(b64)
-                        await context.bot.send_photo(chat_id, photo=io.BytesIO(data))
-                        sent += 1
-        if sent == 0:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        contents = [types.Content(role="user", parts=[types.Part.from_text(text=q)])]
+        config = types.GenerateContentConfig(response_modalities=["IMAGE","TEXT"])
+        got = 0
+        async for chunk in client.models.generate_content_stream(
+            model=GEMINI_IMAGE_MODEL,
+            contents=contents,
+            config=config,
+        ):
+            cands = getattr(chunk, "candidates", None)
+            if not cands:
+                if getattr(chunk, "text", None):
+                    await context.bot.send_message(chat_id, chunk.text)
+                continue
+            content = cands[0].content if cands[0] else None
+            parts = getattr(content, "parts", None) if content else None
+            if not parts:
+                continue
+            part = parts[0]
+            inline = getattr(part, "inline_data", None) or getattr(part, "inlineData", None)
+            if inline and getattr(inline, "data", None):
+                img_b64 = inline.data
+                try:
+                    img_bytes = base64.b64decode(img_b64)
+                    await context.bot.send_photo(chat_id, photo=io.BytesIO(img_bytes))
+                    got += 1
+                except Exception:
+                    pass
+            elif getattr(chunk, "text", None):
+                await context.bot.send_message(chat_id, chunk.text)
+        if got == 0:
             await context.bot.send_message(chat_id, "Không nhận được ảnh từ Gemini.")
     except Exception as e:
         await context.bot.send_message(chat_id, f"Lỗi tạo ảnh: {e}")
 
-
+async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    q = " ".join(context.args).strip()
+    if not q:
+        await context.bot.send_message(chat_id, "Dùng: /code <yêu cầu>")
+        return
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    sys_prompt = sys_prompt_linh()
+    msgs = build_msgs(sys_prompt, q, kind="code")
+    try:
+        out = await run_llm(CODE_MODEL, msgs, MAX_TOKENS_CODE, temperature=0.2)
+        out = out or "Không nhận được phản hồi."
+        LAST_RESULT[chat_id] = out
+        pages = split_pages(out)
+        text, kb = make_pager(chat_id, pages, 0)
+        await context.bot.send_message(chat_id, text, disable_web_page_preview=True, reply_markup=kb)
+    except Exception as e:
+        await context.bot.send_message(chat_id, f"Lỗi /code: {e}")
 
 async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -336,167 +346,92 @@ async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msgs = build_msgs(sys_prompt, q, kind="chat")
     try:
         out = await run_llm(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.7)
-        if not out:
-            out = "Không nhận được phản hồi từ model."
-        await context.bot.send_message(chat_id, out, parse_mode=ParseMode.HTML)
+        out = out or "Không nhận được phản hồi."
+        LAST_RESULT[chat_id] = out
+        pages = split_pages(out)
+        text, kb = make_pager(chat_id, pages, 0)
+        await context.bot.send_message(chat_id, text, disable_web_page_preview=True, reply_markup=kb)
     except Exception as e:
         await context.bot.send_message(chat_id, f"Lỗi /chat: {e}")
-
-
-
-async def on_page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    chat_id = q.message.chat_id
-    mid = q.message.message_id
-    p = PAGERS.get((chat_id, mid))
-    if not p:
-        await q.answer("Không có dữ liệu.")
-        return
-    if q.data == "pg_prev":
-        p["idx"] = (p["idx"] - 1) % len(p["pages"])
-    elif q.data == "pg_next":
-        p["idx"] = (p["idx"] + 1) % len(p["pages"])
-    await q.answer()
-    await send_or_update(context, chat_id, q.message, p)
-    PAGERS[(chat_id, mid)] = p
-
-async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    doc = update.message.document
-    if not doc:
-        await context.bot.send_message(chat_id, "Không nhận được file.")
-        return
-    FILE_MODE[chat_id] = True
-    f = await context.bot.get_file(doc.file_id)
-    data = await f.download_as_bytearray()
-    name = doc.file_name or "file"
-    PENDING_FILE[chat_id] = {"name": name, "data": bytes(data)}
-    await context.bot.send_message(chat_id, "Đã nhận file. Gõ yêu cầu để xử lý hoặc /cancelfile để thoát.")
-
-def want_image(text: str) -> bool:
-    if not text:
-        return False
-    t = text.strip().lower()
-    return t.startswith("img:") or t.startswith("/img ")
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(
-        update.effective_chat.id,
-        "/help – Hiện danh sách lệnh\n"
-        "/img <mô tả> – Tạo ảnh (GEMINI)\n"
-        "/code <yêu cầu> – Viết code (CLAUDE-4-SONNET)\n"
-        "/cancelfile – Thoát FILE MODE\n"
-        "/sendfile – Tải kết quả gần nhất\n"
-        "chat – Chat nhanh (CLAUDE-3.5-HAIKU)\n"
-        "Gửi file – Vào FILE MODE (CLAUDE-4.1-OPUS), nhắn yêu cầu để xử lý.\n"
-    )
-
 
 async def cmd_cancelfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     FILE_MODE[chat_id] = False
-    PENDING_FILE.pop(chat_id, None)
     await context.bot.send_message(chat_id, "Đã thoát FILE MODE.")
 
 async def cmd_sendfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    result = LAST_RESULT.get(chat_id, "")
-    if not result:
-        await context.bot.send_message(chat_id, "Chưa có kết quả gần nhất.")
+    data = LAST_RESULT.get(chat_id)
+    if not data:
+        await context.bot.send_message(chat_id, "Chưa có kết quả để gửi.")
         return
-    if len(result) > PAGE_CHARS:
-        await start_pager(context, chat_id, result)
-    else:
-        await context.bot.send_message(chat_id, result, parse_mode=ParseMode.MARKDOWN_V2)
-async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bio = io.BytesIO(data.encode("utf-8"))
+    bio.name = "result.txt"
+    await context.bot.send_document(chat_id, document=bio)
+
+async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    q = " ".join(context.args).strip()
-    if not q:
-        return await context.bot.send_message(chat_id, "Dùng: /code <yêu cầu>")
-
-    async with locks[chat_id]:
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        try:
-            sys_prompt = (
-                sys_prompt_linh() + "\n" +
-                "Bạn là lập trình viên kỳ cựu. Tuân thủ các nguyên tắc sau:\n" +
-                "1. Viết code sạch, có comments và docstrings đầy đủ\n" +
-                "2. Áp dụng best practices và design patterns phù hợp\n" +
-                "3. Tối ưu hiệu năng khi cần thiết\n" +
-                "4. Code phải dễ bảo trì và mở rộng\n" +
-                "5. Thêm error handling đầy đủ"
-            )
-
-            msgs = build_messages(chat_id, q, sys_prompt)
-            result = await run_llm(CODE_MODEL, msgs, MAX_TOKENS_CODE, temperature=0.4)
-            LAST_RESULT[chat_id] = result or ''
-            if not result:
-                return await context.bot.send_message(chat_id, "Không nhận được kết quả từ model.")
-
-            lang_hint = "markdown"
-            code_markers = ["```python", "```javascript", "```java", "```cpp", "```go"]
-            for marker in code_markers:
-                if marker in result:
-                    lang_hint = marker.replace("```", "")
-                    break
-
-            await start_pager(context, chat_id, result, is_code=True, lang_hint=lang_hint)
-            histories[chat_id].append(("user", q))
-            histories[chat_id].append(("assistant", result[:1000]))
-
-        except asyncio.TimeoutError:
-            await context.bot.send_message(
-                chat_id,
-                "Lâu quá chưa xong. Thử chia nhỏ yêu cầu hoặc gửi lại nhé."
-            )
-        except Exception as e:
-            await context.bot.send_message(chat_id, f"Lỗi khi xử lý code: {str(e)}")
-
+    doc = update.message.document if update.message else None
+    if not doc:
+        return
+    FILE_MODE[chat_id] = True
+    f = await context.bot.get_file(doc.file_id)
+    bio = io.BytesIO()
+    await f.download_to_memory(bio)
+    content, kind = extract_text_from_file(doc.file_name or "file", bio.getvalue())
+    if kind == "error":
+        await context.bot.send_message(chat_id, content)
+        return
+    sys_prompt = sys_prompt_linh()
+    msgs = build_msgs(sys_prompt, f"Hãy tóm tắt file này ngắn gọn:\n{content[:CHUNK_CHARS]}", kind="chat")
+    try:
+        out = await run_llm(FILE_MODEL, msgs, FILE_OUTPUT_TOKENS, temperature=0.5)
+        out = out or "Không nhận được phản hồi."
+        LAST_RESULT[chat_id] = out
+        pages = split_pages(out)
+        text, kb = make_pager(chat_id, pages, 0)
+        await context.bot.send_message(chat_id, text, disable_web_page_preview=True, reply_markup=kb)
+    except Exception as e:
+        await context.bot.send_message(chat_id, f"Lỗi xử lý file: {e}")
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    q = (update.message.text or "").strip()
-
-    recent_msgs = list(histories[chat_id])[-10:]
-    context_summary = "\n".join([
-        f"{'User' if r=='user' else 'Assistant'}: {c[:100]}..."
-        for r, c in recent_msgs[-10:]
-    ])
-
-    if want_image(q):
-        pass
-
-    if FILE_MODE[chat_id] and chat_id in PENDING_FILE:
-        pass
-
+    chat_id = update.effective_chat.id
+    text = update.message.text or ""
+    if text.startswith("/"):
+        return
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-    sys_prompt = sys_prompt_linh() + f"\n\nTin nhắn gần đây:\n{context_summary}"
-    msgs = build_messages(chat_id, q, sys_prompt)
-
+    sys_prompt = sys_prompt_linh()
+    msgs = build_msgs(sys_prompt, text, kind="chat")
     try:
-        result = await run_llm(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.85) or "..."
-
-        LAST_RESULT[chat_id] = result or ''
-        if len(result) > PAGE_CHARS:
-            await start_pager(context, chat_id, result)
-        else:
-            md_text = to_blockquote_md2(result)
-            await context.bot.send_message(
-                chat_id,
-                md_text,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                disable_web_page_preview=True
-            )
-
-        histories[chat_id].append(("user", q))
-        histories[chat_id].append(("assistant", result[:1000]))
-
-    except asyncio.TimeoutError:
-        await context.bot.send_message(
-            chat_id,
-            "Lâu quá chưa xong. Thử rút ngắn yêu cầu hoặc gửi lại nhé."
-        )
+        out = await run_llm(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.7)
+        out = out or "Không nhận được phản hồi."
+        LAST_RESULT[chat_id] = out
+        pages = split_pages(out)
+        msg, kb = make_pager(chat_id, pages, 0)
+        await context.bot.send_message(chat_id, msg, disable_web_page_preview=True, reply_markup=kb)
     except Exception as e:
-        await context.bot.send_message(chat_id, f"Lỗi khi gọi model: {e}")
+        await context.bot.send_message(chat_id, f"Lỗi chat: {e}")
+
+async def on_page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.data:
+        return
+    try:
+        _, cid, idx = q.data.split("_")
+        cid = int(cid)
+        idx = int(idx)
+    except Exception:
+        await q.answer()
+        return
+    info = PAGERS.get(cid)
+    if not info:
+        await q.answer()
+        return
+    pages = info["pages"]
+    idx = max(0, min(len(pages)-1, idx))
+    PAGERS[cid]["i"] = idx
+    await q.edit_message_text(pages[idx], disable_web_page_preview=True, reply_markup=make_pager(cid, pages, idx)[1])
+    await q.answer()
 
 def main():
     if not BOT_TOKEN:
@@ -512,7 +447,6 @@ def main():
     app.add_handler(CallbackQueryHandler(on_page_nav, pattern=r"^pg_"))
     app.add_handler(MessageHandler(filters.Document.ALL, on_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-
     log.info("Starting Telegram polling...")
     app.run_polling()
 
