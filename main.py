@@ -1,4 +1,5 @@
 import os, re, threading, asyncio, io, logging, random, datetime
+import base64
 from collections import deque, defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatAction
@@ -6,12 +7,10 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from telegram.error import BadRequest
 from openai import OpenAI
 
-# ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("linh")
 
-# ---------- ENV / Config ----------
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 
@@ -32,7 +31,6 @@ MAX_EMIT_CHARS = int(os.getenv("MAX_EMIT_CHARS", "800000"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-preview-image-generation")
 
-# ---------- Optional deps ----------
 try:
     from google import genai
     from google.genai import types
@@ -72,7 +70,6 @@ try:
 except Exception:
     BeautifulSoup = None
 
-# ---------- Clients & runtime ----------
 client = OpenAI(api_key=VERCEL_API_KEY, base_url=BASE_URL, timeout=REQUEST_TIMEOUT) if VERCEL_API_KEY else None
 SEM = asyncio.Semaphore(MAX_CONCURRENCY)
 histories = defaultdict(lambda: deque(maxlen=32))
@@ -82,22 +79,20 @@ FILE_MODE = defaultdict(lambda: False)
 PENDING_FILE = {}
 LAST_RESULT = {}
 
-# ---------- File type constants ----------
 ARCHIVES = (".zip",".rar",".7z",".tar",".tar.gz",".tgz",".tar.bz2",".tar.xz")
 TEXT_LIKE = (".txt",".md",".log",".csv",".tsv",".json",".yaml",".yml",".ini",".cfg",".env",".xml",".html",".htm",
              ".py",".js",".ts",".java",".c",".cpp",".cs",".go",".php",".rb",".rs",".sh",".bat",".ps1",".sql")
 
-# ---------- UI helpers ----------
 def chunk_code_pages(code: str, per_page: int = PAGE_CHARS) -> list:
     if len(code) <= per_page:
         return [code]
-    
+
     pages = []
     current_page = []
     current_size = 0
     blocks = []
     current_block = []
-    
+
     for line in code.splitlines():
         if line and not line.startswith(' ') and not line.startswith('\t'):
             if current_block:
@@ -105,24 +100,24 @@ def chunk_code_pages(code: str, per_page: int = PAGE_CHARS) -> list:
             current_block = [line]
         else:
             current_block.append(line)
-    
+
     if current_block:
         blocks.append('\n'.join(current_block))
-    
+
     for block in blocks:
         block_size = len(block) + 1
-        
+
         if current_size + block_size > per_page:
             if current_page:
                 pages.append('\n'.join(current_page))
                 current_page = []
                 current_size = 0
-        
+
         if block_size > per_page:
             lines = block.splitlines()
             current_lines = []
             current_lines_size = 0
-            
+
             for line in lines:
                 line_size = len(line) + 1
                 if current_lines_size + line_size > per_page:
@@ -132,16 +127,16 @@ def chunk_code_pages(code: str, per_page: int = PAGE_CHARS) -> list:
                 else:
                     current_lines.append(line)
                     current_lines_size += line_size
-            
+
             if current_lines:
                 pages.append('\n'.join(current_lines))
         else:
             current_page.append(block)
             current_size += block_size
-    
+
     if current_page:
         pages.append('\n'.join(current_page))
-    
+
     return pages
 
 def chunk_pages(raw: str, per_page: int = PAGE_CHARS) -> list:
@@ -150,7 +145,7 @@ def chunk_pages(raw: str, per_page: int = PAGE_CHARS) -> list:
     pages = []
     current = []
     current_size = 0
-    
+
     for line in raw.splitlines():
         line_size = len(line) + 1
         if current_size + line_size > per_page and current:
@@ -160,7 +155,7 @@ def chunk_pages(raw: str, per_page: int = PAGE_CHARS) -> list:
         else:
             current.append(line)
             current_size += line_size
-            
+
     if current:
         pages.append('\n'.join(current))
     return pages
@@ -174,12 +169,12 @@ def kb(idx: int, total: int) -> InlineKeyboardMarkup:
 
 def page_payload(p: dict) -> tuple:
     txt = p["pages"][p["idx"]]
-    return (f"```{p['lang']}\n{txt}\n```", ParseMode.MARKDOWN) if p["is_code"] else (txt, ParseMode.HTML)
+    return (f"```{p['lang']}\n{txt}\n```", ParseMode.MARKDOWN_V2) if p["is_code"] else (txt, ParseMode.HTML)
 
 async def send_or_update(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, msg: Update, p: dict):
     text, mode = page_payload(p)
     keyboard = kb(p["idx"], len(p["pages"]))
-    
+
     async def try_send(text: str, mode: str, keyboard: InlineKeyboardMarkup, retry_without_format: bool = True) -> bool:
         try:
             if msg:
@@ -211,11 +206,10 @@ async def start_pager(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, raw: str, is
         "idx": 0
     })
 
-# ---------- LLM helpers ----------
 def build_messages(cid: int, user_text: str, sys_prompt: str) -> list:
     msgs = [{"role": "system", "content": sys_prompt}]
     keep = max(2, CTX_TURNS * 2)
-    msgs += [{"role": "user" if r == 'user' else 'assistant', "content": c} 
+    msgs += [{"role": "user" if r == 'user' else 'assistant', "content": c}
              for r, c in list(histories[cid])[-keep:]]
     msgs.append({"role": "user", "content": user_text})
     return msgs
@@ -264,7 +258,6 @@ async def run_llm(model: str, messages: list, max_tokens: int, temperature: floa
             timeout=REQUEST_TIMEOUT + 10
         )
 
-# ---------- File helpers ----------
 def is_archive(name: str) -> bool:
     return (name or "").lower().endswith(ARCHIVES)
 
@@ -292,13 +285,45 @@ def read_any_file(name: str, data: bytes) -> tuple:
             soup = BeautifulSoup(raw, "html.parser")
             raw = soup.get_text(separator="\n")
         return raw, "text"
-        
-    # Handle other file types...
-    # (PDF, DOCX, XLSX, PPTX code remains the same as your original)
-    
+
+
     return "Định dạng này chưa hỗ trợ. Hãy gửi văn bản, PDF, DOCX, XLSX, PPTX, HTML, JSON, CSV, v.v.", "error"
 
-# ---------- Commands ----------
+
+
+async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    q = " ".join(context.args).strip()
+    if not q:
+        await context.bot.send_message(chat_id, "Dùng: /img <mô tả>")
+        return
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+    if not GEMINI_API_KEY:
+        await context.bot.send_message(chat_id, "Thiếu GEMINI_API_KEY.")
+        return
+    try:
+        if genai is None:
+            await context.bot.send_message(chat_id, "Thư viện google.genai chưa cài.")
+            return
+        client_gemini = genai.Client(api_key=GEMINI_API_KEY)
+        resp = client_gemini.models.generate_images(model=GEMINI_IMAGE_MODEL, prompt=q)
+        sent = 0
+        if hasattr(resp, "images") and resp.images:
+            for i, img in enumerate(resp.images):
+                if hasattr(img, "url") and img.url:
+                    await context.bot.send_photo(chat_id, photo=img.url)
+                    sent += 1
+                else:
+                    b64 = getattr(img, "image", None) or getattr(img, "data", None)
+                    if b64:
+                        data = base64.b64decode(b64)
+                        await context.bot.send_photo(chat_id, photo=io.BytesIO(data))
+                        sent += 1
+        if sent == 0:
+            await context.bot.send_message(chat_id, "Không nhận được ảnh từ Gemini.")
+    except Exception as e:
+        await context.bot.send_message(chat_id, f"Lỗi tạo ảnh: {e}")
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         update.effective_chat.id,
@@ -329,7 +354,7 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "4. Code phải dễ bảo trì và mở rộng\n" +
                 "5. Thêm error handling đầy đủ"
             )
-            
+
             msgs = build_messages(chat_id, q, sys_prompt)
             result = await run_llm(CODE_MODEL, msgs, MAX_TOKENS_CODE, temperature=0.4)
             if not result:
@@ -354,13 +379,11 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id, f"Lỗi khi xử lý code: {str(e)}")
 
-# ... (Other commands remain the same as your original code)
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     q = (update.message.text or "").strip()
 
-    # Recent messages context
     recent_msgs = list(histories[chat_id])[-10:]
     context_summary = "\n".join([
         f"{'User' if r=='user' else 'Assistant'}: {c[:100]}..."
@@ -368,22 +391,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     if want_image(q):
-        # Image generation code remains the same...
         pass
 
     if FILE_MODE[chat_id] and chat_id in PENDING_FILE:
-        # File mode handling code remains the same...
         pass
 
-    # Normal chat with context
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     sys_prompt = sys_prompt_linh() + f"\n\nTin nhắn gần đây:\n{context_summary}"
     msgs = build_messages(chat_id, q, sys_prompt)
-    
+
     try:
         result = await run_llm(CHAT_MODEL, msgs, MAX_TOKENS, temperature=0.85) or "..."
-        
-        # Send as pages if result is long
+
         if len(result) > PAGE_CHARS:
             await start_pager(context, chat_id, result)
         else:
@@ -394,10 +413,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.MARKDOWN_V2,
                 disable_web_page_preview=True
             )
-            
+
         histories[chat_id].append(("user", q))
         histories[chat_id].append(("assistant", result[:1000]))
-        
+
     except asyncio.TimeoutError:
         await context.bot.send_message(
             chat_id,
@@ -407,6 +426,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id, f"Lỗi khi gọi model: {e}")
 
 def main():
+    if not BOT_TOKEN:
+        print("Thiếu BOT_TOKEN: đặt biến môi trường BOT_TOKEN trước khi chạy.")
+        return
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("img", cmd_img))
@@ -417,7 +439,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_page_nav, pattern=r"^pg_"))
     app.add_handler(MessageHandler(filters.Document.ALL, on_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    
+
     log.info("Starting Telegram polling...")
     app.run_polling()
 
