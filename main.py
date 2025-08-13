@@ -1,3 +1,9 @@
+"""
+Telegram AI Bot - Enhanced Version
+Author: Hoàng Tuấn Anh
+Telegram: @cucodoivandep
+"""
+
 import os
 import re
 import asyncio
@@ -43,8 +49,8 @@ class Config:
     BASE_URL: str = field(default_factory=lambda: os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1"))
     
     CHAT_MODEL: str = field(default_factory=lambda: os.getenv("CHAT_MODEL", "anthropic/claude-3.5-haiku"))
-    CODE_MODEL: str = field(default_factory=lambda: os.getenv("CODE_MODEL", "anthropic/claude-3.5-sonnet"))
-    FILE_MODEL: str = field(default_factory=lambda: os.getenv("FILE_MODEL", "anthropic/claude-3.5-sonnet"))
+    CODE_MODEL: str = field(default_factory=lambda: os.getenv("CODE_MODEL", "anthropic/claude-4-opus"))
+    FILE_MODEL: str = field(default_factory=lambda: os.getenv("FILE_MODEL", "anthropic/claude-4-opus"))
     
     MAX_TOKENS: int = field(default_factory=lambda: int(os.getenv("MAX_TOKENS", "900")))
     MAX_TOKENS_CODE: int = field(default_factory=lambda: int(os.getenv("MAX_TOKENS_CODE", "4000")))
@@ -153,7 +159,6 @@ class UserState:
     last_result: str = ""
     rate_limit_count: int = 0
     rate_limit_reset: float = 0
-    preferences: Dict[str, Any] = field(default_factory=dict)
 
 class BotState:
     """Global bot state management"""
@@ -717,25 +722,24 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 💬 **Chat & AI:**
 • Nhắn tin trực tiếp để chat với AI
-• /chat <câu hỏi> - Chat với context rõ ràng
-• /code <yêu cầu> - Viết code chuyên nghiệp
-• /img <mô tả> - Tạo hình ảnh với AI
+• /code <yêu cầu> - Viết code với Claude-4-Opus
+• /img <mô tả> - Tạo hình ảnh với Gemini
 
 📁 **Xử lý file:**
 • Gửi file để phân tích (PDF, DOCX, XLSX, code...)
 • /cancelfile - Thoát chế độ xử lý file
 • /sendfile - Tải xuống kết quả gần nhất
 
-⚙️ **Cài đặt:**
-• /settings - Tùy chỉnh bot
-• /model <name> - Chọn AI model
-• /temp <0.0-1.0> - Điều chỉnh creativity
-
 📊 **Hỗ trợ:**
 • PDF, Word, Excel, PowerPoint
 • Code (Python, JS, Java, C++...)
 • HTML, JSON, CSV, Markdown
 • Text files và nhiều định dạng khác
+
+🚀 **Models:**
+• Chat: Claude-3.5-Haiku (nhanh)
+• Code: Claude-4-Opus (mạnh)
+• File: Claude-4-Opus (chi tiết)
 
 👨‍💻 **Developed by:** @cucodoivandep
     """
@@ -754,8 +758,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Mình có thể giúp bạn:
 • 💬 Chat và trả lời câu hỏi
-• 💻 Viết code chuyên nghiệp
-• 🎨 Tạo hình ảnh với AI
+• 💻 Viết code chuyên nghiệp với Claude-4-Opus
+• 🎨 Tạo hình ảnh với Gemini AI
 • 📄 Phân tích và xử lý file
 
 Gõ /help để xem hướng dẫn chi tiết.
@@ -791,8 +795,12 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 💬 Tin nhắn trong lịch sử: {len(user.history)}
 • 📁 Chế độ file: {'Bật' if user.file_mode else 'Tắt'}
 • 🔄 Giới hạn rate: {user.rate_limit_count}/{config.RATE_LIMIT_MESSAGES}
-• 💾 Cache hits: {len(bot_state.cache)}
-• 🔧 Model đang dùng: {config.CHAT_MODEL}
+• 💾 Cache size: {len(bot_state.cache)}
+
+🚀 **Models đang dùng:**
+• Chat: {config.CHAT_MODEL}
+• Code: {config.CODE_MODEL}
+• File: {config.FILE_MODEL}
     """
     
     await context.bot.send_message(
@@ -891,7 +899,7 @@ async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @rate_limit
 async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate code with enhanced model"""
+    """Generate code with Claude-4-Opus"""
     chat_id = update.effective_chat.id
     request = " ".join(context.args).strip()
     
@@ -918,9 +926,9 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 include_history=False  # Fresh context for code
             )
             
-            # Generate code
+            # Generate code with Claude-4-Opus
             result = await ai_client.complete(
-                config.CODE_MODEL,
+                config.CODE_MODEL,  # Using claude-4-opus
                 messages,
                 config.MAX_TOKENS_CODE,
                 temperature=0.3  # Lower temperature for code
@@ -929,7 +937,7 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not result:
                 await context.bot.send_message(
                     chat_id,
-                    "❌ Không nhận được kết quả từ model."
+                    "❌ Không nhận được kết quả từ Claude-4-Opus."
                 )
                 return
             
@@ -982,22 +990,6 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id,
                 f"❌ Lỗi: {str(e)[:200]}"
             )
-
-@rate_limit
-async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct chat command with context"""
-    chat_id = update.effective_chat.id
-    message = " ".join(context.args).strip()
-    
-    if not message:
-        await context.bot.send_message(
-            chat_id,
-            "📝 Cách dùng: /chat <câu hỏi>\n"
-            "Hoặc nhắn tin trực tiếp không cần /chat"
-        )
-        return
-    
-    await process_chat_message(update, context, message)
 
 async def cmd_cancelfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel file processing mode"""
@@ -1198,7 +1190,8 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Đã nhận file: {document.file_name}\n"
             f"📄 Loại: {file_type}\n"
             f"📝 Kích thước: {len(content):,} ký tự\n\n"
-            f"Gửi câu hỏi về file hoặc /cancelfile để thoát."
+            f"💡 Gửi câu hỏi về file hoặc /cancelfile để thoát.\n"
+            f"🚀 Sẽ xử lý với Claude-4-Opus."
         )
         
         # Show preview if text is short
@@ -1231,7 +1224,7 @@ async def process_chat_message(
         try:
             # Check if in file mode
             if user.file_mode and user.pending_file:
-                # Process file-related query
+                # Process file-related query with Claude-4-Opus
                 file_content = user.pending_file["content"]
                 file_name = user.pending_file["name"]
                 
@@ -1249,13 +1242,13 @@ async def process_chat_message(
                 )
                 
                 result = await ai_client.complete(
-                    config.FILE_MODEL,
+                    config.FILE_MODEL,  # Using claude-4-opus
                     messages,
                     config.FILE_OUTPUT_TOKENS,
                     temperature=0.5
                 )
             else:
-                # Regular chat
+                # Regular chat with Claude-3.5-Haiku
                 messages = message_builder.build_messages(
                     chat_id,
                     message_text,
@@ -1264,7 +1257,7 @@ async def process_chat_message(
                 )
                 
                 result = await ai_client.complete(
-                    config.CHAT_MODEL,
+                    config.CHAT_MODEL,  # Using claude-3.5-haiku
                     messages,
                     config.MAX_TOKENS,
                     temperature=0.7
@@ -1364,7 +1357,6 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("img", cmd_img))
     app.add_handler(CommandHandler("code", cmd_code))
-    app.add_handler(CommandHandler("chat", cmd_chat))
     app.add_handler(CommandHandler("cancelfile", cmd_cancelfile))
     app.add_handler(CommandHandler("sendfile", cmd_sendfile))
     
@@ -1378,6 +1370,7 @@ def main():
     # Start polling
     logger.info("Starting bot polling...")
     print("🚀 Bot đang chạy! Nhấn Ctrl+C để dừng.")
+    print(f"📊 Models: Chat={config.CHAT_MODEL}, Code={config.CODE_MODEL}, File={config.FILE_MODEL}")
     
     try:
         app.run_polling(drop_pending_updates=True)
