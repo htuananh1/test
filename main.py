@@ -45,7 +45,9 @@ VIETNAM_CITIES = {
     "dalat": {"name": "Đà Lạt", "lat": 11.9404, "lon": 108.4583},
     "hue": {"name": "Huế", "lat": 16.4637, "lon": 107.5909},
     "vungtau": {"name": "Vũng Tàu", "lat": 10.3460, "lon": 107.0843},
-    "quynhon": {"name": "Quy Nhơn", "lat": 13.7830, "lon": 109.2197}
+    "quynhon": {"name": "Quy Nhơn", "lat": 13.7830, "lon": 109.2197},
+    "phuquoc": {"name": "Phú Quốc", "lat": 10.2271, "lon": 103.9564},
+    "sapa": {"name": "Sapa", "lat": 22.3363, "lon": 103.8437}
 }
 
 VIETNAM_HOLIDAYS = {
@@ -78,10 +80,6 @@ class Config:
     CHUNK_CHARS: int = field(default_factory=lambda: int(os.getenv("CHUNK_CHARS", "120000")))
     CTX_TURNS: int = field(default_factory=lambda: int(os.getenv("CTX_TURNS", "15")))
     REQUEST_TIMEOUT: float = field(default_factory=lambda: float(os.getenv("REQUEST_TIMEOUT", "90")))
-    
-    # External APIs
-    WEATHER_API_KEY: str = field(default_factory=lambda: os.getenv("WEATHER_API_KEY", ""))
-    NEWS_API_KEY: str = field(default_factory=lambda: os.getenv("NEWS_API_KEY", ""))
     
     # Cache
     CACHE_TTL: int = 3600
@@ -181,58 +179,43 @@ class BotState:
 bot_state = BotState()
 
 class VietnamServices:
-    """Services for Vietnam-specific features"""
+    """Services for Vietnam-specific features using AI"""
     
     @staticmethod
-    async def get_weather(city: str) -> str:
-        """Get weather for Vietnamese cities"""
-        if not config.WEATHER_API_KEY:
-            return (
-                "❌ Thiếu API key thời tiết\n\n"
-                "💡 Bạn có thể xem thời tiết tại:\n"
-                "• nchmf.gov.vn (Trung tâm Khí tượng)\n"
-                "• weather.com\n"
-                "• windy.com"
-            )
-        
-        city_info = VIETNAM_CITIES.get(city.lower())
-        if not city_info:
-            cities = ", ".join(VIETNAM_CITIES.keys())
-            return f"❌ Không tìm thấy {city}\n\n📍 Các thành phố: {cities}"
-        
+    def get_vietnam_time() -> Dict:
+        """Get current time in Vietnam"""
         try:
-            url = "https://api.openweathermap.org/data/2.5/weather"
-            params = {
-                "lat": city_info["lat"],
-                "lon": city_info["lon"],
-                "appid": config.WEATHER_API_KEY,
-                "units": "metric",
-                "lang": "vi"
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=10) as response:
-                    data = await response.json()
-            
-            temp = data["main"]["temp"]
-            feels_like = data["main"]["feels_like"]
-            humidity = data["main"]["humidity"]
-            description = data["weather"][0]["description"]
-            wind_speed = data.get("wind", {}).get("speed", 0)
-            
-            emoji = "☀️" if temp > 30 else "⛅" if temp > 20 else "🌧️"
-            
-            return (
-                f"{emoji} **Thời tiết {city_info['name']}**\n\n"
-                f"🌡 Nhiệt độ: {temp}°C (cảm giác {feels_like}°C)\n"
-                f"💧 Độ ẩm: {humidity}%\n"
-                f"💨 Gió: {wind_speed} m/s\n"
-                f"☁️ Mô tả: {description.capitalize()}\n\n"
-                f"💡 {'Nhớ mang ô!' if 'mưa' in description.lower() else 'Thời tiết đẹp để đi chơi!'}"
-            )
-        except Exception as e:
-            logger.error(f"Weather error: {e}")
-            return f"❌ Lỗi lấy thời tiết: {str(e)[:100]}"
+            import pytz
+            vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+            vn_time = datetime.datetime.now(vn_tz)
+        except:
+            vn_time = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
+        
+        vn_days = ['Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Thứ Năm', 'Thứ Sáu', 'Thứ Bảy', 'Chủ Nhật']
+        day_name = vn_days[vn_time.weekday()]
+        
+        date_str = vn_time.strftime("%d-%m")
+        holiday = VIETNAM_HOLIDAYS.get(date_str, "")
+        
+        hour = vn_time.hour
+        if 5 <= hour < 11:
+            greeting = "Chào buổi sáng"
+        elif 11 <= hour < 13:
+            greeting = "Chào buổi trưa"
+        elif 13 <= hour < 18:
+            greeting = "Chào buổi chiều"
+        else:
+            greeting = "Chào buổi tối"
+        
+        return {
+            "datetime": vn_time,
+            "day_name": day_name,
+            "date": vn_time.strftime('%d/%m/%Y'),
+            "time": vn_time.strftime('%H:%M:%S'),
+            "holiday": holiday,
+            "greeting": greeting,
+            "hour": hour
+        }
     
     @staticmethod
     async def get_exchange_rate() -> str:
@@ -260,101 +243,7 @@ class VietnamServices:
             )
         except Exception as e:
             logger.error(f"Exchange rate error: {e}")
-            return "❌ Lỗi lấy tỷ giá"
-    
-    @staticmethod
-    def get_vietnam_time() -> str:
-        """Get current time in Vietnam"""
-        try:
-            import pytz
-            vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
-            vn_time = datetime.datetime.now(vn_tz)
-        except:
-            vn_time = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
-        
-        vn_days = ['Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Thứ Năm', 'Thứ Sáu', 'Thứ Bảy', 'Chủ Nhật']
-        day_name = vn_days[vn_time.weekday()]
-        
-        date_str = vn_time.strftime("%d-%m")
-        holiday = VIETNAM_HOLIDAYS.get(date_str, "")
-        
-        time_str = (
-            f"🇻🇳 **Giờ Việt Nam**\n\n"
-            f"📅 {day_name}, {vn_time.strftime('%d/%m/%Y')}\n"
-            f"🕐 {vn_time.strftime('%H:%M:%S')} (GMT+7)"
-        )
-        
-        if holiday:
-            time_str += f"\n\n🎉 **{holiday}**"
-        
-        hour = vn_time.hour
-        if 5 <= hour < 11:
-            greeting = "🌅 Chào buổi sáng!"
-        elif 11 <= hour < 13:
-            greeting = "☀️ Chào buổi trưa!"
-        elif 13 <= hour < 18:
-            greeting = "🌤 Chào buổi chiều!"
-        else:
-            greeting = "🌙 Chào buổi tối!"
-        
-        time_str += f"\n\n{greeting}"
-        return time_str
-    
-    @staticmethod
-    async def get_news() -> str:
-        """Get Vietnamese news"""
-        if not config.NEWS_API_KEY:
-            return (
-                "📰 **Báo chí Việt Nam**\n\n"
-                "📱 **Tin tức tổng hợp:**\n"
-                "• VnExpress: vnexpress.net\n"
-                "• Tuổi Trẻ: tuoitre.vn\n"
-                "• Thanh Niên: thanhnien.vn\n"
-                "• Dân Trí: dantri.com.vn\n\n"
-                "💼 **Kinh tế:**\n"
-                "• CafeF: cafef.vn\n"
-                "• VnEconomy: vneconomy.vn\n\n"
-                "⚽ **Thể thao:**\n"
-                "• Thể Thao 247: thethao247.vn\n"
-                "• Bóng Đá Plus: bongdaplus.vn"
-            )
-        
-        try:
-            url = "https://newsapi.org/v2/top-headlines"
-            params = {
-                "country": "vn",
-                "apiKey": config.NEWS_API_KEY,
-                "pageSize": 5
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=10) as response:
-                    data = await response.json()
-            
-            if data.get("status") != "ok":
-                return "❌ Không lấy được tin tức"
-            
-            articles = data.get("articles", [])
-            if not articles:
-                return "📰 Không có tin mới"
-            
-            news_text = "📰 **Tin tức Việt Nam**\n\n"
-            for i, article in enumerate(articles[:5], 1):
-                title = article.get("title", "")
-                desc = article.get("description", "")[:100]
-                source = article.get("source", {}).get("name", "")
-                
-                news_text += f"**{i}. {title}**\n"
-                if desc:
-                    news_text += f"_{desc}..._\n"
-                if source:
-                    news_text += f"📌 {source}\n"
-                news_text += "\n"
-            
-            return news_text
-        except Exception as e:
-            logger.error(f"News error: {e}")
-            return "❌ Lỗi lấy tin tức"
+            return None
 
 vietnam_services = VietnamServices()
 
@@ -665,18 +554,11 @@ file_processor = FileProcessor()
 class MessageBuilder:
     @staticmethod
     def build_system_prompt(context_type: str = "chat") -> str:
-        try:
-            import pytz
-            vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
-            vn_time = datetime.datetime.now(vn_tz)
-        except:
-            vn_time = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
-        
-        time_str = vn_time.strftime('%d/%m/%Y %H:%M:%S')
+        time_info = vietnam_services.get_vietnam_time()
         
         base = (
             f"Bạn là Linh - AI Assistant thông minh của Việt Nam.\n"
-            f"Thời gian: {time_str}\n"
+            f"Thời gian hiện tại: {time_info['time']} {time_info['date']}\n"
             f"Developer: @cucodoivandep\n\n"
         )
         
@@ -685,12 +567,28 @@ class MessageBuilder:
                 "Kiến thức:\n"
                 "• Văn hóa, lịch sử, địa lý Việt Nam\n"
                 "• Ẩm thực, du lịch Việt Nam\n"
-                "• Công nghệ, khoa học\n\n"
+                "• Công nghệ, khoa học\n"
+                "• Thời tiết, khí hậu các vùng miền\n\n"
                 "Phong cách:\n"
                 "• Thân thiện, vui vẻ\n"
                 "• Trả lời ngắn gọn, chính xác\n"
                 "• Dùng emoji phù hợp\n"
                 "• Ưu tiên thông tin về Việt Nam"
+            )
+        
+        elif context_type == "weather":
+            return base + (
+                "Bạn là chuyên gia dự báo thời tiết Việt Nam.\n\n"
+                "Nhiệm vụ:\n"
+                "• Cung cấp thông tin thời tiết chi tiết cho các thành phố Việt Nam\n"
+                "• Dự báo xu hướng thời tiết\n"
+                "• Tư vấn hoạt động phù hợp với thời tiết\n"
+                "• Cảnh báo thiên tai nếu cần\n\n"
+                "Lưu ý:\n"
+                "• Việt Nam có 3 miền với khí hậu khác nhau\n"
+                "• Miền Bắc: 4 mùa rõ rệt\n"
+                "• Miền Trung: Mùa mưa từ tháng 9-12\n"
+                "• Miền Nam: Mùa mưa từ tháng 5-11"
             )
         
         elif context_type == "code":
@@ -825,8 +723,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Chat trực tiếp để hỏi đáp
 
 🇻🇳 **Việt Nam:**
-• /weather <city> - Thời tiết
-• /news - Tin tức
+• /weather <city> - Thời tiết (AI)
 • /exchange - Tỷ giá
 • /time - Giờ Việt Nam
 • /translate <text> - Dịch Anh-Việt
@@ -839,6 +736,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 **Tips:**
 • img: <prompt> - Tạo ảnh nhanh
 • Hỏi về văn hóa, ẩm thực, du lịch VN
+• Hỏi thời tiết bất kỳ thành phố VN
 
 ⚙️ **Models:**
 • Chat: Claude-3.5-Haiku
@@ -855,8 +753,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome = """
+    time_info = vietnam_services.get_vietnam_time()
+    
+    welcome = f"""
 🇻🇳 **Xin chào! Mình là Linh - AI Assistant Việt Nam**
+
+{time_info['greeting']}! 🌟
 
 🎯 **Mình có thể giúp:**
 • 💬 Chat, tư vấn mọi chủ đề
@@ -864,14 +766,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 🎨 Tạo ảnh từ text
 • 📄 Xử lý file, documents
 • 🇻🇳 Thông tin Việt Nam
+• ☀️ Dự báo thời tiết
 
 💡 **Thử ngay:**
-• Hỏi về lịch sử, văn hóa VN
-• /img phong cảnh Hạ Long
-• /code viết game Python
+• "Thời tiết Hà Nội hôm nay thế nào?"
+• "Cho tôi công thức nấu phở bò"
+• /img phong cảnh vịnh Hạ Long
 
 Chúc bạn một ngày tốt lành! 🌺
     """
+    
+    if time_info['holiday']:
+        welcome += f"\n\n🎉 Hôm nay là: **{time_info['holiday']}**"
     
     keyboard = InlineKeyboardMarkup([
         [
@@ -889,6 +795,70 @@ Chúc bạn một ngày tốt lành! 🌺
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard
     )
+
+async def cmd_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get weather using AI"""
+    chat_id = update.effective_chat.id
+    
+    if not context.args:
+        cities = ", ".join(VIETNAM_CITIES.keys())
+        await context.bot.send_message(
+            chat_id,
+            f"☀️ **Thời tiết (AI dự báo)**\n\n"
+            f"Cú pháp: /weather <city>\n\n"
+            f"Cities: {cities}\n\n"
+            f"💡 Hoặc hỏi trực tiếp: 'Thời tiết Sài Gòn hôm nay?'",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    city_name = " ".join(context.args)
+    
+    # Get current time info
+    time_info = vietnam_services.get_vietnam_time()
+    
+    # Build weather query for AI
+    weather_prompt = f"""
+    Hãy dự báo thời tiết cho {city_name} hôm nay ({time_info['date']}).
+    
+    Thông tin cần có:
+    - Nhiệt độ (cao nhất, thấp nhất)
+    - Tình trạng thời tiết (nắng/mưa/nhiều mây)
+    - Độ ẩm
+    - Gió
+    - Chỉ số UV
+    - Lời khuyên cho hoạt động ngoài trời
+    
+    Lưu ý:
+    - Đây là tháng {time_info['datetime'].month} tại Việt Nam
+    - Trả lời ngắn gọn, dùng emoji phù hợp
+    - Nếu không phải thành phố Việt Nam, vẫn cố gắng trả lời
+    """
+    
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    
+    # Build messages with weather context
+    messages = message_builder.build_messages(
+        chat_id,
+        weather_prompt,
+        context_type="weather",
+        include_history=False
+    )
+    
+    # Get AI response
+    result = await stream_response(
+        context,
+        chat_id,
+        config.CHAT_MODEL,
+        messages,
+        config.MAX_TOKENS,
+        temperature=0.7
+    )
+    
+    if result:
+        user = bot_state.get_user(chat_id)
+        user.history.append(("user", f"Thời tiết {city_name}"))
+        user.history.append(("assistant", result[:500]))
 
 async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generate image from text"""
@@ -1031,7 +1001,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = bot_state.get_user(chat_id)
     
-    vn_time = vietnam_services.get_vietnam_time()
+    time_info = vietnam_services.get_vietnam_time()
     
     stats = f"""
 📊 **Thống kê**
@@ -1045,8 +1015,13 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Chat: {config.CHAT_MODEL}
 • Code: {config.CODE_MODEL}
 
-{vn_time}
+🇻🇳 **Giờ Việt Nam:**
+• {time_info['time']} {time_info['date']}
+• {time_info['greeting']}
     """
+    
+    if time_info['holiday']:
+        stats += f"\n• 🎉 {time_info['holiday']}"
     
     await context.bot.send_message(
         chat_id,
@@ -1054,60 +1029,72 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
-async def cmd_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get weather"""
-    chat_id = update.effective_chat.id
-    
-    if not context.args:
-        cities = ", ".join(VIETNAM_CITIES.keys())
-        await context.bot.send_message(
-            chat_id,
-            f"☀️ **Thời tiết**\n\n"
-            f"Cú pháp: /weather <city>\n\n"
-            f"Cities: {cities}",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    city = context.args[0]
-    weather = await vietnam_services.get_weather(city)
-    
-    await context.bot.send_message(
-        chat_id,
-        weather,
-        parse_mode=ParseMode.MARKDOWN
-    )
-
 async def cmd_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get exchange rates"""
     chat_id = update.effective_chat.id
+    
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    
+    # Try to get real exchange rate
     rates = await vietnam_services.get_exchange_rate()
     
-    await context.bot.send_message(
-        chat_id,
-        rates,
-        parse_mode=ParseMode.MARKDOWN
-    )
+    if rates:
+        await context.bot.send_message(
+            chat_id,
+            rates,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        # Use AI as fallback
+        messages = [
+            {"role": "system", "content": "Bạn là chuyên gia tài chính. Cung cấp tỷ giá ước tính USD/VND và các ngoại tệ phổ biến."},
+            {"role": "user", "content": "Cho tôi tỷ giá ngoại tệ hôm nay với VND"}
+        ]
+        
+        result = await ai_client.complete(
+            config.CHAT_MODEL,
+            messages,
+            500,
+            temperature=0.7
+        )
+        
+        await context.bot.send_message(
+            chat_id,
+            f"💱 **Tỷ giá (ước tính)**\n\n{result}",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
 async def cmd_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get Vietnam time"""
     chat_id = update.effective_chat.id
     time_info = vietnam_services.get_vietnam_time()
     
-    await context.bot.send_message(
-        chat_id,
-        time_info,
-        parse_mode=ParseMode.MARKDOWN
-    )
+    time_text = f"""
+🇻🇳 **Giờ Việt Nam**
 
-async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get news"""
-    chat_id = update.effective_chat.id
-    news = await vietnam_services.get_news()
+📅 {time_info['day_name']}, {time_info['date']}
+🕐 {time_info['time']} (GMT+7)
+
+{time_info['greeting']}! 🌟
+    """
+    
+    if time_info['holiday']:
+        time_text += f"\n\n🎉 **{time_info['holiday']}**"
+    
+    # Add some contextual info based on time
+    hour = time_info['hour']
+    if 6 <= hour < 9:
+        time_text += "\n\n☕ Giờ uống cà phê sáng!"
+    elif 11 <= hour < 14:
+        time_text += "\n\n🍜 Giờ ăn trưa!"
+    elif 17 <= hour < 20:
+        time_text += "\n\n🍽 Giờ ăn tối!"
+    elif 22 <= hour or hour < 5:
+        time_text += "\n\n😴 Giờ ngủ ngon!"
     
     await context.bot.send_message(
         chat_id,
-        news,
+        time_text,
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -1120,13 +1107,14 @@ async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id,
             "🔤 **Dịch Anh-Việt**\n\n"
-            "Cú pháp: /translate <text>",
+            "Cú pháp: /translate <text>\n\n"
+            "Ví dụ: /translate Hello world",
             parse_mode=ParseMode.MARKDOWN
         )
         return
     
     messages = [
-        {"role": "system", "content": "Dịch sang tiếng Việt tự nhiên, chính xác."},
+        {"role": "system", "content": "Bạn là chuyên gia dịch thuật. Dịch sang tiếng Việt tự nhiên, chính xác. Chỉ trả về bản dịch."},
         {"role": "user", "content": f"Translate to Vietnamese:\n{text}"}
     ]
     
@@ -1256,6 +1244,40 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cmd_img(update, context)
         return
     
+    # Check for weather queries
+    weather_keywords = ["thời tiết", "weather", "nhiệt độ", "mưa", "nắng", "gió", "độ ẩm"]
+    if any(keyword in text.lower() for keyword in weather_keywords):
+        # Extract city name if mentioned
+        for city in VIETNAM_CITIES.keys():
+            if city in text.lower() or VIETNAM_CITIES[city]["name"].lower() in text.lower():
+                context.args = [city]
+                await cmd_weather(update, context)
+                return
+        
+        # If no specific city, ask AI about weather in general
+        messages = message_builder.build_messages(
+            chat_id,
+            text,
+            context_type="weather",
+            include_history=True
+        )
+        
+        result = await stream_response(
+            context,
+            chat_id,
+            config.CHAT_MODEL,
+            messages,
+            config.MAX_TOKENS,
+            temperature=0.7
+        )
+        
+        if result:
+            user = bot_state.get_user(chat_id)
+            user.last_result = result
+            user.history.append(("user", text[:500]))
+            user.history.append(("assistant", result[:500]))
+        return
+    
     user = bot_state.get_user(chat_id)
     
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
@@ -1328,16 +1350,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Diện tích: 331,212 km²
 • Dân số: ~98 triệu
 • 63 tỉnh thành
+• 3260km bờ biển
 
 🎭 **Văn hóa:**
-• 54 dân tộc
+• 54 dân tộc anh em
 • 8 Di sản UNESCO
 • Ẩm thực phong phú
+• Tết Nguyên Đán
 
 🏆 **Thành tựu:**
 • Top 20 kinh tế thế giới
 • Xuất khẩu gạo số 2
 • Du lịch phát triển
+• Công nghệ bùng nổ
 
 💪 Việt Nam - Vươn tầm thế giới!
         """
@@ -1351,10 +1376,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             query.message.chat_id,
             "💬 Sẵn sàng! Hãy chat với mình nhé.\n\n"
-            "💡 Thử hỏi về:\n"
-            "• Lịch sử, văn hóa VN\n"
-            "• Ẩm thực, du lịch\n"
-            "• Lập trình, công nghệ"
+            "💡 Thử hỏi:\n"
+            "• Thời tiết Hà Nội thế nào?\n"
+            "• Cho tôi công thức phở bò\n"
+            "• Kể về lịch sử Việt Nam\n"
+            "• Địa điểm du lịch Đà Nẵng"
         )
 
 def main():
@@ -1383,7 +1409,6 @@ def main():
     app.add_handler(CommandHandler("img", cmd_img))
     app.add_handler(CommandHandler("code", cmd_code))
     app.add_handler(CommandHandler("weather", cmd_weather))
-    app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("exchange", cmd_exchange))
     app.add_handler(CommandHandler("time", cmd_time))
     app.add_handler(CommandHandler("translate", cmd_translate))
@@ -1400,6 +1425,7 @@ def main():
     print("🚀 Bot running...")
     print("💬 Chat: Claude-3.5")
     print("🎨 Image: FLUX via Vercel")
+    print("☀️ Weather: AI-powered")
     print("👨‍💻 Dev: @cucodoivandep")
     print("=" * 50)
     
