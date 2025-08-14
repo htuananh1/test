@@ -12,6 +12,9 @@ from collections import deque, defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 import time
+import aiohttp
+from PIL import Image
+import requests
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatAction
@@ -32,17 +35,49 @@ logging.basicConfig(
 )
 logger = logging.getLogger("linh_bot")
 
+# Constants for Vietnam features
+VIETNAM_TIMEZONES = {
+    "hanoi": "Asia/Ho_Chi_Minh",
+    "saigon": "Asia/Ho_Chi_Minh", 
+    "danang": "Asia/Ho_Chi_Minh"
+}
+
+VIETNAM_HOLIDAYS = {
+    "01-01": "Tết Dương Lịch",
+    "30-04": "Ngày Giải phóng miền Nam",
+    "01-05": "Ngày Quốc tế Lao động",
+    "02-09": "Ngày Quốc khánh"
+}
+
+VIETNAM_CITIES = {
+    "hanoi": {"name": "Hà Nội", "lat": 21.0285, "lon": 105.8542},
+    "hcm": {"name": "TP.HCM", "lat": 10.8231, "lon": 106.6297},
+    "danang": {"name": "Đà Nẵng", "lat": 16.0544, "lon": 108.2022},
+    "haiphong": {"name": "Hải Phòng", "lat": 20.8449, "lon": 106.6881},
+    "cantho": {"name": "Cần Thơ", "lat": 10.0452, "lon": 105.7469},
+    "nhatrang": {"name": "Nha Trang", "lat": 12.2388, "lon": 109.1967},
+    "dalat": {"name": "Đà Lạt", "lat": 11.9404, "lon": 108.4583},
+    "hue": {"name": "Huế", "lat": 16.4637, "lon": 107.5909}
+}
+
 @dataclass
 class Config:
     BOT_TOKEN: str = field(default_factory=lambda: os.getenv("BOT_TOKEN", ""))
     VERCEL_API_KEY: str = field(default_factory=lambda: os.getenv("VERCEL_API_KEY", ""))
     BASE_URL: str = field(default_factory=lambda: os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1"))
     
+    # Text models (Vercel)
     CHAT_MODEL: str = field(default_factory=lambda: os.getenv("CHAT_MODEL", "anthropic/claude-3.5-haiku"))
-    CODE_MODEL: str = field(default_factory=lambda: os.getenv("CODE_MODEL", "anthropic/claude-4-opus"))
-    FILE_MODEL: str = field(default_factory=lambda: os.getenv("FILE_MODEL", "anthropic/claude-4-opus"))
+    CODE_MODEL: str = field(default_factory=lambda: os.getenv("CODE_MODEL", "anthropic/claude-3.5-sonnet"))
+    FILE_MODEL: str = field(default_factory=lambda: os.getenv("FILE_MODEL", "anthropic/claude-3.5-sonnet"))
     
-    MAX_TOKENS: int = field(default_factory=lambda: int(os.getenv("MAX_TOKENS", "900")))
+    # Gemini models
+    GEMINI_API_KEY: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
+    GEMINI_TEXT_MODEL: str = field(default_factory=lambda: os.getenv("GEMINI_TEXT_MODEL", "gemini-2.0-flash-exp"))
+    GEMINI_VISION_MODEL: str = field(default_factory=lambda: os.getenv("GEMINI_VISION_MODEL", "gemini-1.5-flash"))
+    GEMINI_IMAGE_GEN_MODEL: str = field(default_factory=lambda: os.getenv("GEMINI_IMAGE_GEN_MODEL", "gemini-2.0-flash-preview-image-generation"))
+    
+    MAX_TOKENS: int = field(default_factory=lambda: int(os.getenv("MAX_TOKENS", "1200")))
     MAX_TOKENS_CODE: int = field(default_factory=lambda: int(os.getenv("MAX_TOKENS_CODE", "4000")))
     FILE_OUTPUT_TOKENS: int = field(default_factory=lambda: int(os.getenv("FILE_OUTPUT_TOKENS", "6000")))
     
@@ -51,21 +86,24 @@ class Config:
     CTX_TURNS: int = field(default_factory=lambda: int(os.getenv("CTX_TURNS", "15")))
     REQUEST_TIMEOUT: float = field(default_factory=lambda: float(os.getenv("REQUEST_TIMEOUT", "90")))
     
-    GEMINI_API_KEY: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
-    GEMINI_IMAGE_MODEL: str = field(default_factory=lambda: os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-exp"))
+    WEATHER_API_KEY: str = field(default_factory=lambda: os.getenv("WEATHER_API_KEY", ""))
+    NEWS_API_KEY: str = field(default_factory=lambda: os.getenv("NEWS_API_KEY", ""))
     
     CACHE_TTL: int = 3600
     MAX_CACHE_SIZE: int = 100
 
 config = Config()
 
+# Import Google AI libraries
 try:
-    from google import genai
-    from google.genai import types
+    import google.generativeai as genai
+    GENAI_AVAILABLE = True
 except ImportError:
     genai = None
-    types = None
+    GENAI_AVAILABLE = False
+    logger.warning("google-generativeai not installed")
 
+# Import optional libraries
 try:
     import chardet
 except ImportError:
@@ -108,6 +146,7 @@ class FileType(Enum):
     HTML = "html"
     JSON = "json"
     CSV = "csv"
+    IMAGE = "image"
     ARCHIVE = "archive"
     UNKNOWN = "unknown"
 
@@ -121,14 +160,27 @@ CODE_EXTENSIONS = (
     ".php", ".rb", ".rs", ".sh", ".bat", ".ps1", ".sql", ".swift",
     ".kt", ".scala", ".r", ".m", ".dart", ".lua", ".pl", ".asm"
 )
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", ".ico")
+
+@dataclass
+class ImageData:
+    """Store image data for analysis"""
+    file_id: str
+    file_data: bytes
+    caption: Optional[str] = None
+    timestamp: float = field(default_factory=time.time)
 
 @dataclass
 class UserState:
     history: deque = field(default_factory=lambda: deque(maxlen=32))
     file_mode: bool = False
+    image_mode: bool = False
     pending_file: Optional[Dict[str, Any]] = None
+    pending_images: List[ImageData] = field(default_factory=list)
     last_result: str = ""
     active_messages: Dict[int, Any] = field(default_factory=dict)
+    language: str = "vi"
+    location: Optional[str] = "hanoi"
 
 class BotState:
     def __init__(self):
@@ -155,7 +207,267 @@ class BotState:
 
 bot_state = BotState()
 
+class VietnamServices:
+    """Services related to Vietnam"""
+    
+    @staticmethod
+    async def get_weather(city: str) -> str:
+        """Get weather for Vietnamese cities"""
+        if not config.WEATHER_API_KEY:
+            return "❌ Thiếu API key thời tiết. Liên hệ @cucodoivandep"
+        
+        city_info = VIETNAM_CITIES.get(city.lower())
+        if not city_info:
+            cities = ", ".join(VIETNAM_CITIES.keys())
+            return f"❌ Không tìm thấy {city}\nCác thành phố hỗ trợ: {cities}"
+        
+        try:
+            url = f"https://api.openweathermap.org/data/2.5/weather"
+            params = {
+                "lat": city_info["lat"],
+                "lon": city_info["lon"],
+                "appid": config.WEATHER_API_KEY,
+                "units": "metric",
+                "lang": "vi"
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as response:
+                    data = await response.json()
+                    
+            temp = data["main"]["temp"]
+            feels_like = data["main"]["feels_like"]
+            humidity = data["main"]["humidity"]
+            description = data["weather"][0]["description"]
+            wind_speed = data.get("wind", {}).get("speed", 0)
+            
+            weather_emoji = "☀️" if temp > 30 else "⛅" if temp > 20 else "🌧️"
+            
+            return (
+                f"{weather_emoji} **Thời tiết {city_info['name']}**\n\n"
+                f"🌡 Nhiệt độ: {temp}°C (cảm giác {feels_like}°C)\n"
+                f"💧 Độ ẩm: {humidity}%\n"
+                f"💨 Gió: {wind_speed} m/s\n"
+                f"☁️ Trời: {description.capitalize()}\n\n"
+                f"💡 Gợi ý: {'Nhớ mang ô ☂️' if 'mưa' in description.lower() else 'Thời tiết đẹp để đi chơi! 🌺'}"
+            )
+        except Exception as e:
+            return f"❌ Lỗi lấy thời tiết: {str(e)[:100]}"
+    
+    @staticmethod
+    async def get_exchange_rate() -> str:
+        """Get USD/VND exchange rate"""
+        try:
+            url = "https://api.exchangerate-api.com/v4/latest/USD"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    data = await response.json()
+            
+            vnd_rate = data["rates"].get("VND", 0)
+            eur_rate = 1 / data["rates"].get("EUR", 1)
+            gbp_rate = 1 / data["rates"].get("GBP", 1)
+            jpy_rate = data["rates"].get("JPY", 0)
+            cny_rate = data["rates"].get("CNY", 0)
+            
+            date = data.get("date", "")
+            
+            return (
+                f"💱 **Tỷ giá hôm nay** ({date})\n\n"
+                f"🇺🇸 1 USD = **{vnd_rate:,.0f}** VND\n"
+                f"🇪🇺 1 EUR = **{vnd_rate * eur_rate:,.0f}** VND\n"
+                f"🇬🇧 1 GBP = **{vnd_rate * gbp_rate:,.0f}** VND\n"
+                f"🇯🇵 100 JPY = **{vnd_rate * 100 / jpy_rate:,.0f}** VND\n"
+                f"🇨🇳 1 CNY = **{vnd_rate / cny_rate:,.0f}** VND\n\n"
+                f"📈 Vàng SJC: ~92,000,000 VND/lượng"
+            )
+        except Exception as e:
+            return f"❌ Lỗi lấy tỷ giá: {str(e)[:100]}"
+    
+    @staticmethod
+    def get_vietnam_time() -> str:
+        """Get current time in Vietnam"""
+        try:
+            import pytz
+            vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+            vn_time = datetime.datetime.now(vn_tz)
+            
+            # Vietnamese day names
+            vn_days = ['Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Thứ Năm', 'Thứ Sáu', 'Thứ Bảy', 'Chủ Nhật']
+            day_name = vn_days[vn_time.weekday()]
+            
+            # Check if today is a holiday
+            date_str = vn_time.strftime("%d-%m")
+            holiday = VIETNAM_HOLIDAYS.get(date_str, "")
+            
+            # Calculate lunar calendar (approximate)
+            lunar_info = "🌙 Âm lịch: Đang cập nhật"
+            
+            time_str = (
+                f"🇻🇳 **Giờ Việt Nam**\n\n"
+                f"📅 {day_name}, {vn_time.strftime('%d/%m/%Y')}\n"
+                f"🕐 {vn_time.strftime('%H:%M:%S')} (GMT+7)\n"
+                f"{lunar_info}"
+            )
+            
+            if holiday:
+                time_str += f"\n\n🎉 **{holiday}**"
+            
+            # Add greeting based on time
+            hour = vn_time.hour
+            if 5 <= hour < 11:
+                greeting = "🌅 Chào buổi sáng!"
+            elif 11 <= hour < 13:
+                greeting = "☀️ Chào buổi trưa!"  
+            elif 13 <= hour < 18:
+                greeting = "🌤 Chào buổi chiều!"
+            else:
+                greeting = "🌙 Chào buổi tối!"
+            
+            time_str += f"\n\n{greeting}"
+            
+            return time_str
+        except:
+            vn_time = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
+            return f"🕐 Giờ VN: {vn_time.strftime('%H:%M:%S %d/%m/%Y')}"
+    
+    @staticmethod
+    async def get_news() -> str:
+        """Get Vietnamese news headlines"""
+        if not config.NEWS_API_KEY:
+            # Return some default news sources
+            return (
+                "📰 **Báo chí Việt Nam**\n\n"
+                "🔸 VnExpress: vnexpress.net\n"
+                "🔸 Tuổi Trẻ: tuoitre.vn\n"
+                "🔸 Thanh Niên: thanhnien.vn\n"
+                "🔸 Dân Trí: dantri.com.vn\n"
+                "🔸 VTC News: vtc.vn\n\n"
+                "💡 Cần API key để xem tin tức tự động"
+            )
+        
+        try:
+            url = "https://newsapi.org/v2/top-headlines"
+            params = {
+                "country": "vn",
+                "apiKey": config.NEWS_API_KEY,
+                "pageSize": 5
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as response:
+                    data = await response.json()
+            
+            if data.get("status") != "ok":
+                return "❌ Không lấy được tin tức"
+            
+            articles = data.get("articles", [])
+            if not articles:
+                return "📰 Không có tin tức mới"
+            
+            news_text = "📰 **Tin tức Việt Nam mới nhất**\n\n"
+            for i, article in enumerate(articles[:5], 1):
+                title = article.get("title", "")
+                description = article.get("description", "")[:100]
+                source = article.get("source", {}).get("name", "")
+                news_text += f"**{i}. {title}**\n"
+                if description:
+                    news_text += f"_{description}_\n"
+                if source:
+                    news_text += f"📌 {source}\n"
+                news_text += "\n"
+            
+            return news_text
+        except Exception as e:
+            return f"❌ Lỗi lấy tin tức: {str(e)[:100]}"
+
+vietnam_services = VietnamServices()
+
+class GeminiHandler:
+    """Handle Gemini API for both vision and image generation"""
+    
+    def __init__(self):
+        self.configured = False
+        if config.GEMINI_API_KEY and GENAI_AVAILABLE:
+            genai.configure(api_key=config.GEMINI_API_KEY)
+            self.configured = True
+    
+    async def analyze_image(self, image_data: bytes, prompt: str) -> Optional[str]:
+        """Analyze image using Gemini Vision"""
+        if not self.configured:
+            return None
+        
+        try:
+            # Create model for vision
+            model = genai.GenerativeModel(config.GEMINI_VISION_MODEL)
+            
+            # Convert bytes to PIL Image
+            image = Image.open(io.BytesIO(image_data))
+            
+            # Generate content with image
+            response = await asyncio.to_thread(
+                model.generate_content,
+                [prompt, image]
+            )
+            
+            return response.text
+            
+        except Exception as e:
+            logger.error(f"Gemini Vision error: {e}")
+            return f"❌ Lỗi phân tích: {str(e)[:100]}"
+    
+    async def generate_image(self, prompt: str) -> Optional[bytes]:
+        """Generate image using Gemini"""
+        if not self.configured:
+            return None
+        
+        try:
+            # Use the image generation model
+            model = genai.GenerativeModel(config.GEMINI_IMAGE_GEN_MODEL)
+            
+            # Generate image
+            response = await asyncio.to_thread(
+                model.generate_content,
+                prompt
+            )
+            
+            # Extract image data if available
+            if hasattr(response, '_result') and hasattr(response._result, 'candidates'):
+                for candidate in response._result.candidates:
+                    if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'inline_data') and part.inline_data:
+                                return base64.b64decode(part.inline_data.data)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Gemini Image Gen error: {e}")
+            return None
+    
+    async def analyze_multiple_images(self, images: List[ImageData], prompt: str) -> str:
+        """Analyze multiple images"""
+        if not self.configured:
+            return "❌ Gemini API chưa được cấu hình"
+        
+        results = []
+        
+        for i, img_data in enumerate(images, 1):
+            vn_prompt = f"Ảnh {i}: {prompt}. Trả lời bằng tiếng Việt, chú ý các yếu tố văn hóa Việt Nam nếu có."
+            
+            result = await self.analyze_image(img_data.file_data, vn_prompt)
+            
+            if result:
+                results.append(f"**📸 Ảnh {i}:**\n{result}")
+            else:
+                results.append(f"**📸 Ảnh {i}:** Không thể phân tích")
+        
+        return "\n\n".join(results) if results else "❌ Không thể phân tích ảnh"
+
+gemini_handler = GeminiHandler()
+
 class AIClient:
+    """Handle text-based AI using Vercel API"""
+    
     def __init__(self):
         self.client = None
         if config.VERCEL_API_KEY:
@@ -258,90 +570,26 @@ class TextProcessor:
         return text
     
     @staticmethod
-    def to_blockquote_md2(text: str) -> str:
-        lines = text.split('\n')
-        quoted_lines = []
-        for line in lines:
-            if line.strip():
-                escaped = TextProcessor.escape_markdown_v2(line)
-                quoted_lines.append(f'>{escaped}')
+    def chunk_text(text: str, max_length: int = 4096) -> List[str]:
+        """Split text into chunks for Telegram messages"""
+        if len(text) <= max_length:
+            return [text]
+        
+        chunks = []
+        current = ""
+        
+        for line in text.split('\n'):
+            if len(current) + len(line) + 1 > max_length:
+                if current:
+                    chunks.append(current)
+                current = line
             else:
-                quoted_lines.append('')
-        return '\n'.join(quoted_lines)
-    
-    @staticmethod
-    def chunk_code_pages(code: str, per_page: int = None) -> List[str]:
-        per_page = per_page or config.PAGE_CHARS
-        if len(code) <= per_page:
-            return [code]
+                current = current + '\n' + line if current else line
         
-        pages = []
-        current_page = []
-        current_size = 0
+        if current:
+            chunks.append(current)
         
-        blocks = TextProcessor._split_code_blocks(code)
-        
-        for block in blocks:
-            block_size = len(block) + 1
-            
-            if current_size + block_size > per_page:
-                if current_page:
-                    pages.append('\n'.join(current_page))
-                    current_page = []
-                    current_size = 0
-                
-                if block_size > per_page:
-                    pages.extend(TextProcessor._split_large_block(block, per_page))
-                else:
-                    current_page.append(block)
-                    current_size = block_size
-            else:
-                current_page.append(block)
-                current_size += block_size
-        
-        if current_page:
-            pages.append('\n'.join(current_page))
-        
-        return pages
-    
-    @staticmethod
-    def _split_code_blocks(code: str) -> List[str]:
-        blocks = []
-        current_block = []
-        
-        for line in code.splitlines():
-            if line and not line[0].isspace() and current_block:
-                blocks.append('\n'.join(current_block))
-                current_block = [line]
-            else:
-                current_block.append(line)
-        
-        if current_block:
-            blocks.append('\n'.join(current_block))
-        
-        return blocks
-    
-    @staticmethod
-    def _split_large_block(block: str, per_page: int) -> List[str]:
-        pages = []
-        lines = block.splitlines()
-        current_lines = []
-        current_size = 0
-        
-        for line in lines:
-            line_size = len(line) + 1
-            if current_size + line_size > per_page and current_lines:
-                pages.append('\n'.join(current_lines))
-                current_lines = [line]
-                current_size = line_size
-            else:
-                current_lines.append(line)
-                current_size += line_size
-        
-        if current_lines:
-            pages.append('\n'.join(current_lines))
-        
-        return pages
+        return chunks
 
 text_processor = TextProcessor()
 
@@ -354,6 +602,8 @@ class FileProcessor:
             return FileType.ARCHIVE
         elif any(name_lower.endswith(ext) for ext in CODE_EXTENSIONS):
             return FileType.CODE
+        elif any(name_lower.endswith(ext) for ext in IMAGE_EXTENSIONS):
+            return FileType.IMAGE
         elif name_lower.endswith('.pdf'):
             return FileType.PDF
         elif name_lower.endswith(('.docx', '.doc')):
@@ -398,26 +648,29 @@ class FileProcessor:
         
         try:
             if file_type == FileType.ARCHIVE:
-                return None, "📦 File nén không được hỗ trợ trực tiếp."
+                return None, "📦 File nén - vui lòng giải nén trước khi gửi"
+            
+            elif file_type == FileType.IMAGE:
+                return None, "image"
             
             elif file_type == FileType.PDF:
                 if not PyPDF2:
-                    return None, "❌ Thư viện PyPDF2 chưa được cài đặt."
+                    return None, "❌ Cần cài đặt PyPDF2 để đọc PDF"
                 return FileProcessor._read_pdf(data), "pdf"
             
             elif file_type == FileType.DOCX:
                 if not docx:
-                    return None, "❌ Thư viện python-docx chưa được cài đặt."
+                    return None, "❌ Cần cài đặt python-docx để đọc DOCX"
                 return FileProcessor._read_docx(data), "docx"
             
             elif file_type == FileType.XLSX:
                 if not openpyxl:
-                    return None, "❌ Thư viện openpyxl chưa được cài đặt."
+                    return None, "❌ Cần cài đặt openpyxl để đọc Excel"
                 return FileProcessor._read_excel(data), "xlsx"
             
             elif file_type == FileType.PPTX:
                 if not Presentation:
-                    return None, "❌ Thư viện python-pptx chưa được cài đặt."
+                    return None, "❌ Cần cài đặt python-pptx để đọc PowerPoint"
                 return FileProcessor._read_pptx(data), "pptx"
             
             elif file_type == FileType.HTML:
@@ -439,10 +692,10 @@ class FileProcessor:
                 return FileProcessor._decode_text(data), file_type.value
             
             else:
-                return None, f"❌ Định dạng {filename} chưa được hỗ trợ."
+                return None, f"❌ File {filename} chưa được hỗ trợ"
                 
         except Exception as e:
-            return None, f"❌ Lỗi xử lý file: {str(e)}"
+            return None, f"❌ Lỗi xử lý file: {str(e)[:100]}"
     
     @staticmethod
     def _decode_text(data: bytes) -> str:
@@ -497,91 +750,68 @@ class FileProcessor:
 
 file_processor = FileProcessor()
 
-class PagerManager:
-    @staticmethod
-    def create_keyboard(idx: int, total: int) -> Optional[InlineKeyboardMarkup]:
-        if total <= 1:
-            return None
-        
-        buttons = []
-        nav_row = []
-        if idx > 0:
-            nav_row.append(InlineKeyboardButton("⏪", callback_data="pg_first"))
-            nav_row.append(InlineKeyboardButton("◀️", callback_data="pg_prev"))
-        
-        nav_row.append(InlineKeyboardButton(f"📄 {idx+1}/{total}", callback_data="pg_info"))
-        
-        if idx < total - 1:
-            nav_row.append(InlineKeyboardButton("▶️", callback_data="pg_next"))
-            nav_row.append(InlineKeyboardButton("⏩", callback_data="pg_last"))
-        
-        buttons.append(nav_row)
-        
-        action_row = [
-            InlineKeyboardButton("📋 Copy", callback_data="pg_copy"),
-            InlineKeyboardButton("💾 Download", callback_data="pg_download"),
-            InlineKeyboardButton("❌ Close", callback_data="pg_close")
-        ]
-        buttons.append(action_row)
-        
-        return InlineKeyboardMarkup(buttons)
-    
-    @staticmethod
-    def prepare_page(pager_data: Dict) -> Tuple[str, str]:
-        text = pager_data["pages"][pager_data["idx"]]
-        
-        if pager_data.get("is_code"):
-            lang = pager_data.get("lang", "")
-            formatted = f"```{lang}\n{text}\n```"
-            return formatted, ParseMode.MARKDOWN_V2
-        else:
-            return f"<pre>{text}</pre>", ParseMode.HTML
-
-pager_manager = PagerManager()
-
 class MessageBuilder:
     @staticmethod
     def build_system_prompt(context_type: str = "chat") -> str:
-        current_time = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        try:
+            import pytz
+            vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+            vn_time = datetime.datetime.now(vn_tz)
+            time_str = vn_time.strftime('%d/%m/%Y %H:%M:%S')
+        except:
+            vn_time = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
+            time_str = vn_time.strftime('%d/%m/%Y %H:%M:%S')
         
         base_prompt = (
-            f"Bạn là Linh - AI assistant thông minh và thân thiện.\n"
-            f"Thời gian hiện tại: {current_time}\n"
+            f"Bạn là Linh - AI assistant thông minh của Việt Nam.\n"
+            f"Thời gian Việt Nam: {time_str}\n"
             f"Được phát triển bởi Hoàng Tuấn Anh (@cucodoivandep)\n\n"
+            f"Kiến thức sâu về:\n"
+            f"• Lịch sử, văn hóa, địa lý Việt Nam\n"
+            f"• Ẩm thực, du lịch, phong tục tập quán\n"
+            f"• Tiếng Việt và các phương ngữ\n"
+            f"• Kinh tế, xã hội Việt Nam\n\n"
         )
         
         if context_type == "chat":
             return base_prompt + (
                 "Hướng dẫn giao tiếp:\n"
-                "• Trả lời ngắn gọn, súc tích, đi thẳng vào vấn đề\n"
-                "• Nói chuyện tự nhiên như người Việt\n"
-                "• Thể hiện cảm xúc phù hợp ngữ cảnh\n"
-                "• Không nịnh bợ, không vòng vo tam quốc\n"
-                "• Được phép dùng từ mạnh khi cần thiết"
+                "• Ưu tiên trả lời về Việt Nam khi phù hợp\n"
+                "• Sử dụng tiếng Việt tự nhiên, thân thiện\n"
+                "• Có thể dùng emoji phù hợp\n"
+                "• Trả lời ngắn gọn, súc tích, đi thẳng vấn đề\n"
+                "• Thể hiện sự am hiểu văn hóa Việt"
             )
         
         elif context_type == "code":
             return base_prompt + (
-                "Bạn là lập trình viên chuyên nghiệp với 10+ năm kinh nghiệm.\n\n"
-                "Nguyên tắc viết code:\n"
-                "• Code phải clean, readable và maintainable\n"
-                "• Tuân thủ best practices và design patterns\n"
-                "• Thêm comments và docstrings đầy đủ\n"
-                "• Xử lý errors và edge cases cẩn thận\n"
-                "• Tối ưu performance khi cần thiết\n"
-                "• Security first - validate inputs, sanitize outputs\n"
-                "• Viết unit tests nếu được yêu cầu"
+                "Bạn là lập trình viên Việt Nam chuyên nghiệp.\n\n"
+                "Nguyên tắc:\n"
+                "• Code sạch, dễ đọc, dễ bảo trì\n"
+                "• Comment bằng tiếng Việt rõ ràng\n"
+                "• Đặt tên biến/hàm theo chuẩn quốc tế\n"
+                "• Xử lý tốt Unicode tiếng Việt\n"
+                "• Tối ưu cho production"
             )
         
         elif context_type == "file":
             return base_prompt + (
-                "Bạn đang xử lý và phân tích file.\n\n"
+                "Xử lý file với chuyên môn cao.\n\n"
                 "Hướng dẫn:\n"
-                "• Phân tích cấu trúc và nội dung file cẩn thận\n"
+                "• Phân tích nội dung chính xác\n"
+                "• Tóm tắt súc tích các điểm chính\n"
                 "• Trích xuất thông tin quan trọng\n"
-                "• Tóm tắt nội dung chính\n"
-                "• Trả lời câu hỏi dựa trên nội dung file\n"
                 "• Đề xuất cải thiện nếu phù hợp"
+            )
+        
+        elif context_type == "image_context":
+            return base_prompt + (
+                "Bạn đang trả lời câu hỏi về hình ảnh.\n\n"
+                "Lưu ý:\n"
+                "• Dựa trên phân tích ảnh để trả lời\n"
+                "• Chú ý chi tiết trong ảnh\n"
+                "• Liên hệ với văn hóa Việt Nam nếu có\n"
+                "• Trả lời chính xác, cụ thể"
             )
         
         return base_prompt
@@ -655,18 +885,17 @@ async def stream_response(
                 await update_message()
         
         if full_response:
-            if len(full_response) > 4096:
-                await msg.delete()
-                pages = text_processor.chunk_code_pages(full_response)
-                pager_data = {
-                    "pages": pages,
-                    "is_code": False,
-                    "lang": "",
-                    "idx": 0
-                }
-                await send_paged_message(context, chat_id, None, pager_data)
+            chunks = text_processor.chunk_text(full_response)
+            
+            if len(chunks) == 1:
+                await msg.edit_text(chunks[0])
             else:
-                await msg.edit_text(full_response)
+                await msg.delete()
+                for i, chunk in enumerate(chunks):
+                    await context.bot.send_message(
+                        chat_id,
+                        f"📄 Phần {i+1}/{len(chunks)}:\n\n{chunk}"
+                    )
         
         return full_response
         
@@ -674,30 +903,53 @@ async def stream_response(
         await msg.edit_text(f"❌ Lỗi: {str(e)[:200]}")
         return None
 
+# Command Handlers
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
-🤖 **LINH AI BOT**
+🇻🇳 **LINH AI - TRỢ LÝ VIỆT NAM**
 
-📝 **Lệnh:**
-• /help - Hướng dẫn
-• /start - Khởi động
-• /clear - Xóa lịch sử
-• /stats - Thống kê
-• /code <yêu cầu> - Viết code (Claude-4-Opus)
-• /img <mô tả> - Tạo ảnh (Gemini)
-• /cancelfile - Thoát file mode
-• /sendfile - Tải kết quả
+📝 **Lệnh cơ bản:**
+• /help - Hướng dẫn sử dụng
+• /start - Khởi động bot
+• /clear - Xóa lịch sử chat
+• /stats - Thống kê sử dụng
 
-💬 **Sử dụng:**
-• Nhắn tin trực tiếp để chat
-• Gửi file để phân tích
-• img: <prompt> để tạo ảnh
+💻 **Tính năng AI:**
+• /code <yêu cầu> - Viết code chuyên nghiệp
+• /img <mô tả> - Tạo ảnh AI (Gemini)
+• /vision - Phân tích ảnh đã gửi
 
-🚀 **Models:**
-• Chat: Claude-3.5-Haiku
-• Code/File: Claude-4-Opus
+🇻🇳 **Việt Nam:**
+• /weather <city> - Thời tiết các tỉnh thành
+• /news - Tin tức mới nhất
+• /exchange - Tỷ giá ngoại tệ
+• /time - Giờ Việt Nam
+• /translate <text> - Dịch Anh-Việt
 
-👨‍💻 **Dev:** @cucodoivandep
+📸 **Phân tích ảnh:**
+• Gửi ảnh → Bot phân tích tự động
+• Hỏi chi tiết về nội dung ảnh
+• So sánh nhiều ảnh cùng lúc
+• Nhận diện văn hóa Việt Nam
+
+📄 **Xử lý File:**
+• Hỗ trợ: PDF, Word, Excel, PowerPoint
+• Text, Code, JSON, CSV, HTML
+• /cancelfile - Thoát chế độ file
+• /sendfile - Tải kết quả về
+
+💡 **Mẹo hay:**
+• Chat tiếng Việt tự nhiên
+• "img: <mô tả>" để tạo ảnh nhanh
+• Hỏi về lịch sử, ẩm thực, du lịch VN
+
+⚙️ **AI Models:**
+• Chat: Claude-3.5 (Vercel)
+• Vision: Gemini-1.5-Flash
+• Image: Gemini-2.0-Flash
+
+👨‍💻 Dev: @cucodoivandep
+🌐 Made in Vietnam with ❤️
     """
     
     await context.bot.send_message(
@@ -708,46 +960,196 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = """
-👋 Xin chào! Mình là Linh - AI Assistant.
+🇻🇳 **Xin chào! Mình là Linh - AI Assistant Việt Nam**
 
-💬 Nhắn tin trực tiếp để chat
-💻 /code để viết code với Claude-4-Opus
-🎨 /img để tạo ảnh với Gemini
-📄 Gửi file để phân tích
+🎯 **Mình có thể giúp gì cho bạn:**
+• 📸 Phân tích hình ảnh, nhận diện đối tượng
+• 💬 Trò chuyện về mọi chủ đề
+• 💻 Viết code, debug, tối ưu
+• 📚 Tư vấn học tập, công việc
+• 🇻🇳 Thông tin về Việt Nam
 
-/help để xem chi tiết.
+💡 **Thử ngay:**
+• Gửi ảnh để phân tích
+• Hỏi về văn hóa, lịch sử Việt Nam
+• /help để xem đầy đủ tính năng
+
+Chúc bạn một ngày tốt lành! 🌺
     """
+    
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📖 Hướng dẫn", callback_data="show_help"),
+            InlineKeyboardButton("🇻🇳 Về Việt Nam", callback_data="about_vietnam")
+        ],
+        [
+            InlineKeyboardButton("📸 Cách dùng ảnh", callback_data="image_guide"),
+            InlineKeyboardButton("💬 Chat ngay", callback_data="start_chat")
+        ]
+    ])
     
     await context.bot.send_message(
         update.effective_chat.id,
-        welcome_text
+        welcome_text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard
     )
+
+async def cmd_vision(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Analyze pending images"""
+    chat_id = update.effective_chat.id
+    user = bot_state.get_user(chat_id)
+    
+    if not user.pending_images:
+        await context.bot.send_message(
+            chat_id,
+            "📷 Chưa có ảnh nào.\nGửi ảnh để phân tích nhé!"
+        )
+        return
+    
+    if not config.GEMINI_API_KEY:
+        await context.bot.send_message(
+            chat_id,
+            "❌ Cần GEMINI_API_KEY để phân tích ảnh.\nLiên hệ @cucodoivandep"
+        )
+        return
+    
+    await context.bot.send_message(
+        chat_id,
+        f"🔍 Đang phân tích {len(user.pending_images)} ảnh..."
+    )
+    
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    
+    prompt = "Phân tích chi tiết hình ảnh: nội dung, đối tượng, màu sắc, bố cục. Nếu có yếu tố Việt Nam (người, cảnh, món ăn...) hãy mô tả kỹ."
+    
+    analysis = await gemini_handler.analyze_multiple_images(
+        user.pending_images,
+        prompt
+    )
+    
+    chunks = text_processor.chunk_text(analysis)
+    for chunk in chunks:
+        await context.bot.send_message(
+            chat_id, 
+            chunk,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    user.history.append(("user", "Phân tích ảnh"))
+    user.history.append(("assistant", analysis[:500]))
+
+async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate image from text"""
+    chat_id = update.effective_chat.id
+    prompt = " ".join(context.args).strip()
+    
+    if not prompt:
+        examples = [
+            "phong cảnh vịnh Hạ Long",
+            "phở bò Hà Nội",
+            "áo dài Việt Nam",
+            "chợ nổi Cái Răng",
+            "ruộng bậc thang Sapa"
+        ]
+        await context.bot.send_message(
+            chat_id,
+            f"📝 **Cú pháp:** /img <mô tả>\n\n"
+            f"**Ví dụ:**\n" + "\n".join([f"• /img {ex}" for ex in examples])
+        )
+        return
+    
+    if not config.GEMINI_API_KEY:
+        await context.bot.send_message(
+            chat_id,
+            "❌ Cần GEMINI_API_KEY để tạo ảnh.\nLiên hệ @cucodoivandep"
+        )
+        return
+    
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+    
+    # Enhance prompt for Vietnamese context
+    enhanced_prompt = f"{prompt}, high quality, detailed, beautiful"
+    
+    status_msg = await context.bot.send_message(
+        chat_id,
+        f"🎨 Đang tạo ảnh: _{prompt}_",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Try to generate with Gemini
+    image_data = await gemini_handler.generate_image(enhanced_prompt)
+    
+    if image_data:
+        await status_msg.delete()
+        await context.bot.send_photo(
+            chat_id,
+            photo=io.BytesIO(image_data),
+            caption=f"🎨 {prompt}"
+        )
+    else:
+        await status_msg.edit_text(
+            "❌ Không thể tạo ảnh. Gemini có thể đang bận hoặc prompt không phù hợp.\n"
+            "💡 Thử lại với mô tả khác nhé!"
+        )
+    
+    user = bot_state.get_user(chat_id)
+    user.history.append(("user", f"/img {prompt}"))
+    user.history.append(("assistant", f"Tạo ảnh: {prompt[:50]}"))
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = bot_state.get_user(chat_id)
+    
+    # Clear everything
     user.history.clear()
+    user.file_mode = False
+    user.image_mode = False
+    user.pending_file = None
+    user.pending_images.clear()
+    user.last_result = ""
     
     await context.bot.send_message(
         chat_id,
-        "✅ Đã xóa lịch sử chat."
+        "✅ Đã xóa:\n"
+        "• Lịch sử chat\n"
+        "• Ảnh đã gửi\n"
+        "• File đã gửi\n"
+        "• Kết quả lưu"
     )
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = bot_state.get_user(chat_id)
     
+    try:
+        import pytz
+        vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        vn_time = datetime.datetime.now(vn_tz)
+        time_str = vn_time.strftime('%H:%M:%S %d/%m/%Y')
+    except:
+        vn_time = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
+        time_str = vn_time.strftime('%H:%M:%S %d/%m/%Y')
+    
     stats_text = f"""
-📊 **Thống kê:**
+📊 **Thống kê sử dụng**
 
-• 💬 Lịch sử: {len(user.history)} tin
-• 📁 File mode: {'Bật' if user.file_mode else 'Tắt'}
-• 💾 Cache: {len(bot_state.cache)}
+👤 **User:** {update.effective_user.first_name}
+🆔 **ID:** `{chat_id}`
+💬 **Lịch sử:** {len(user.history)} tin
+📸 **Ảnh lưu:** {len(user.pending_images)}
+📁 **File mode:** {'Bật' if user.file_mode else 'Tắt'}
+🌍 **Vị trí:** {user.location or 'Hà Nội'}
 
-🚀 **Models:**
-• Chat: {config.CHAT_MODEL}
-• Code: {config.CODE_MODEL}
-• File: {config.FILE_MODEL}
+⚙️ **AI Models:**
+• Chat: Claude-3.5-Haiku
+• Code: Claude-3.5-Sonnet
+• Vision: Gemini-1.5-Flash
+• Image: Gemini-2.0-Flash
+
+🕐 **Giờ VN:** {time_str}
+
+💡 _Dùng /clear để xóa dữ liệu_
     """
     
     await context.bot.send_message(
@@ -756,94 +1158,45 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
-async def cmd_img(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    prompt = " ".join(context.args).strip()
     
-    if not prompt:
+    if not context.args:
+        cities = ", ".join(VIETNAM_CITIES.keys())
         await context.bot.send_message(
             chat_id,
-            "📝 /img <mô tả hình ảnh>"
+            f"☀️ **Xem thời tiết**\n\n"
+            f"Cú pháp: /weather <tên thành phố>\n\n"
+            f"Các thành phố: {cities}"
         )
         return
     
-    if not config.GEMINI_API_KEY:
-        await context.bot.send_message(
-            chat_id,
-            "❌ Thiếu GEMINI_API_KEY."
-        )
-        return
+    city = context.args[0].lower()
+    weather_info = await vietnam_services.get_weather(city)
     
-    if genai is None:
-        await context.bot.send_message(
-            chat_id,
-            "❌ Thiếu thư viện google-generativeai."
-        )
-        return
-    
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-    
-    try:
-        gemini_client = genai.Client(api_key=config.GEMINI_API_KEY)
-        
-        response = await asyncio.to_thread(
-            gemini_client.models.generate_images,
-            model=config.GEMINI_IMAGE_MODEL,
-            prompt=prompt,
-            n=1,
-            safety_settings=[
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}
-            ]
-        )
-        
-        sent_count = 0
-        if hasattr(response, 'images') and response.images:
-            for img in response.images:
-                try:
-                    if hasattr(img, 'url') and img.url:
-                        await context.bot.send_photo(
-                            chat_id,
-                            photo=img.url,
-                            caption=f"🎨 {prompt[:100]}"
-                        )
-                        sent_count += 1
-                    elif hasattr(img, '_image_bytes') and img._image_bytes:
-                        await context.bot.send_photo(
-                            chat_id,
-                            photo=io.BytesIO(img._image_bytes),
-                            caption=f"🎨 {prompt[:100]}"
-                        )
-                        sent_count += 1
-                except Exception:
-                    pass
-        
-        if sent_count == 0:
-            await context.bot.send_message(
-                chat_id,
-                "❌ Không nhận được ảnh từ Gemini."
-            )
-        
-        user = bot_state.get_user(chat_id)
-        user.history.append(("user", f"/img {prompt}"))
-        user.history.append(("assistant", f"Đã tạo {sent_count} ảnh"))
-        
-    except Exception as e:
-        await context.bot.send_message(
-            chat_id,
-            f"❌ Lỗi: {str(e)[:200]}"
-        )
+    await context.bot.send_message(
+        chat_id,
+        weather_info,
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     request = " ".join(context.args).strip()
     
     if not request:
+        examples = [
+            "hàm tính giai thừa Python",
+            "validate email JavaScript", 
+            "quicksort C++",
+            "REST API với Flask",
+            "React component với hooks"
+        ]
         await context.bot.send_message(
             chat_id,
-            "📝 /code <yêu cầu>"
+            f"💻 **Viết code**\n\n"
+            f"Cú pháp: /code <yêu cầu>\n\n"
+            f"**Ví dụ:**\n" + "\n".join([f"• /code {ex}" for ex in examples])
         )
         return
     
@@ -869,25 +1222,78 @@ async def cmd_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = bot_state.get_user(chat_id)
         user.last_result = result
         user.history.append(("user", f"/code {request}"))
-        user.history.append(("assistant", result[:500] + "..."))
+        user.history.append(("assistant", result[:500]))
 
-async def cmd_cancelfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user = bot_state.get_user(chat_id)
+    text = " ".join(context.args).strip()
     
-    if not user.file_mode:
+    if not text:
         await context.bot.send_message(
             chat_id,
-            "ℹ️ Không trong file mode."
+            "🔤 **Dịch Anh-Việt**\n\n"
+            "Cú pháp: /translate <text tiếng Anh>\n\n"
+            "Ví dụ: /translate Hello world"
         )
         return
     
-    user.file_mode = False
-    user.pending_file = None
+    messages = [
+        {
+            "role": "system", 
+            "content": "Bạn là chuyên gia dịch thuật. Dịch chính xác, tự nhiên sang tiếng Việt. Chỉ trả về bản dịch, không giải thích."
+        },
+        {
+            "role": "user",
+            "content": f"Dịch sang tiếng Việt:\n{text}"
+        }
+    ]
+    
+    result = await ai_client.complete(
+        config.CHAT_MODEL,
+        messages,
+        500,
+        temperature=0.3
+    )
     
     await context.bot.send_message(
         chat_id,
-        "✅ Đã thoát file mode."
+        f"🔤 **Bản gốc:**\n{text}\n\n"
+        f"🇻🇳 **Bản dịch:**\n{result}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    news = await vietnam_services.get_news()
+    
+    await context.bot.send_message(
+        chat_id,
+        news,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def cmd_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    rate = await vietnam_services.get_exchange_rate()
+    
+    await context.bot.send_message(
+        chat_id,
+        rate,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def cmd_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    time_info = vietnam_services.get_vietnam_time()
+    
+    await context.bot.send_message(
+        chat_id,
+        time_info,
+        parse_mode=ParseMode.MARKDOWN
     )
 
 async def cmd_sendfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -897,7 +1303,8 @@ async def cmd_sendfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user.last_result:
         await context.bot.send_message(
             chat_id,
-            "❌ Không có kết quả."
+            "❌ Không có kết quả để gửi.\n"
+            "💡 Chat hoặc dùng /code trước"
         )
         return
     
@@ -908,117 +1315,118 @@ async def cmd_sendfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_document(
         chat_id,
         document=file_io,
-        caption="📄 Kết quả"
+        caption="📄 Kết quả xử lý"
     )
 
-async def send_paged_message(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    message: Optional[Update],
-    pager_data: Dict
-):
-    text, parse_mode = pager_manager.prepare_page(pager_data)
-    keyboard = pager_manager.create_keyboard(pager_data["idx"], len(pager_data["pages"]))
+async def cmd_cancelfile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user = bot_state.get_user(chat_id)
+    
+    user.file_mode = False
+    user.image_mode = False
+    user.pending_file = None
+    
+    await context.bot.send_message(
+        chat_id,
+        "✅ Đã thoát chế độ file/image"
+    )
+
+# Message Handlers
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo messages"""
+    chat_id = update.effective_chat.id
+    user = bot_state.get_user(chat_id)
+    
+    if not config.GEMINI_API_KEY:
+        await context.bot.send_message(
+            chat_id,
+            "❌ Cần GEMINI_API_KEY để phân tích ảnh.\n"
+            "Liên hệ @cucodoivandep để được hỗ trợ."
+        )
+        return
+    
+    # Get photo
+    photo = update.message.photo[-1]
+    caption = update.message.caption or ""
+    
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     
     try:
-        if message:
-            await message.edit_text(
-                text,
-                parse_mode=parse_mode,
-                reply_markup=keyboard
+        # Download photo
+        file = await context.bot.get_file(photo.file_id)
+        file_data = await file.download_as_bytearray()
+        
+        # Store image
+        img_data = ImageData(
+            file_id=photo.file_id,
+            file_data=bytes(file_data),
+            caption=caption
+        )
+        user.pending_images.append(img_data)
+        user.image_mode = True
+        
+        # Quick analysis
+        prompt = (
+            "Phân tích chi tiết ảnh này bằng tiếng Việt:\n"
+            "1. Mô tả nội dung chính\n"
+            "2. Nhận diện đối tượng, con người\n"
+            "3. Màu sắc, bố cục\n"
+            "4. Nếu có yếu tố Việt Nam, hãy nhấn mạnh"
+        )
+        
+        if caption:
+            prompt += f"\n\nThông tin thêm: {caption}"
+        
+        analysis = await gemini_handler.analyze_image(
+            img_data.file_data,
+            prompt
+        )
+        
+        if analysis:
+            response = (
+                f"📸 **Ảnh #{len(user.pending_images)}**\n\n"
+                f"{analysis}\n\n"
+                f"💬 Bạn có thể:\n"
+                f"• Hỏi chi tiết về ảnh\n"
+                f"• Gửi thêm ảnh để so sánh\n"
+                f"• /vision xem lại tất cả\n"
+                f"• /clear xóa ảnh"
             )
         else:
-            sent_message = await context.bot.send_message(
-                chat_id,
-                text,
-                parse_mode=parse_mode,
-                reply_markup=keyboard
+            response = (
+                f"📸 Đã nhận ảnh #{len(user.pending_images)}\n"
+                f"❌ Không thể phân tích ngay.\n"
+                f"Hãy hỏi cụ thể về ảnh nhé!"
             )
-            bot_state.pagers[(sent_message.chat_id, sent_message.message_id)] = pager_data
-            
-    except BadRequest:
-        try:
-            if message:
-                await message.edit_text(text, reply_markup=keyboard)
-            else:
-                sent_message = await context.bot.send_message(
-                    chat_id, text, reply_markup=keyboard
-                )
-                bot_state.pagers[(sent_message.chat_id, sent_message.message_id)] = pager_data
-        except:
-            await context.bot.send_message(
-                chat_id,
-                "❌ Lỗi hiển thị. /sendfile để tải."
-            )
-
-async def on_page_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    chat_id = query.message.chat_id
-    message_id = query.message.message_id
-    
-    pager_data = bot_state.pagers.get((chat_id, message_id))
-    if not pager_data:
-        await query.answer("❌ Không có dữ liệu")
-        return
-    
-    action = query.data
-    
-    if action == "pg_prev":
-        pager_data["idx"] = (pager_data["idx"] - 1) % len(pager_data["pages"])
-    elif action == "pg_next":
-        pager_data["idx"] = (pager_data["idx"] + 1) % len(pager_data["pages"])
-    elif action == "pg_first":
-        pager_data["idx"] = 0
-    elif action == "pg_last":
-        pager_data["idx"] = len(pager_data["pages"]) - 1
-    elif action == "pg_copy":
-        await query.answer("📋 Copy từ tin nhắn")
-        return
-    elif action == "pg_download":
-        full_text = "\n---\n".join(pager_data["pages"])
-        file_bytes = full_text.encode('utf-8')
-        file_io = io.BytesIO(file_bytes)
-        file_io.name = f"content_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         
-        await context.bot.send_document(
+        await context.bot.send_message(
+            chat_id, 
+            response,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Save to history
+        if analysis:
+            user.history.append(("user", f"[Gửi ảnh] {caption[:50] if caption else ''}"))
+            user.history.append(("assistant", analysis[:200]))
+        
+    except Exception as e:
+        await context.bot.send_message(
             chat_id,
-            document=file_io,
-            caption="📄 Nội dung"
+            f"❌ Lỗi xử lý ảnh: {str(e)[:100]}"
         )
-        await query.answer("✅ Đã gửi")
-        return
-    elif action == "pg_close":
-        await query.message.delete()
-        del bot_state.pagers[(chat_id, message_id)]
-        await query.answer("✅ Đã đóng")
-        return
-    elif action == "pg_info":
-        total_chars = sum(len(page) for page in pager_data["pages"])
-        await query.answer(
-            f"📊 {pager_data['idx']+1}/{len(pager_data['pages'])}\n"
-            f"📝 {total_chars:,} ký tự"
-        )
-        return
-    
-    await query.answer()
-    await send_paged_message(context, chat_id, query.message, pager_data)
-    bot_state.pagers[(chat_id, message_id)] = pager_data
 
 async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     document = update.message.document
     
     if not document:
-        await context.bot.send_message(
-            chat_id,
-            "❌ Không nhận được file."
-        )
         return
     
     if document.file_size > 20 * 1024 * 1024:
         await context.bot.send_message(
             chat_id,
-            "❌ File quá lớn (max 20MB)."
+            "❌ File quá lớn (max 20MB)"
         )
         return
     
@@ -1033,6 +1441,25 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bytes(file_data)
         )
         
+        if file_type == "image":
+            # Handle as image
+            user = bot_state.get_user(chat_id)
+            img_data = ImageData(
+                file_id=document.file_id,
+                file_data=bytes(file_data),
+                caption=document.file_name
+            )
+            user.pending_images.append(img_data)
+            user.image_mode = True
+            
+            await context.bot.send_message(
+                chat_id,
+                f"📷 Đã nhận ảnh từ file\n"
+                f"• Hỏi về nội dung ảnh\n"
+                f"• /vision để phân tích"
+            )
+            return
+        
         if not content:
             await context.bot.send_message(chat_id, file_type)
             return
@@ -1045,25 +1472,23 @@ async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "type": file_type
         }
         
+        preview = content[:500] + "..." if len(content) > 500 else content
+        
         await context.bot.send_message(
             chat_id,
-            f"✅ File: {document.file_name}\n"
-            f"📄 Loại: {file_type}\n"
-            f"📝 {len(content):,} ký tự\n\n"
-            f"Gửi câu hỏi hoặc /cancelfile"
+            f"✅ **File đã nhận**\n\n"
+            f"📄 Tên: {document.file_name}\n"
+            f"📊 Loại: {file_type}\n"
+            f"📝 Kích thước: {len(content):,} ký tự\n\n"
+            f"**Xem trước:**\n```\n{preview}\n```\n\n"
+            f"💬 Hỏi về file hoặc /cancelfile",
+            parse_mode=ParseMode.MARKDOWN
         )
-        
-        if len(content) <= 1000:
-            await context.bot.send_message(
-                chat_id,
-                f"```\n{content[:1000]}\n```",
-                parse_mode=ParseMode.MARKDOWN
-            )
         
     except Exception as e:
         await context.bot.send_message(
             chat_id,
-            f"❌ Lỗi: {str(e)[:200]}"
+            f"❌ Lỗi: {str(e)[:100]}"
         )
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1073,6 +1498,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message_text:
         return
     
+    # Quick image generation
     if message_text.lower().startswith("img:"):
         prompt = message_text[4:].strip()
         context.args = prompt.split()
@@ -1083,13 +1509,85 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     
+    # Handle image mode
+    if user.image_mode and user.pending_images:
+        if not config.GEMINI_API_KEY:
+            await context.bot.send_message(
+                chat_id,
+                "❌ Cần GEMINI_API_KEY để phân tích ảnh"
+            )
+            return
+        
+        # Analyze images with question
+        await context.bot.send_message(
+            chat_id,
+            f"🔍 Đang phân tích {len(user.pending_images)} ảnh..."
+        )
+        
+        results = []
+        for i, img_data in enumerate(user.pending_images, 1):
+            prompt = f"Với câu hỏi: '{message_text}'\nHãy phân tích ảnh và trả lời bằng tiếng Việt."
+            
+            analysis = await gemini_handler.analyze_image(
+                img_data.file_data,
+                prompt
+            )
+            
+            if analysis:
+                results.append(f"**📸 Ảnh {i}:**\n{analysis}")
+        
+        if results:
+            full_response = "\n\n".join(results)
+            
+            # Also get context from text AI
+            image_context = f"Người dùng đã gửi {len(user.pending_images)} ảnh và hỏi: {message_text}\nPhân tích ảnh cho thấy: {full_response[:500]}"
+            
+            messages = message_builder.build_messages(
+                chat_id,
+                image_context,
+                context_type="image_context",
+                include_history=True
+            )
+            
+            ai_response = await ai_client.complete(
+                config.CHAT_MODEL,
+                messages,
+                config.MAX_TOKENS,
+                temperature=0.7
+            )
+            
+            # Combine results
+            final_response = full_response
+            if ai_response and not ai_response.startswith("❌"):
+                final_response += f"\n\n💭 **Nhận xét thêm:**\n{ai_response}"
+            
+            chunks = text_processor.chunk_text(final_response)
+            for chunk in chunks:
+                await context.bot.send_message(
+                    chat_id,
+                    chunk,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            
+            user.last_result = final_response
+            user.history.append(("user", message_text))
+            user.history.append(("assistant", final_response[:500]))
+        else:
+            await context.bot.send_message(
+                chat_id,
+                "❌ Không thể phân tích ảnh"
+            )
+        
+        return
+    
+    # Handle file mode
     if user.file_mode and user.pending_file:
         file_content = user.pending_file["content"]
         file_name = user.pending_file["name"]
         
         prompt = (
-            f"File: {file_name}\n\n"
-            f"Nội dung file:\n{file_content[:10000]}\n\n"
+            f"File: {file_name}\n"
+            f"Nội dung:\n{file_content[:10000]}\n\n"
             f"Câu hỏi: {message_text}"
         )
         
@@ -1109,6 +1607,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             temperature=0.5
         )
     else:
+        # Normal chat
         messages = message_builder.build_messages(
             chat_id,
             message_text,
@@ -1130,31 +1629,147 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user.history.append(("user", message_text[:500]))
         user.history.append(("assistant", result[:500]))
 
+async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "show_help":
+        await cmd_help(update, context)
+    
+    elif query.data == "about_vietnam":
+        vietnam_info = """
+🇻🇳 **VIỆT NAM - ĐẤT NƯỚC CON NGƯỜI**
+
+🏛 **Lịch sử vẻ vang:**
+• 4000 năm văn hiến
+• 18 đời vua Hùng dựng nước
+• Đánh bại Mông-Nguyên 3 lần
+• Độc lập thống nhất năm 1975
+
+🌏 **Địa lý tươi đẹp:**
+• Diện tích: 331,212 km²
+• Dân số: ~98 triệu người
+• 3,260 km bờ biển
+• 2 đồng bằng phì nhiêu
+
+🎭 **Văn hóa đa dạng:**
+• 54 dân tộc anh em
+• 8 Di sản UNESCO
+• Tết Nguyên Đán độc đáo
+• Ẩm thực phong phú
+
+🏆 **Thành tựu hiện đại:**
+• Top 20 nền kinh tế lớn nhất
+• Xuất khẩu gạo số 2 thế giới
+• Du lịch phát triển mạnh
+• Công nghệ số bùng nổ
+
+💪 **Việt Nam - Đất nước anh hùng!**
+🌟 **Tiềm năng - Khát vọng - Vươn cao!**
+        """
+        await context.bot.send_message(
+            query.message.chat_id,
+            vietnam_info,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    elif query.data == "image_guide":
+        guide = """
+📸 **HƯỚNG DẪN DÙNG ẢNH**
+
+**Cách gửi:**
+1️⃣ Gửi 1 hoặc nhiều ảnh
+2️⃣ Bot phân tích tự động
+3️⃣ Hỏi chi tiết về ảnh
+
+**Bot có thể:**
+✅ Nhận diện đối tượng
+✅ Đọc chữ trong ảnh (OCR)
+✅ Phân tích màu sắc, bố cục
+✅ Nhận diện món ăn VN
+✅ Nhận diện địa danh VN
+✅ So sánh nhiều ảnh
+
+**Câu hỏi mẫu:**
+• "Đây là món gì?"
+• "Có bao nhiêu người?"
+• "Đây là ở đâu?"
+• "Dịch chữ trong ảnh"
+• "So sánh 2 ảnh này"
+
+**Lệnh:**
+• /vision - Xem lại phân tích
+• /clear - Xóa ảnh đã gửi
+
+💡 Gửi ảnh rõ nét để có kết quả tốt nhất!
+        """
+        await context.bot.send_message(
+            query.message.chat_id,
+            guide,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    elif query.data == "start_chat":
+        await context.bot.send_message(
+            query.message.chat_id,
+            "💬 Sẵn sàng! Hãy chat với mình.\n"
+            "Bạn có thể hỏi về Việt Nam, gửi ảnh để phân tích, hoặc bất cứ điều gì! 😊"
+        )
+
 def main():
     if not config.BOT_TOKEN:
         print("❌ Thiếu BOT_TOKEN")
         return
     
+    print("=" * 50)
+    print("🇻🇳 LINH BOT - AI Assistant Việt Nam")
+    print("=" * 50)
+    
     if not config.VERCEL_API_KEY:
-        print("⚠️ Thiếu VERCEL_API_KEY")
+        print("⚠️  Thiếu VERCEL_API_KEY - Chat/Code bị hạn chế")
+    else:
+        print("✅ Vercel API: OK")
+    
+    if not config.GEMINI_API_KEY:
+        print("⚠️  Thiếu GEMINI_API_KEY - Vision/Image bị hạn chế")
+    else:
+        print("✅ Gemini API: OK")
+    
+    print("=" * 50)
     
     app = ApplicationBuilder().token(config.BOT_TOKEN).build()
     
+    # Commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("img", cmd_img))
     app.add_handler(CommandHandler("code", cmd_code))
-    app.add_handler(CommandHandler("cancelfile", cmd_cancelfile))
+    app.add_handler(CommandHandler("vision", cmd_vision))
+    app.add_handler(CommandHandler("weather", cmd_weather))
+    app.add_handler(CommandHandler("news", cmd_news))
+    app.add_handler(CommandHandler("exchange", cmd_exchange))
+    app.add_handler(CommandHandler("time", cmd_time))
+    app.add_handler(CommandHandler("translate", cmd_translate))
     app.add_handler(CommandHandler("sendfile", cmd_sendfile))
+    app.add_handler(CommandHandler("cancelfile", cmd_cancelfile))
     
-    app.add_handler(CallbackQueryHandler(on_page_navigation, pattern=r"^pg_"))
+    # Callbacks
+    app.add_handler(CallbackQueryHandler(on_callback_query))
     
+    # Messages
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, on_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     
-    print("🚀 Bot đang chạy!")
+    print("🚀 Bot đang chạy...")
+    print("📸 Vision: Gemini-1.5-Flash")
+    print("🎨 Image Gen: Gemini-2.0-Flash")
+    print("💬 Chat: Claude-3.5 via Vercel")
+    print("👨‍💻 Dev: @cucodoivandep")
+    print("=" * 50)
+    
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
