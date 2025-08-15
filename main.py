@@ -15,6 +15,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "alibaba/qwen-3-32b")
+QUIZ_MODEL = "anthropic/claude-3-haiku"  # Claude cho quiz
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 CTX_TURNS = int(os.getenv("CTX_TURNS", "3"))
 
@@ -46,16 +47,45 @@ chat_history: Dict[int, List[dict]] = {}
 quiz_sessions: Dict[int, dict] = {}
 quiz_mode: Dict[int, bool] = {}
 quiz_count: Dict[int, int] = {}
-quiz_history: Dict[int, List[str]] = {}  # Lưu câu hỏi đã hỏi
+quiz_history: Dict[int, List[str]] = {}
 used_words_global: set = set()
 
-SIMPLE_WORDS = [
-    "trong", "sạch", "đẹp", "tươi", "vui", "mạnh", "nhanh", "xinh", 
-    "sáng", "tối", "cao", "thấp", "to", "nhỏ", "dài", "ngắn",
-    "nóng", "lạnh", "cứng", "mềm", "đen", "trắng", "xanh", "đỏ",
-    "già", "trẻ", "mới", "cũ", "tốt", "xấu", "khó", "dễ",
-    "nặng", "nhẹ", "rộng", "hẹp", "dày", "mỏng", "xa", "gần",
-    "sâu", "cạn", "đông", "tây", "nam", "bắc", "trong", "ngoài"
+# Từ có nghĩa cho game nối từ
+VIETNAMESE_WORDS = [
+    # Danh từ
+    "con", "người", "nhà", "cửa", "bàn", "ghế", "sách", "vở", "bút", "mực",
+    "trường", "học", "lớp", "thầy", "cô", "trò", "bạn", "bè", "anh", "em",
+    "cha", "mẹ", "ông", "bà", "cháu", "con", "gái", "trai", "chồng", "vợ",
+    "đường", "phố", "làng", "xóm", "thành", "thị", "nông", "thôn", "miền", "quê",
+    "sông", "nước", "biển", "hồ", "núi", "đồi", "cây", "lá", "hoa", "quả",
+    "mặt", "trời", "trăng", "sao", "mây", "gió", "mưa", "nắng", "sương", "khói",
+    "tay", "chân", "đầu", "mắt", "mũi", "miệng", "tai", "tóc", "da", "thịt",
+    "áo", "quần", "giày", "dép", "mũ", "nón", "khăn", "túi", "ví", "balo",
+    "cơm", "nước", "bánh", "kẹo", "trái", "rau", "thịt", "cá", "tôm", "cua",
+    "xe", "máy", "ô", "tô", "tàu", "thuyền", "máy", "bay", "đạp", "buýt",
+    
+    # Tính từ
+    "đẹp", "xấu", "tốt", "xấu", "cao", "thấp", "dài", "ngắn", "to", "nhỏ",
+    "nhanh", "chậm", "mới", "cũ", "trẻ", "già", "khỏe", "yếu", "giàu", "nghèo",
+    "vui", "buồn", "sướng", "khổ", "thương", "ghét", "yêu", "quý", "mến", "thích",
+    "sạch", "bẩn", "trong", "đục", "sáng", "tối", "trắng", "đen", "xanh", "đỏ",
+    "ngọt", "đắng", "chua", "cay", "mặn", "nhạt", "thơm", "thối", "tanh", "hôi",
+    "cứng", "mềm", "ướt", "khô", "nóng", "lạnh", "ấm", "mát", "dày", "mỏng",
+    
+    # Động từ
+    "đi", "đến", "về", "lên", "xuống", "vào", "ra", "qua", "lại", "sang",
+    "ăn", "uống", "ngủ", "thức", "nằm", "ngồi", "đứng", "chạy", "nhảy", "múa",
+    "nói", "nghe", "nhìn", "thấy", "hiểu", "biết", "học", "hỏi", "trả", "lời",
+    "làm", "việc", "chơi", "nghỉ", "ngơi", "giúp", "đỡ", "cứu", "vớt", "giữ",
+    "mua", "bán", "đổi", "trao", "nhận", "cho", "tặng", "gửi", "gởi", "nhờ",
+    "yêu", "thương", "ghét", "giận", "hờn", "cười", "khóc", "la", "hét", "gọi",
+    "viết", "vẽ", "đọc", "xem", "ngắm", "sờ", "chạm", "cầm", "nắm", "bắt",
+    "mở", "đóng", "khóa", "cài", "gài", "buộc", "cột", "trói", "tháo", "gỡ",
+    
+    # Từ ghép phổ biến
+    "sinh", "viên", "giáo", "dục", "văn", "hóa", "nghệ", "thuật", "khoa", "học",
+    "công", "nghệ", "kinh", "tế", "chính", "trị", "xã", "hội", "môi", "trường",
+    "thể", "thao", "âm", "nhạc", "điện", "ảnh", "báo", "chí", "truyền", "thông"
 ]
 
 QUIZ_TOPICS = ["lịch sử", "địa lý", "ẩm thực", "văn hóa", "du lịch"]
@@ -66,7 +96,6 @@ def cleanup_memory():
         if len(chat_history[chat_id]) > 4:
             chat_history[chat_id] = chat_history[chat_id][-4:]
     
-    # Xóa quiz history cũ
     for chat_id in list(quiz_history.keys()):
         if len(quiz_history[chat_id]) > 20:
             quiz_history[chat_id] = quiz_history[chat_id][-20:]
@@ -206,29 +235,35 @@ class NoiTuGame:
     def start(self) -> str:
         global used_words_global
         
-        available_starts = []
-        for w1 in SIMPLE_WORDS:
-            for w2 in SIMPLE_WORDS:
-                if w1 != w2:
-                    compound = f"{w1} {w2}"
-                    if compound not in used_words_global:
-                        available_starts.append(compound)
+        # Chọn từ ghép có nghĩa để bắt đầu
+        start_compounds = [
+            "học sinh", "sinh viên", "viên chức", "chức năng", "năng lực",
+            "công việc", "việc làm", "làm việc", "giáo viên", "viên mãn",
+            "thành phố", "phố phường", "phường xá", "xã hội", "hội họp",
+            "đất nước", "nước mắt", "mắt kính", "kính trọng", "trọng yếu",
+            "con người", "người yêu", "yêu thương", "thương mại", "mại dâm",
+            "bạn bè", "bè phái", "phái đoàn", "đoàn kết", "kết thúc"
+        ]
+        
+        available_starts = [s for s in start_compounds if s not in used_words_global]
         
         if not available_starts:
             used_words_global.clear()
-            available_starts = [f"{w1} {w2}" for w1 in SIMPLE_WORDS for w2 in SIMPLE_WORDS if w1 != w2]
+            available_starts = start_compounds
         
         self.current_word = random.choice(available_starts)
         self.history = [self.current_word]
         used_words_global.add(self.current_word)
         
+        last_word = self.current_word.split()[-1]
+        
         return f"""🎮 **Nối Từ với Linh!**
 
-Luật: Nối từ ghép 2 từ tiếng Việt
-VD: trong sạch → sạch sẽ
+📖 Luật: Nối từ/cụm từ có nghĩa tiếng Việt
+VD: học sinh → sinh viên → viên chức
 
 🎯 **{self.current_word}**
-Nối với '{self.current_word.split()[1]}' | Gõ 'thua' kết thúc"""
+Nối với từ '{last_word}' | Gõ 'thua' kết thúc"""
         
     def play_word(self, word: str) -> Tuple[bool, str]:
         global used_words_global
@@ -238,41 +273,85 @@ Nối với '{self.current_word.split()[1]}' | Gõ 'thua' kết thúc"""
             return True, f"📊 Điểm: {self.score} | {len(self.history)} từ"
         
         parts = word.split()
-        if len(parts) != 2:
-            return False, "❌ Phải 2 từ ghép!"
+        if len(parts) < 1 or len(parts) > 3:
+            return False, "❌ Nhập từ đơn hoặc cụm từ 2-3 từ!"
         
-        last_word = self.current_word.split()[1]
-        if parts[0] != last_word:
-            return False, f"❌ Phải bắt đầu '{last_word}'"
+        # Lấy từ cuối của từ hiện tại
+        last_word = self.current_word.split()[-1]
+        first_word = parts[0]
+        
+        if first_word != last_word:
+            return False, f"❌ Phải bắt đầu bằng '{last_word}'"
             
         if word in self.history or word in used_words_global:
             return False, "❌ Từ đã dùng rồi!"
+        
+        # Kiểm tra từ có nghĩa
+        valid = False
+        if len(parts) == 1:
+            # Từ đơn phải trong danh sách
+            valid = word in VIETNAMESE_WORDS
+        else:
+            # Cụm từ phải có các phần trong danh sách
+            valid = all(p in VIETNAMESE_WORDS for p in parts)
+        
+        if not valid:
+            return False, "❌ Từ không có nghĩa hoặc không phổ biến!"
             
         self.history.append(word)
         used_words_global.add(word)
         self.current_word = word
         self.player_words += 1
-        self.score += 100
+        points = len(word.replace(" ", "")) * 10
+        self.score += points
         
-        possible = []
-        for w in SIMPLE_WORDS:
-            if w != parts[1]:
-                compound = f"{parts[1]} {w}"
-                if compound not in self.history and compound not in used_words_global:
-                    possible.append(compound)
+        # Bot tìm từ để nối
+        bot_word = self.find_bot_word(parts[-1])
         
-        if possible:
-            bot_word = random.choice(possible[:10])
+        if bot_word:
             self.history.append(bot_word)
             used_words_global.add(bot_word)
             self.current_word = bot_word
             self.bot_words += 1
-            return False, f"✅ +100đ\n🤖 Linh: **{bot_word}**\n📊 {self.score}đ | Nối '{bot_word.split()[1]}'"
+            bot_last_word = bot_word.split()[-1]
+            return False, f"✅ Tốt! (+{points}đ)\n\n🤖 Linh: **{bot_word}**\n\n📊 Điểm: {self.score} | Nối với '{bot_last_word}'"
         else:
             self.score += 500
-            return True, f"🎉 **THẮNG!** +500đ\n📊 Tổng: {self.score} điểm"
+            return True, f"🎉 **THẮNG!** Bot không nối được!\n\n📊 Tổng điểm: {self.score} (+500 bonus)"
+            
+    def find_bot_word(self, start_word: str) -> Optional[str]:
+        possible = []
+        
+        # Tìm từ đơn
+        if start_word in VIETNAMESE_WORDS:
+            possible.append(start_word)
+        
+        # Tìm từ ghép 2 từ
+        for word in VIETNAMESE_WORDS:
+            if word != start_word:
+                compound = f"{start_word} {word}"
+                if compound not in self.history and compound not in used_words_global:
+                    possible.append(compound)
+        
+        # Tìm từ ghép 3 từ phổ biến
+        common_compounds = [
+            f"{start_word} sinh viên", f"{start_word} giáo viên",
+            f"{start_word} công nhân", f"{start_word} nông dân",
+            f"{start_word} học sinh", f"{start_word} bác sĩ"
+        ]
+        
+        for compound in common_compounds:
+            parts = compound.split()
+            if len(parts) <= 3 and all(p in VIETNAMESE_WORDS for p in parts):
+                if compound not in self.history and compound not in used_words_global:
+                    possible.append(compound)
+        
+        if possible:
+            return random.choice(possible[:15])
+        return None
 
-async def call_qwen_api(messages: List[dict], max_tokens: int = 400) -> str:
+async def call_api(messages: List[dict], model: str = None, max_tokens: int = 400) -> str:
+    """Gọi API với model được chỉ định"""
     try:
         headers = {
             "Authorization": f"Bearer {VERCEL_API_KEY}",
@@ -280,11 +359,11 @@ async def call_qwen_api(messages: List[dict], max_tokens: int = 400) -> str:
         }
         
         data = {
-            "model": CHAT_MODEL,
+            "model": model or CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.8,  # Tăng để đa dạng hơn
-            "top_p": 0.95
+            "temperature": 0.7,
+            "top_p": 0.9
         }
         
         response = requests.post(
@@ -306,7 +385,7 @@ async def call_qwen_api(messages: List[dict], max_tokens: int = 400) -> str:
         return None
 
 async def generate_quiz(chat_id: int) -> dict:
-    """Tạo quiz mới không lặp"""
+    """Tạo quiz với Claude 3 Haiku - độ chính xác cao"""
     global quiz_history
     
     if chat_id not in quiz_history:
@@ -314,41 +393,54 @@ async def generate_quiz(chat_id: int) -> dict:
     
     topic = random.choice(QUIZ_TOPICS)
     
-    # Tạo prompt với yêu cầu không lặp
+    # Prompt tối ưu cho Claude
     topic_prompts = {
-        "lịch sử": "Tạo câu hỏi về lịch sử Việt Nam (vua chúa, triều đại, chiến tranh, sự kiện quan trọng)",
-        "địa lý": "Tạo câu hỏi về địa lý Việt Nam (tỉnh thành, sông núi, biển đảo, vùng miền)",
-        "ẩm thực": "Tạo câu hỏi về ẩm thực Việt Nam (món ăn đặc sản, nguyên liệu, cách chế biến)",
-        "văn hóa": "Tạo câu hỏi về văn hóa Việt Nam (lễ hội, phong tục, tín ngưỡng, nghệ thuật)",
-        "du lịch": "Tạo câu hỏi về du lịch Việt Nam (điểm đến nổi tiếng, di tích, danh lam)"
+        "lịch sử": """Tạo câu hỏi về lịch sử Việt Nam với thông tin CHÍNH XÁC TUYỆT ĐỐI.
+Chỉ hỏi về các sự kiện, năm, nhân vật đã được xác nhận trong sách giáo khoa.""",
+        
+        "địa lý": """Tạo câu hỏi về địa lý Việt Nam với thông tin CHÍNH XÁC.
+Hỏi về: tỉnh thành, sông núi, diện tích, dân số, vị trí địa lý.""",
+        
+        "ẩm thực": """Tạo câu hỏi về ẩm thực Việt Nam.
+Hỏi về món ăn truyền thống, đặc sản vùng miền, nguyên liệu.""",
+        
+        "văn hóa": """Tạo câu hỏi về văn hóa Việt Nam.
+Hỏi về lễ hội, phong tục, di sản văn hóa, nghệ thuật truyền thống.""",
+        
+        "du lịch": """Tạo câu hỏi về du lịch Việt Nam.
+Hỏi về điểm du lịch nổi tiếng, di tích lịch sử, danh lam thắng cảnh."""
     }
     
-    # Thêm danh sách câu đã hỏi vào prompt
-    avoid_questions = ""
+    # Thêm câu đã hỏi để tránh lặp
+    avoid_text = ""
     if quiz_history[chat_id]:
-        recent = quiz_history[chat_id][-5:]  # 5 câu gần nhất
-        avoid_questions = f"\nTRÁNH các câu đã hỏi: {'; '.join(recent)}"
+        recent = quiz_history[chat_id][-10:]
+        avoid_text = f"\n\nKHÔNG lặp lại các câu đã hỏi:\n" + "\n".join(f"- {q}" for q in recent)
     
     prompt = f"""{topic_prompts[topic]}
 
-TẠO CÂU HỎI MỚI, KHÔNG TRÙNG LẶP{avoid_questions}
+QUAN TRỌNG: Thông tin phải CHÍNH XÁC 100%, có thể kiểm chứng.{avoid_text}
 
-Format CHÍNH XÁC:
-Câu hỏi: [câu hỏi mới và thú vị]
+Format bắt buộc:
+Câu hỏi: [câu hỏi rõ ràng]
 A. [đáp án]
-B. [đáp án]  
+B. [đáp án]
 C. [đáp án]
 D. [đáp án]
-Đáp án: [A/B/C/D]
-Giải thích: [thông tin bổ ích]"""
+Đáp án: [chỉ A hoặc B hoặc C hoặc D]
+Giải thích: [thông tin chính xác với nguồn đáng tin cậy]"""
 
     messages = [
-        {"role": "system", "content": f"Tạo câu hỏi {topic} Việt Nam. MỖI LẦN phải là câu KHÁC NHAU. Sáng tạo và đa dạng."},
+        {
+            "role": "system", 
+            "content": f"Bạn là chuyên gia về Việt Nam. Tạo câu hỏi {topic} với độ chính xác tuyệt đối. KHÔNG bịa đặt thông tin."
+        },
         {"role": "user", "content": prompt}
     ]
     
     try:
-        response = await call_qwen_api(messages, 300)
+        # Dùng Claude 3 Haiku cho quiz
+        response = await call_api(messages, model=QUIZ_MODEL, max_tokens=350)
         
         if not response:
             return None
@@ -371,10 +463,9 @@ Giải thích: [thông tin bổ ích]"""
             elif line.startswith("Giải thích:"):
                 quiz["explanation"] = line.replace("Giải thích:", "").strip()
         
-        # Kiểm tra quiz hợp lệ
         if quiz["question"] and len(quiz["options"]) == 4 and quiz["correct"]:
             # Lưu câu hỏi vào history
-            quiz_history[chat_id].append(quiz["question"][:50])  # Lưu 50 ký tự đầu
+            quiz_history[chat_id].append(quiz["question"][:60])
             return quiz
         
         return None
@@ -389,14 +480,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🎮 **Game:**
 /guessnumber - Đoán số
-/noitu - Nối từ (không lặp)
+/noitu - Nối từ có nghĩa
 /quiz - Câu đố về Việt Nam
 /stopquiz - Dừng câu đố
 
 🏆 /leaderboard - BXH 24h
 📊 /stats - Điểm của bạn
 
-📚 Quiz đa dạng: Lịch sử, Địa lý, Ẩm thực, Văn hóa, Du lịch!
+💡 Nối từ dùng từ có nghĩa thực tế!
+🎯 Quiz dùng Claude AI - độ chính xác cao!
 """)
 
 async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -442,8 +534,7 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiz_mode[chat_id] = True
     quiz_count[chat_id] = 1
     
-    # Tạo câu hỏi mới
-    loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi...")
+    loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi với Claude AI...")
     
     quiz = await generate_quiz(chat_id)
     
@@ -554,34 +645,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if answer == quiz["correct"]:
             save_score(user.id, username, "quiz", 200)
-            result = f"✅ Đúng! (+200đ)\n{quiz['explanation']}"
+            result = f"✅ Chính xác! (+200đ)\n\n{quiz['explanation']}"
         else:
-            result = f"❌ Sai! Đáp án: {quiz['correct']}\n{quiz['explanation']}"
+            result = f"❌ Sai rồi! Đáp án: {quiz['correct']}\n\n{quiz['explanation']}"
         
         del quiz_sessions[chat_id]
         
-        # Hiển thị kết quả
         await query.message.edit_text(result)
         
-        # Nếu còn quiz mode, thông báo đợi và tạo câu mới
         if chat_id in quiz_mode:
-            # Gửi thông báo đợi
             wait_msg = await context.bot.send_message(
                 chat_id, 
-                "⏳ **Đợi 5 giây để có câu tiếp theo...**"
+                "⏳ **Đợi 5 giây cho câu tiếp theo...**"
             )
             
-            # Đợi 5 giây
             await asyncio.sleep(5)
-            
-            # Xóa thông báo đợi
             await wait_msg.delete()
             
-            # Tăng số câu
             quiz_count[chat_id] = quiz_count.get(chat_id, 1) + 1
             
-            # Tạo câu mới với loading
-            loading_msg = await context.bot.send_message(chat_id, "⏳ Đang tạo câu hỏi mới...")
+            loading_msg = await context.bot.send_message(chat_id, "⏳ Claude AI đang tạo câu hỏi mới...")
             
             quiz = await generate_quiz(chat_id)
             
@@ -661,7 +744,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     messages.extend(chat_history[chat_id])
     
-    response = await call_qwen_api(messages, 300)
+    response = await call_api(messages, max_tokens=300)
     
     if response:
         chat_history[chat_id].append({"role": "assistant", "content": response})
@@ -684,7 +767,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Bot started with unique quiz questions! 🎯")
+    logger.info("Bot started with meaningful words & Claude quiz! 🎯")
     application.run_polling()
 
 if __name__ == "__main__":
