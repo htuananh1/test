@@ -456,22 +456,22 @@ async def get_weather(city: str) -> str:
         return "😩 Lỗi rồi! Check thời tiết trên mạng đi!"
 
 async def generate_quiz() -> dict:
-    prompt = """Tạo câu đố vui tiếng Việt theo format:
+    prompt = """Tạo câu đố vui tiếng Việt theo format CHÍNH XÁC sau (mỗi đáp án chỉ xuất hiện 1 lần):
 
-Câu hỏi: [câu hỏi thú vị về Việt Nam hoặc kiến thức tổng quát]
+Câu hỏi: [câu hỏi]
 A. [đáp án A]
 B. [đáp án B]
 C. [đáp án C]
 D. [đáp án D]
-Đáp án: [A/B/C/D]
-Giải thích: [giải thích ngắn thú vị]"""
+Đáp án: [chỉ chữ A hoặc B hoặc C hoặc D]
+Giải thích: [giải thích]"""
 
     messages = [
-        {"role": "system", "content": "Bạn là Linh, cô gái Việt Nam thông minh và hài hước. Tạo câu đố vui về Việt Nam, văn hóa, lịch sử, ẩm thực, địa lý."},
+        {"role": "system", "content": "Bạn là Linh. Tạo 1 câu đố về Việt Nam (văn hóa, lịch sử, ẩm thực, địa lý). Mỗi đáp án A,B,C,D chỉ viết 1 lần, không lặp lại."},
         {"role": "user", "content": prompt}
     ]
     
-    response = await call_vercel_api(messages, max_tokens=500)
+    response = await call_vercel_api(messages, max_tokens=400)
     
     lines = response.strip().split('\n')
     quiz = {
@@ -481,16 +481,33 @@ Giải thích: [giải thích ngắn thú vị]"""
         "explanation": ""
     }
     
+    options_found = {"A": False, "B": False, "C": False, "D": False}
+    
     for line in lines:
         line = line.strip()
         if line.startswith("Câu hỏi:"):
             quiz["question"] = line.replace("Câu hỏi:", "").strip()
-        elif line.startswith(("A.", "B.", "C.", "D.")):
+        elif line.startswith("A.") and not options_found["A"]:
             quiz["options"].append(line)
+            options_found["A"] = True
+        elif line.startswith("B.") and not options_found["B"]:
+            quiz["options"].append(line)
+            options_found["B"] = True
+        elif line.startswith("C.") and not options_found["C"]:
+            quiz["options"].append(line)
+            options_found["C"] = True
+        elif line.startswith("D.") and not options_found["D"]:
+            quiz["options"].append(line)
+            options_found["D"] = True
         elif line.startswith("Đáp án:"):
-            quiz["correct"] = line.replace("Đáp án:", "").strip()[0]
+            answer = line.replace("Đáp án:", "").strip()
+            if answer and answer[0] in ["A", "B", "C", "D"]:
+                quiz["correct"] = answer[0]
         elif line.startswith("Giải thích:"):
             quiz["explanation"] = line.replace("Giải thích:", "").strip()
+    
+    if len(quiz["options"]) != 4:
+        quiz["options"] = quiz["options"][:4]
             
     return quiz
 
@@ -654,7 +671,7 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     quiz = await generate_quiz()
     
-    if quiz["question"] and quiz["options"]:
+    if quiz["question"] and len(quiz["options"]) == 4:
         quiz_sessions[chat_id] = quiz
         
         keyboard = []
