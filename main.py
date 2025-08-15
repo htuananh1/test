@@ -6,16 +6,16 @@ import requests
 import json
 import sqlite3
 import gc
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import Dict, List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters, JobQueue
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "alibaba/qwen-3-32b")
-QUIZ_MODEL = "anthropic/claude-3-haiku"  # Claude cho quiz
+QUIZ_MODEL = "anthropic/claude-3-haiku"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 CTX_TURNS = int(os.getenv("CTX_TURNS", "3"))
 
@@ -37,6 +37,13 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS chats (
+            chat_id INTEGER PRIMARY KEY,
+            chat_type TEXT,
+            title TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -48,47 +55,40 @@ quiz_sessions: Dict[int, dict] = {}
 quiz_mode: Dict[int, bool] = {}
 quiz_count: Dict[int, int] = {}
 quiz_history: Dict[int, List[str]] = {}
-used_words_global: set = set()
+word_game_sessions: Dict[int, dict] = {}
 
-# Từ có nghĩa cho game nối từ
-VIETNAMESE_WORDS = [
-    # Danh từ
-    "con", "người", "nhà", "cửa", "bàn", "ghế", "sách", "vở", "bút", "mực",
-    "trường", "học", "lớp", "thầy", "cô", "trò", "bạn", "bè", "anh", "em",
-    "cha", "mẹ", "ông", "bà", "cháu", "con", "gái", "trai", "chồng", "vợ",
-    "đường", "phố", "làng", "xóm", "thành", "thị", "nông", "thôn", "miền", "quê",
-    "sông", "nước", "biển", "hồ", "núi", "đồi", "cây", "lá", "hoa", "quả",
-    "mặt", "trời", "trăng", "sao", "mây", "gió", "mưa", "nắng", "sương", "khói",
-    "tay", "chân", "đầu", "mắt", "mũi", "miệng", "tai", "tóc", "da", "thịt",
-    "áo", "quần", "giày", "dép", "mũ", "nón", "khăn", "túi", "ví", "balo",
-    "cơm", "nước", "bánh", "kẹo", "trái", "rau", "thịt", "cá", "tôm", "cua",
-    "xe", "máy", "ô", "tô", "tàu", "thuyền", "máy", "bay", "đạp", "buýt",
-    
-    # Tính từ
-    "đẹp", "xấu", "tốt", "xấu", "cao", "thấp", "dài", "ngắn", "to", "nhỏ",
-    "nhanh", "chậm", "mới", "cũ", "trẻ", "già", "khỏe", "yếu", "giàu", "nghèo",
-    "vui", "buồn", "sướng", "khổ", "thương", "ghét", "yêu", "quý", "mến", "thích",
-    "sạch", "bẩn", "trong", "đục", "sáng", "tối", "trắng", "đen", "xanh", "đỏ",
-    "ngọt", "đắng", "chua", "cay", "mặn", "nhạt", "thơm", "thối", "tanh", "hôi",
-    "cứng", "mềm", "ướt", "khô", "nóng", "lạnh", "ấm", "mát", "dày", "mỏng",
-    
-    # Động từ
-    "đi", "đến", "về", "lên", "xuống", "vào", "ra", "qua", "lại", "sang",
-    "ăn", "uống", "ngủ", "thức", "nằm", "ngồi", "đứng", "chạy", "nhảy", "múa",
-    "nói", "nghe", "nhìn", "thấy", "hiểu", "biết", "học", "hỏi", "trả", "lời",
-    "làm", "việc", "chơi", "nghỉ", "ngơi", "giúp", "đỡ", "cứu", "vớt", "giữ",
-    "mua", "bán", "đổi", "trao", "nhận", "cho", "tặng", "gửi", "gởi", "nhờ",
-    "yêu", "thương", "ghét", "giận", "hờn", "cười", "khóc", "la", "hét", "gọi",
-    "viết", "vẽ", "đọc", "xem", "ngắm", "sờ", "chạm", "cầm", "nắm", "bắt",
-    "mở", "đóng", "khóa", "cài", "gài", "buộc", "cột", "trói", "tháo", "gỡ",
-    
-    # Từ ghép phổ biến
-    "sinh", "viên", "giáo", "dục", "văn", "hóa", "nghệ", "thuật", "khoa", "học",
-    "công", "nghệ", "kinh", "tế", "chính", "trị", "xã", "hội", "môi", "trường",
-    "thể", "thao", "âm", "nhạc", "điện", "ảnh", "báo", "chí", "truyền", "thông"
+# Từ vựng cho game Vua Tiếng Việt
+VIETNAMESE_VOCABULARY = [
+    "tuyệt vời", "hạnh phúc", "yêu thương", "gia đình", "tình bạn",
+    "thành công", "nỗ lực", "cố gắng", "kiên trì", "bền vững",
+    "tự do", "độc lập", "dân tộc", "đất nước", "quê hương",
+    "văn hóa", "truyền thống", "lịch sử", "di sản", "danh lam",
+    "thắng cảnh", "du lịch", "khám phá", "trải nghiệm", "kỷ niệm",
+    "học tập", "giáo dục", "tri thức", "khoa học", "công nghệ",
+    "sáng tạo", "đổi mới", "phát triển", "tiến bộ", "hiện đại",
+    "thiên nhiên", "môi trường", "bảo vệ", "xanh sạch", "bền vững",
+    "sức khỏe", "hạnh phúc", "an lành", "bình yên", "ấm áp"
 ]
 
 QUIZ_TOPICS = ["lịch sử", "địa lý", "ẩm thực", "văn hóa", "du lịch"]
+
+def save_chat_info(chat_id: int, chat_type: str, title: str = None):
+    """Lưu thông tin chat để gửi lời chúc"""
+    conn = sqlite3.connect('bot_scores.db')
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO chats (chat_id, chat_type, title) VALUES (?, ?, ?)',
+              (chat_id, chat_type, title))
+    conn.commit()
+    conn.close()
+
+def get_all_chats():
+    """Lấy danh sách tất cả chat"""
+    conn = sqlite3.connect('bot_scores.db')
+    c = conn.cursor()
+    c.execute('SELECT chat_id, chat_type FROM chats')
+    results = c.fetchall()
+    conn.close()
+    return results
 
 def cleanup_memory():
     global chat_history, quiz_history
@@ -222,133 +222,73 @@ class GuessNumberGame:
         remaining = self.max_attempts - self.attempts
         return False, f"{guess} {hint}! Còn {remaining} lượt | 💰 {self.score}đ | /hint"
 
-class NoiTuGame:
+class VuaTiengVietGame:
     def __init__(self, chat_id: int):
         self.chat_id = chat_id
-        self.history = []
-        self.score = 0
         self.current_word = ""
+        self.scrambled = ""
+        self.attempts = 0
+        self.max_attempts = 3
+        self.score = 0
         self.start_time = datetime.now()
-        self.player_words = 0
-        self.bot_words = 0
         
-    def start(self) -> str:
-        global used_words_global
+    def start_new_round(self) -> str:
+        """Bắt đầu câu mới"""
+        self.current_word = random.choice(VIETNAMESE_VOCABULARY)
+        self.scrambled = self.scramble_word(self.current_word)
+        self.attempts = 0
         
-        # Chọn từ ghép có nghĩa để bắt đầu
-        start_compounds = [
-            "học sinh", "sinh viên", "viên chức", "chức năng", "năng lực",
-            "công việc", "việc làm", "làm việc", "giáo viên", "viên mãn",
-            "thành phố", "phố phường", "phường xá", "xã hội", "hội họp",
-            "đất nước", "nước mắt", "mắt kính", "kính trọng", "trọng yếu",
-            "con người", "người yêu", "yêu thương", "thương mại", "mại dâm",
-            "bạn bè", "bè phái", "phái đoàn", "đoàn kết", "kết thúc"
-        ]
-        
-        available_starts = [s for s in start_compounds if s not in used_words_global]
-        
-        if not available_starts:
-            used_words_global.clear()
-            available_starts = start_compounds
-        
-        self.current_word = random.choice(available_starts)
-        self.history = [self.current_word]
-        used_words_global.add(self.current_word)
-        
-        last_word = self.current_word.split()[-1]
-        
-        return f"""🎮 **Nối Từ với Linh!**
+        return f"""🎮 **VUA TIẾNG VIỆT**
 
-📖 Luật: Nối từ/cụm từ có nghĩa tiếng Việt
-VD: học sinh → sinh viên → viên chức
+Sắp xếp các chữ cái sau thành từ có nghĩa:
 
-🎯 **{self.current_word}**
-Nối với từ '{last_word}' | Gõ 'thua' kết thúc"""
+🔤 **{self.scrambled}**
+
+💡 Gợi ý: {len(self.current_word.replace(' ', ''))} chữ cái
+📝 Bạn có {self.max_attempts} lần thử
+
+Gõ đáp án của bạn!"""
         
-    def play_word(self, word: str) -> Tuple[bool, str]:
-        global used_words_global
-        word = word.lower().strip()
+    def scramble_word(self, word: str) -> str:
+        """Xáo trộn chữ cái"""
+        # Tách từng ký tự (bao gồm dấu)
+        chars = list(word.replace(' ', ''))
         
-        if word == "thua":
-            return True, f"📊 Điểm: {self.score} | {len(self.history)} từ"
+        # Xáo trộn
+        scrambled = chars.copy()
+        while ''.join(scrambled) == word.replace(' ', ''):
+            random.shuffle(scrambled)
         
-        parts = word.split()
-        if len(parts) < 1 or len(parts) > 3:
-            return False, "❌ Nhập từ đơn hoặc cụm từ 2-3 từ!"
+        # Trả về với dấu /
+        return ' / '.join(scrambled)
         
-        # Lấy từ cuối của từ hiện tại
-        last_word = self.current_word.split()[-1]
-        first_word = parts[0]
+    def check_answer(self, answer: str) -> Tuple[bool, str]:
+        """Kiểm tra đáp án"""
+        answer = answer.lower().strip()
+        self.attempts += 1
         
-        if first_word != last_word:
-            return False, f"❌ Phải bắt đầu bằng '{last_word}'"
+        if answer == self.current_word:
+            points = (self.max_attempts - self.attempts + 1) * 100
+            self.score += points
+            time_taken = (datetime.now() - self.start_time).seconds
             
-        if word in self.history or word in used_words_global:
-            return False, "❌ Từ đã dùng rồi!"
-        
-        # Kiểm tra từ có nghĩa
-        valid = False
-        if len(parts) == 1:
-            # Từ đơn phải trong danh sách
-            valid = word in VIETNAMESE_WORDS
-        else:
-            # Cụm từ phải có các phần trong danh sách
-            valid = all(p in VIETNAMESE_WORDS for p in parts)
-        
-        if not valid:
-            return False, "❌ Từ không có nghĩa hoặc không phổ biến!"
+            return True, f"""✅ **CHÍNH XÁC!**
+
+Đáp án: **{self.current_word}**
+Điểm: +{points} (Tổng: {self.score})
+Thời gian: {time_taken}s
+
+Gõ 'tiếp' để chơi tiếp hoặc 'dừng' để kết thúc"""
             
-        self.history.append(word)
-        used_words_global.add(word)
-        self.current_word = word
-        self.player_words += 1
-        points = len(word.replace(" ", "")) * 10
-        self.score += points
-        
-        # Bot tìm từ để nối
-        bot_word = self.find_bot_word(parts[-1])
-        
-        if bot_word:
-            self.history.append(bot_word)
-            used_words_global.add(bot_word)
-            self.current_word = bot_word
-            self.bot_words += 1
-            bot_last_word = bot_word.split()[-1]
-            return False, f"✅ Tốt! (+{points}đ)\n\n🤖 Linh: **{bot_word}**\n\n📊 Điểm: {self.score} | Nối với '{bot_last_word}'"
-        else:
-            self.score += 500
-            return True, f"🎉 **THẮNG!** Bot không nối được!\n\n📊 Tổng điểm: {self.score} (+500 bonus)"
+        if self.attempts >= self.max_attempts:
+            return False, f"""❌ Hết lượt!
+
+Đáp án là: **{self.current_word}**
+
+Gõ 'tiếp' để chơi câu mới hoặc 'dừng' để kết thúc"""
             
-    def find_bot_word(self, start_word: str) -> Optional[str]:
-        possible = []
-        
-        # Tìm từ đơn
-        if start_word in VIETNAMESE_WORDS:
-            possible.append(start_word)
-        
-        # Tìm từ ghép 2 từ
-        for word in VIETNAMESE_WORDS:
-            if word != start_word:
-                compound = f"{start_word} {word}"
-                if compound not in self.history and compound not in used_words_global:
-                    possible.append(compound)
-        
-        # Tìm từ ghép 3 từ phổ biến
-        common_compounds = [
-            f"{start_word} sinh viên", f"{start_word} giáo viên",
-            f"{start_word} công nhân", f"{start_word} nông dân",
-            f"{start_word} học sinh", f"{start_word} bác sĩ"
-        ]
-        
-        for compound in common_compounds:
-            parts = compound.split()
-            if len(parts) <= 3 and all(p in VIETNAMESE_WORDS for p in parts):
-                if compound not in self.history and compound not in used_words_global:
-                    possible.append(compound)
-        
-        if possible:
-            return random.choice(possible[:15])
-        return None
+        remaining = self.max_attempts - self.attempts
+        return False, f"❌ Sai rồi! Còn {remaining} lần thử\n\n🔤 {self.scrambled}"
 
 async def call_api(messages: List[dict], model: str = None, max_tokens: int = 400) -> str:
     """Gọi API với model được chỉ định"""
@@ -362,7 +302,7 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
             "model": model or CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.7,
+            "temperature": 0.5,  # Giảm để chính xác hơn
             "top_p": 0.9
         }
         
@@ -385,7 +325,7 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
         return None
 
 async def generate_quiz(chat_id: int) -> dict:
-    """Tạo quiz với Claude 3 Haiku - độ chính xác cao"""
+    """Tạo quiz với Claude - cải thiện độ chính xác"""
     global quiz_history
     
     if chat_id not in quiz_history:
@@ -393,54 +333,36 @@ async def generate_quiz(chat_id: int) -> dict:
     
     topic = random.choice(QUIZ_TOPICS)
     
-    # Prompt tối ưu cho Claude
-    topic_prompts = {
-        "lịch sử": """Tạo câu hỏi về lịch sử Việt Nam với thông tin CHÍNH XÁC TUYỆT ĐỐI.
-Chỉ hỏi về các sự kiện, năm, nhân vật đã được xác nhận trong sách giáo khoa.""",
-        
-        "địa lý": """Tạo câu hỏi về địa lý Việt Nam với thông tin CHÍNH XÁC.
-Hỏi về: tỉnh thành, sông núi, diện tích, dân số, vị trí địa lý.""",
-        
-        "ẩm thực": """Tạo câu hỏi về ẩm thực Việt Nam.
-Hỏi về món ăn truyền thống, đặc sản vùng miền, nguyên liệu.""",
-        
-        "văn hóa": """Tạo câu hỏi về văn hóa Việt Nam.
-Hỏi về lễ hội, phong tục, di sản văn hóa, nghệ thuật truyền thống.""",
-        
-        "du lịch": """Tạo câu hỏi về du lịch Việt Nam.
-Hỏi về điểm du lịch nổi tiếng, di tích lịch sử, danh lam thắng cảnh."""
-    }
-    
-    # Thêm câu đã hỏi để tránh lặp
-    avoid_text = ""
-    if quiz_history[chat_id]:
-        recent = quiz_history[chat_id][-10:]
-        avoid_text = f"\n\nKHÔNG lặp lại các câu đã hỏi:\n" + "\n".join(f"- {q}" for q in recent)
-    
-    prompt = f"""{topic_prompts[topic]}
+    # Prompt rõ ràng hơn
+    prompt = f"""Tạo 1 câu hỏi trắc nghiệm về {topic} Việt Nam.
 
-QUAN TRỌNG: Thông tin phải CHÍNH XÁC 100%, có thể kiểm chứng.{avoid_text}
+YÊU CẦU BẮT BUỘC:
+1. Câu hỏi phải rõ ràng, cụ thể
+2. 4 đáp án phải liên quan trực tiếp đến câu hỏi
+3. Chỉ có 1 đáp án đúng
+4. Thông tin phải chính xác 100%
 
-Format bắt buộc:
-Câu hỏi: [câu hỏi rõ ràng]
-A. [đáp án]
-B. [đáp án]
-C. [đáp án]
-D. [đáp án]
-Đáp án: [chỉ A hoặc B hoặc C hoặc D]
-Giải thích: [thông tin chính xác với nguồn đáng tin cậy]"""
+VÍ DỤ MẪU:
+Câu hỏi: Thủ đô của Việt Nam là gì?
+A. Hà Nội
+B. Hồ Chí Minh
+C. Đà Nẵng
+D. Cần Thơ
+Đáp án: A
+Giải thích: Hà Nội là thủ đô của Việt Nam từ năm 1010
+
+BÂY GIỜ TẠO CÂU HỎI VỀ {topic.upper()}:"""
 
     messages = [
         {
             "role": "system", 
-            "content": f"Bạn là chuyên gia về Việt Nam. Tạo câu hỏi {topic} với độ chính xác tuyệt đối. KHÔNG bịa đặt thông tin."
+            "content": "Bạn là chuyên gia về Việt Nam. Tạo câu hỏi trắc nghiệm với 4 đáp án liên quan và chỉ 1 đáp án đúng."
         },
         {"role": "user", "content": prompt}
     ]
     
     try:
-        # Dùng Claude 3 Haiku cho quiz
-        response = await call_api(messages, model=QUIZ_MODEL, max_tokens=350)
+        response = await call_api(messages, model=QUIZ_MODEL, max_tokens=400)
         
         if not response:
             return None
@@ -453,9 +375,14 @@ Giải thích: [thông tin chính xác với nguồn đáng tin cậy]"""
             line = line.strip()
             if line.startswith("Câu hỏi:"):
                 quiz["question"] = line.replace("Câu hỏi:", "").strip()
-            elif line.startswith(("A.", "B.", "C.", "D.")):
-                if len(quiz["options"]) < 4:
-                    quiz["options"].append(line)
+            elif line.startswith("A."):
+                quiz["options"].append(line)
+            elif line.startswith("B."):
+                quiz["options"].append(line)
+            elif line.startswith("C."):
+                quiz["options"].append(line)
+            elif line.startswith("D."):
+                quiz["options"].append(line)
             elif line.startswith("Đáp án:"):
                 answer = line.replace("Đáp án:", "").strip()
                 if answer and answer[0] in "ABCD":
@@ -463,8 +390,8 @@ Giải thích: [thông tin chính xác với nguồn đáng tin cậy]"""
             elif line.startswith("Giải thích:"):
                 quiz["explanation"] = line.replace("Giải thích:", "").strip()
         
+        # Kiểm tra quiz hợp lệ
         if quiz["question"] and len(quiz["options"]) == 4 and quiz["correct"]:
-            # Lưu câu hỏi vào history
             quiz_history[chat_id].append(quiz["question"][:60])
             return quiz
         
@@ -474,21 +401,88 @@ Giải thích: [thông tin chính xác với nguồn đáng tin cậy]"""
         logger.error(f"Generate quiz error: {e}")
         return None
 
+async def generate_word_game() -> dict:
+    """Tạo câu hỏi cho game Vua Tiếng Việt với Claude"""
+    prompt = """Tạo 1 từ/cụm từ tiếng Việt phổ biến để chơi game sắp xếp chữ cái.
+
+Yêu cầu:
+- Từ 2-4 âm tiết
+- Là từ có nghĩa, phổ biến
+- Phù hợp mọi lứa tuổi
+
+Format:
+Từ: [từ tiếng Việt]
+Gợi ý: [gợi ý về nghĩa của từ]"""
+
+    messages = [
+        {"role": "system", "content": "Tạo từ tiếng Việt cho game sắp xếp chữ cái."},
+        {"role": "user", "content": prompt}
+    ]
+    
+    try:
+        response = await call_api(messages, model=QUIZ_MODEL, max_tokens=100)
+        
+        if response:
+            lines = response.strip().split('\n')
+            word_data = {"word": "", "hint": ""}
+            
+            for line in lines:
+                if line.startswith("Từ:"):
+                    word_data["word"] = line.replace("Từ:", "").strip()
+                elif line.startswith("Gợi ý:"):
+                    word_data["hint"] = line.replace("Gợi ý:", "").strip()
+            
+            if word_data["word"]:
+                return word_data
+                
+        # Fallback
+        word = random.choice(VIETNAMESE_VOCABULARY)
+        return {"word": word, "hint": "Từ tiếng Việt phổ biến"}
+        
+    except Exception as e:
+        logger.error(f"Generate word game error: {e}")
+        word = random.choice(VIETNAMESE_VOCABULARY)
+        return {"word": word, "hint": "Từ tiếng Việt phổ biến"}
+
+async def send_goodnight_message(context: ContextTypes.DEFAULT_TYPE):
+    """Gửi lời chúc ngủ ngon lúc 23h"""
+    chats = get_all_chats()
+    
+    messages = [
+        "Linh chúc các tình yêu ngủ ngon ❤️❤️",
+        "23h rồi! Ngủ ngon nhé mọi người 😴💕",
+        "Chúc cả nhà có giấc ngủ thật ngon 🌙✨",
+        "Good night! Ngủ ngon và mơ đẹp nhé 💫❤️",
+        "Linh chúc mọi người ngủ ngon! Mai gặp lại nha 😘"
+    ]
+    
+    message = random.choice(messages)
+    
+    for chat_id, chat_type in chats:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=message)
+            logger.info(f"Sent goodnight to {chat_id}")
+        except Exception as e:
+            logger.error(f"Failed to send to {chat_id}: {e}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Lưu chat info
+    chat = update.effective_chat
+    save_chat_info(chat.id, chat.type, chat.title)
+    
     await update.message.reply_text("""
 👋 **Xin chào! Mình là Linh!**
 
 🎮 **Game:**
 /guessnumber - Đoán số
-/noitu - Nối từ có nghĩa
+/vuatiengviet - Sắp xếp chữ cái
 /quiz - Câu đố về Việt Nam
 /stopquiz - Dừng câu đố
 
 🏆 /leaderboard - BXH 24h
 📊 /stats - Điểm của bạn
 
-💡 Nối từ dùng từ có nghĩa thực tế!
-🎯 Quiz dùng Claude AI - độ chính xác cao!
+💕 Mỗi 23h Linh sẽ chúc ngủ ngon!
 """)
 
 async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -518,16 +512,17 @@ async def hint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game = active_games[chat_id]["game"]
     await update.message.reply_text(game.get_hint())
 
-async def start_noitu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_vua_tieng_viet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
     if chat_id in active_games:
         del active_games[chat_id]
-        
-    game = NoiTuGame(chat_id)
-    active_games[chat_id] = {"type": "noitu", "game": game}
     
-    await update.message.reply_text(game.start())
+    game = VuaTiengVietGame(chat_id)
+    active_games[chat_id] = {"type": "vuatiengviet", "game": game}
+    
+    message = game.start_new_round()
+    await update.message.reply_text(message)
 
 async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -606,7 +601,11 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if stats['games']:
         message += "\n"
         for game_type, data in stats['games'].items():
-            game_name = {"guessnumber": "Đoán số", "noitu": "Nối từ", "quiz": "Câu đố"}.get(game_type, game_type)
+            game_name = {
+                "guessnumber": "Đoán số",
+                "vuatiengviet": "Vua Tiếng Việt",
+                "quiz": "Câu đố"
+            }.get(game_type, game_type)
             message += f"{game_name}: {data['total']:,}đ ({data['played']} lần)\n"
             
     await update.message.reply_text(message)
@@ -702,6 +701,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     username = user.username or user.first_name
     
+    # Lưu chat info
+    chat = update.effective_chat
+    save_chat_info(chat.id, chat.type, chat.title)
+    
     if chat_id in active_games:
         game_info = active_games[chat_id]
         
@@ -722,15 +725,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 await update.message.reply_text("❌ Nhập số!")
                 
-        elif game_info["type"] == "noitu":
-            is_finished, response = game_info["game"].play_word(message)
-            await update.message.reply_text(response)
+        elif game_info["type"] == "vuatiengviet":
+            game = game_info["game"]
             
-            if is_finished and game_info["game"].score > 0:
-                save_score(user.id, username, "noitu", game_info["game"].score)
+            if message.lower() in ["tiếp", "tiep"]:
+                msg = game.start_new_round()
+                await update.message.reply_text(msg)
+            elif message.lower() in ["dừng", "dung", "stop"]:
+                if game.score > 0:
+                    save_score(user.id, username, "vuatiengviet", game.score)
+                await update.message.reply_text(f"📊 Kết thúc!\nTổng điểm: {game.score}")
                 del active_games[chat_id]
+            else:
+                is_correct, response = game.check_answer(message)
+                await update.message.reply_text(response)
+                
+                if is_correct and "dừng" not in response.lower():
+                    # Tự động câu mới sau 2s nếu đúng
+                    await asyncio.sleep(2)
+                    msg = game.start_new_round()
+                    await update.message.reply_text(msg)
         return
     
+    # Chat AI
     if chat_id not in chat_history:
         chat_history[chat_id] = []
         
@@ -740,7 +757,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_history[chat_id] = chat_history[chat_id][-4:]
     
     messages = [
-        {"role": "system", "content": "Bạn là Linh - trợ lý AI vui vẻ. Trả lời ngắn gọn, thân thiện."}
+        {"role": "system", "content": "Bạn là Linh - cô gái Việt Nam vui vẻ, thân thiện. Trả lời ngắn gọn."}
     ]
     messages.extend(chat_history[chat_id])
     
@@ -755,19 +772,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
+    # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("guessnumber", start_guess_number))
-    application.add_handler(CommandHandler("noitu", start_noitu))
+    application.add_handler(CommandHandler("vuatiengviet", start_vua_tieng_viet))
     application.add_handler(CommandHandler("quiz", quiz_command))
     application.add_handler(CommandHandler("stopquiz", stop_quiz))
     application.add_handler(CommandHandler("hint", hint_command))
     application.add_handler(CommandHandler("leaderboard", leaderboard_command))
     application.add_handler(CommandHandler("stats", stats_command))
     
+    # Callback & message handlers
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Bot started with meaningful words & Claude quiz! 🎯")
+    # Schedule goodnight message at 23:00
+    job_queue = application.job_queue
+    job_queue.run_daily(
+        send_goodnight_message,
+        time=time(hour=23, minute=0, second=0),
+        days=(0, 1, 2, 3, 4, 5, 6)
+    )
+    
+    logger.info("Linh Bot started! 💕")
     application.run_polling()
 
 if __name__ == "__main__":
