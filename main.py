@@ -14,8 +14,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "alibaba/qwen-3-32b")
-QUIZ_MODEL = "openai/gpt-oss-120b"
+CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
+CLAUDE_MODEL = "anthropic/claude-3.5-sonnet"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 CTX_TURNS = int(os.getenv("CTX_TURNS", "3"))
 
@@ -222,7 +222,6 @@ class VuaTiengVietGame:
         self.round_count += 1
         self.attempts = 0
         
-        # Tăng độ khó sau mỗi 3 câu
         if self.round_count % 3 == 0:
             self.difficulty_level = min(self.difficulty_level + 1, 3)
         
@@ -245,19 +244,18 @@ Sắp xếp các ký tự sau thành từ/cụm từ có nghĩa:
 Gõ đáp án của bạn!"""
 
     async def generate_word_puzzle(self) -> Tuple[str, str]:
-        # Từ vựng theo độ khó
         difficulty_words = {
-            1: [  # Dễ (4-6 chữ)
+            1: [
                 "học sinh", "giáo viên", "bạn bè", "gia đình", "mùa xuân",
                 "mùa hạ", "mùa thu", "mùa đông", "trái tim", "nụ cười",
                 "ánh sáng", "bóng tối", "sức khỏe", "hạnh phúc", "tình yêu"
             ],
-            2: [  # Trung bình (6-8 chữ)
+            2: [
                 "thành công", "cố gắng", "kiên trì", "phấn đấu", "ước mơ",
                 "hoài bão", "tri thức", "văn hóa", "lịch sử", "truyền thống",
                 "phát triển", "công nghệ", "khoa học", "nghệ thuật", "sáng tạo"
             ],
-            3: [  # Khó (8+ chữ)
+            3: [
                 "độc lập tự do", "cách mạng công nghiệp", "phát triển bền vững",
                 "kinh tế thị trường", "toàn cầu hóa", "chuyển đổi số",
                 "trí tuệ nhân tạo", "bảo vệ môi trường", "biến đổi khí hậu",
@@ -265,37 +263,43 @@ Gõ đáp án của bạn!"""
             ]
         }
         
-        # Lựa chọn từ theo độ khó
         word_list = difficulty_words.get(self.difficulty_level, difficulty_words[1])
         
-        # Nếu AI có thể tạo từ
-        prompt = f"""Tạo 1 câu đố xáo trộn chữ cái tiếng Việt.
+        # Claude prompt với độ chính xác cao
+        prompt = f"""Create a Vietnamese word scramble puzzle with HIGH ACCURACY.
 
-Yêu cầu:
-1. Tạo 1 từ/cụm từ tiếng Việt độ khó {self.difficulty_level}/3
-2. Từ phải {'4-6' if self.difficulty_level == 1 else '6-8' if self.difficulty_level == 2 else '8-12'} chữ cái
-3. Xáo trộn các CHỮ CÁI (giữ nguyên dấu thanh với chữ cái)
-4. Giữ các cụm phụ âm: th, tr, ch, ph, nh, ng, gh, kh không tách
+STRICT REQUIREMENTS:
+1. Difficulty level: {self.difficulty_level}/3
+2. Word/phrase length: {'4-6' if self.difficulty_level == 1 else '6-8' if self.difficulty_level == 2 else '8-12'} letters
+3. MUST scramble LETTERS (not words)
+4. KEEP consonant clusters together: th, tr, ch, ph, nh, ng, gh, kh, gi, qu
+5. Keep tone marks with their letters
+6. The original word MUST be a common, valid Vietnamese word/phrase
 
-Trả về JSON:
+Return ONLY valid JSON:
 {{
-  "original": "từ gốc",
-  "scrambled": "chữ cái xáo trộn cách nhau bởi /"
+  "original": "exact Vietnamese word/phrase",
+  "scrambled": "scrambled letters separated by /"
 }}
 
-Ví dụ:
+Example for reference:
 {{
   "original": "thành công",
   "scrambled": "th / ô / c / g / n / à / n / h"
-}}"""
+}}
+
+IMPORTANT: Ensure the word is appropriate and commonly used in Vietnamese."""
 
         messages = [
-            {"role": "system", "content": "Bạn tạo câu đố xáo trộn chữ cái tiếng Việt. Giữ cụm phụ âm không tách."},
+            {
+                "role": "system", 
+                "content": "You are a Vietnamese language expert. Create accurate word puzzles with correct spelling and tones. Prioritize accuracy over creativity."
+            },
             {"role": "user", "content": prompt}
         ]
         
         try:
-            response = await call_api(messages, model=QUIZ_MODEL, max_tokens=150)
+            response = await call_api(messages, model=CLAUDE_MODEL, max_tokens=150, temperature=0.3)
             
             if response:
                 json_start = response.find('{')
@@ -312,19 +316,16 @@ Ví dụ:
         except Exception as e:
             logger.error(f"Generate word puzzle error: {e}")
         
-        # Fallback - tự xáo trộn
+        # Fallback với xáo trộn thông minh
         word = random.choice(word_list)
         
-        # Xáo trộn thông minh - giữ cụm phụ âm
         def smart_scramble(text):
-            # Định nghĩa cụm phụ âm
             clusters = ['th', 'tr', 'ch', 'ph', 'nh', 'ng', 'gh', 'kh', 'gi', 'qu']
             result = []
             i = 0
             text_no_space = text.replace(' ', '')
             
             while i < len(text_no_space):
-                # Kiểm tra cụm phụ âm
                 found_cluster = False
                 for cluster in clusters:
                     if text_no_space[i:i+len(cluster)].lower() == cluster:
@@ -337,7 +338,6 @@ Ví dụ:
                     result.append(text_no_space[i])
                     i += 1
             
-            # Xáo trộn
             random.shuffle(result)
             return ' / '.join(result)
         
@@ -348,12 +348,10 @@ Ví dụ:
         answer = answer.lower().strip()
         self.attempts += 1
         
-        # So sánh không phân biệt dấu cách
         answer_normalized = ''.join(answer.split())
         original_normalized = ''.join(self.current_word.lower().split())
         
         if answer_normalized == original_normalized:
-            # Điểm thưởng theo độ khó
             base_points = (self.max_attempts - self.attempts + 1) * 100
             difficulty_bonus = self.difficulty_level * 50
             points = base_points + difficulty_bonus
@@ -380,18 +378,22 @@ Gõ 'tiếp' để chơi câu mới hoặc 'dừng' để kết thúc"""
         remaining = self.max_attempts - self.attempts
         return False, f"❌ Sai rồi! Còn {remaining} lần thử\n\n🔤 {self.scrambled}"
 
-async def call_api(messages: List[dict], model: str = None, max_tokens: int = 400) -> str:
+async def call_api(messages: List[dict], model: str = None, max_tokens: int = 400, temperature: float = None) -> str:
     try:
         headers = {
             "Authorization": f"Bearer {VERCEL_API_KEY}",
             "Content-Type": "application/json"
         }
         
+        # Temperature thấp cho Claude để tăng độ chính xác
+        if temperature is None:
+            temperature = 0.3 if model == CLAUDE_MODEL else 0.7
+        
         data = {
             "model": model or CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.7,
+            "temperature": temperature,
             "top_p": 0.9
         }
         
@@ -420,41 +422,46 @@ async def generate_quiz(chat_id: int) -> dict:
         quiz_history[chat_id] = []
     
     recent_questions = quiz_history[chat_id][-10:] if len(quiz_history[chat_id]) > 0 else []
-    history_text = "\n".join(recent_questions) if recent_questions else "Chưa có"
+    history_text = "\n".join(recent_questions) if recent_questions else "None"
     
-    topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam"]
+    topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam", "Khoa học Việt Nam", "Thể thao Việt Nam", "Kinh tế Việt Nam", "Giáo dục Việt Nam"]
     topic = random.choice(topics)
     
-    prompt = f"""Tạo câu hỏi trắc nghiệm về {topic}.
+    # Claude prompt với yêu cầu độ chính xác cao
+    prompt = f"""Create a quiz question about {topic} with MAXIMUM ACCURACY.
 
-Yêu cầu:
-1. Câu hỏi phải MỚI, không trùng với các câu đã hỏi
-2. Phù hợp kiến thức phổ thông
-3. Có 4 đáp án, chỉ 1 đáp án đúng
-4. Giải thích ngắn gọn
+CRITICAL REQUIREMENTS:
+1. MUST be 100% factually accurate and verifiable
+2. Use reliable, well-documented facts only
+3. Different from previously asked questions
+4. 4 options with ONLY 1 correct answer
+5. All wrong options must be clearly incorrect but plausible
+6. Provide educational explanation with source if possible
 
-Câu đã hỏi:
+Previously asked questions:
 {history_text}
 
-Trả về JSON:
+Return ONLY valid JSON in Vietnamese:
 {{
   "topic": "{topic}",
-  "question": "câu hỏi",
-  "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
-  "answer": "A hoặc B hoặc C hoặc D",
-  "explain": "giải thích"
-}}"""
+  "question": "clear, accurate question in Vietnamese",
+  "options": ["A. option 1", "B. option 2", "C. option 3", "D. option 4"],
+  "answer": "A or B or C or D",
+  "explain": "accurate explanation in Vietnamese with facts"
+}}
+
+CRITICAL: Double-check all facts before creating the question. Prioritize accuracy over difficulty."""
 
     messages = [
         {
             "role": "system", 
-            "content": "Bạn là chuyên gia về Việt Nam. Tạo câu hỏi trắc nghiệm mới, thú vị. Chỉ trả về JSON."
+            "content": "You are a Vietnamese education expert with deep knowledge of verified facts about Vietnam. Create only 100% accurate quiz questions. If unsure about any fact, use a different question. Accuracy is paramount."
         },
         {"role": "user", "content": prompt}
     ]
     
     try:
-        response = await call_api(messages, model=QUIZ_MODEL, max_tokens=400)
+        response = await call_api(messages, model=CLAUDE_MODEL, max_tokens=500, temperature=0.2)
         
         if not response:
             return None
@@ -482,7 +489,6 @@ Trả về JSON:
             "explanation": data.get("explain", "")
         }
         
-        # Chuẩn hóa đáp án
         if quiz["correct"] and len(quiz["correct"]) > 0:
             quiz["correct"] = quiz["correct"][0].upper()
         
@@ -544,7 +550,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("""
 👋 **Xin chào! Mình là Linh!**
 
-🎮 **Game:**
+🎮 **Game (Claude AI - Độ chính xác cao):**
 /guessnumber - Đoán số
 /vuatiengviet - Sắp xếp chữ cái (3 cấp độ)
 /quiz - Câu đố về Việt Nam
@@ -553,6 +559,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🏆 /leaderboard - BXH 24h
 📊 /stats - Điểm của bạn
 
+💬 Chat với Linh (GPT)
 💕 Mỗi 23h Linh sẽ chúc ngủ ngon!
 """)
 
@@ -592,7 +599,7 @@ async def start_vua_tieng_viet(update: Update, context: ContextTypes.DEFAULT_TYP
     game = VuaTiengVietGame(chat_id)
     active_games[chat_id] = {"type": "vuatiengviet", "game": game}
     
-    loading_msg = await update.message.reply_text("⏳ GPT đang tạo câu đố...")
+    loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo câu đố (độ chính xác cao)...")
     
     message = await game.start_new_round()
     await loading_msg.edit_text(message)
@@ -602,7 +609,7 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiz_mode[chat_id] = True
     quiz_count[chat_id] = 1
     
-    loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi với GPT...")
+    loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo câu hỏi (độ chính xác cao)...")
     
     quiz = await generate_quiz(chat_id)
     
@@ -625,7 +632,11 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Lịch sử Việt Nam": "📜",
         "Địa lý Việt Nam": "🗺️",
         "Ẩm thực Việt Nam": "🍜",
-        "Văn hóa Việt Nam": "🎭"
+        "Văn hóa Việt Nam": "🎭",
+        "Khoa học Việt Nam": "🔬",
+        "Thể thao Việt Nam": "⚽",
+        "Kinh tế Việt Nam": "💰",
+        "Giáo dục Việt Nam": "📚"
     }
     
     emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
@@ -735,7 +746,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             quiz_count[chat_id] = quiz_count.get(chat_id, 1) + 1
             
-            loading_msg = await context.bot.send_message(chat_id, "⏳ GPT đang tạo câu hỏi mới...")
+            loading_msg = await context.bot.send_message(chat_id, "⏳ Claude AI đang tạo câu hỏi mới...")
             
             quiz = await generate_quiz(chat_id)
             
@@ -758,7 +769,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Lịch sử Việt Nam": "📜",
                 "Địa lý Việt Nam": "🗺️",
                 "Ẩm thực Việt Nam": "🍜",
-                "Văn hóa Việt Nam": "🎭"
+                "Văn hóa Việt Nam": "🎭",
+                "Khoa học Việt Nam": "🔬",
+                "Thể thao Việt Nam": "⚽",
+                "Kinh tế Việt Nam": "💰",
+                "Giáo dục Việt Nam": "📚"
             }
             
             emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
@@ -799,7 +814,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             game = game_info["game"]
             
             if message.lower() in ["tiếp", "tiep"]:
-                loading_msg = await update.message.reply_text("⏳ GPT đang tạo câu mới...")
+                loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo câu mới...")
                 msg = await game.start_new_round()
                 await loading_msg.edit_text(msg)
             elif message.lower() in ["dừng", "dung", "stop"]:
@@ -812,12 +827,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(response)
                 
                 if is_correct and "dừng" not in response.lower():
-                    loading_msg = await context.bot.send_message(chat_id, "⏳ GPT đang tạo câu mới...")
+                    loading_msg = await context.bot.send_message(chat_id, "⏳ Claude AI đang tạo câu mới...")
                     await asyncio.sleep(2)
                     msg = await game.start_new_round()
                     await loading_msg.edit_text(msg)
         return
     
+    # Chat với GPT
     if chat_id not in chat_history:
         chat_history[chat_id] = []
         
