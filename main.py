@@ -15,7 +15,6 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "alibaba/qwen-3-32b")
-QUIZ_MODEL = "anthropic/claude-3-haiku"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 CTX_TURNS = int(os.getenv("CTX_TURNS", "3"))
 
@@ -56,25 +55,9 @@ quiz_mode: Dict[int, bool] = {}
 quiz_count: Dict[int, int] = {}
 quiz_history: Dict[int, List[str]] = {}
 word_game_sessions: Dict[int, dict] = {}
-goodnight_task = None  # Task cho lời chúc ngủ ngon
-
-# Từ vựng cho game Vua Tiếng Việt
-VIETNAMESE_VOCABULARY = [
-    "tuyệt vời", "hạnh phúc", "yêu thương", "gia đình", "tình bạn",
-    "thành công", "nỗ lực", "cố gắng", "kiên trì", "bền vững",
-    "tự do", "độc lập", "dân tộc", "đất nước", "quê hương",
-    "văn hóa", "truyền thống", "lịch sử", "di sản", "danh lam",
-    "thắng cảnh", "du lịch", "khám phá", "trải nghiệm", "kỷ niệm",
-    "học tập", "giáo dục", "tri thức", "khoa học", "công nghệ",
-    "sáng tạo", "đổi mới", "phát triển", "tiến bộ", "hiện đại",
-    "thiên nhiên", "môi trường", "bảo vệ", "xanh sạch", "bền vững",
-    "sức khỏe", "hạnh phúc", "an lành", "bình yên", "ấm áp"
-]
-
-QUIZ_TOPICS = ["lịch sử", "địa lý", "ẩm thực", "văn hóa", "du lịch"]
+goodnight_task = None
 
 def save_chat_info(chat_id: int, chat_type: str, title: str = None):
-    """Lưu thông tin chat để gửi lời chúc"""
     conn = sqlite3.connect('bot_scores.db')
     c = conn.cursor()
     c.execute('INSERT OR REPLACE INTO chats (chat_id, chat_type, title) VALUES (?, ?, ?)',
@@ -83,7 +66,6 @@ def save_chat_info(chat_id: int, chat_type: str, title: str = None):
     conn.close()
 
 def get_all_chats():
-    """Lấy danh sách tất cả chat"""
     conn = sqlite3.connect('bot_scores.db')
     c = conn.cursor()
     c.execute('SELECT chat_id, chat_type FROM chats')
@@ -232,14 +214,17 @@ class VuaTiengVietGame:
         self.max_attempts = 3
         self.score = 0
         self.start_time = datetime.now()
+        self.round_count = 0
         
-    def start_new_round(self) -> str:
-        """Bắt đầu câu mới"""
-        self.current_word = random.choice(VIETNAMESE_VOCABULARY)
-        self.scrambled = self.scramble_word(self.current_word)
+    async def start_new_round(self) -> str:
+        self.round_count += 1
         self.attempts = 0
         
-        return f"""🎮 **VUA TIẾNG VIỆT**
+        await asyncio.sleep(5)
+        
+        self.current_word, self.scrambled = await self.generate_word_puzzle()
+        
+        return f"""🎮 **VUA TIẾNG VIỆT - CÂU {self.round_count}**
 
 Sắp xếp các chữ cái sau thành từ có nghĩa:
 
@@ -249,19 +234,58 @@ Sắp xếp các chữ cái sau thành từ có nghĩa:
 📝 Bạn có {self.max_attempts} lần thử
 
 Gõ đáp án của bạn!"""
+
+    async def generate_word_puzzle(self) -> Tuple[str, str]:
+        random_number = random.randint(1, 100)
+        prompt = f"""Tạo 1 từ tiếng Việt có nghĩa khác nhau (seed: {random_number}). Từ phải khác với các từ trước.
+
+VÍ DỤ:
+Từ gốc: yêu
+Xáo trộn: ê / y / u
+
+Từ gốc: hạnh phúc  
+Xáo trộn: h / ạ / p / h / n / ú / c
+
+BÂY GIỜ TẠO 1 TỪ MỚI KHÁC (chỉ trả về theo format):
+Từ gốc: [từ tiếng việt]
+Xáo trộn: [các chữ cái xáo trộn cách nhau bởi /]"""
+
+        messages = [
+            {"role": "system", "content": "Tạo từ tiếng Việt và xáo trộn chữ cái. Chỉ trả về theo format yêu cầu. Mỗi lần phải tạo từ khác nhau."},
+            {"role": "user", "content": prompt}
+        ]
         
-    def scramble_word(self, word: str) -> str:
-        """Xáo trộn chữ cái"""
-        chars = list(word.replace(' ', ''))
+        response = await call_api(messages, model=CHAT_MODEL, max_tokens=100)
         
-        scrambled = chars.copy()
-        while ''.join(scrambled) == word.replace(' ', ''):
-            random.shuffle(scrambled)
+        if response:
+            lines = response.strip().split('\n')
+            word = ""
+            scrambled = ""
+            
+            for line in lines:
+                if line.startswith("Từ gốc:"):
+                    word = line.replace("Từ gốc:", "").strip()
+                elif line.startswith("Xáo trộn:"):
+                    scrambled = line.replace("Xáo trộn:", "").strip()
+            
+            if word and scrambled:
+                return word, scrambled
         
-        return ' / '.join(scrambled)
+        fallback_words = [
+            ("yêu", "ê / y / u"),
+            ("mưa", "ư / m / a"),
+            ("nắng", "ắ / n / g / n"),
+            ("hoa", "o / h / a"),
+            ("cây", "â / c / y"),
+            ("biển", "ể / b / i / n"),
+            ("sông", "ô / s / n / g"),
+            ("núi", "ú / n / i"),
+            ("trời", "ờ / t / r / i"),
+            ("đất", "ấ / đ / t")
+        ]
+        return random.choice(fallback_words)
         
     def check_answer(self, answer: str) -> Tuple[bool, str]:
-        """Kiểm tra đáp án"""
         answer = answer.lower().strip()
         self.attempts += 1
         
@@ -289,7 +313,6 @@ Gõ 'tiếp' để chơi câu mới hoặc 'dừng' để kết thúc"""
         return False, f"❌ Sai rồi! Còn {remaining} lần thử\n\n🔤 {self.scrambled}"
 
 async def call_api(messages: List[dict], model: str = None, max_tokens: int = 400) -> str:
-    """Gọi API với model được chỉ định"""
     try:
         headers = {
             "Authorization": f"Bearer {VERCEL_API_KEY}",
@@ -300,7 +323,7 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
             "model": model or CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.5,
+            "temperature": 0.7,
             "top_p": 0.9
         }
         
@@ -323,43 +346,43 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
         return None
 
 async def generate_quiz(chat_id: int) -> dict:
-    """Tạo quiz với Claude - cải thiện độ chính xác"""
     global quiz_history
     
     if chat_id not in quiz_history:
         quiz_history[chat_id] = []
     
-    topic = random.choice(QUIZ_TOPICS)
+    topics = ["lịch sử", "địa lý", "ẩm thực", "văn hóa", "du lịch", "nghệ thuật", "thể thao", "kinh tế"]
+    topic = random.choice(topics)
     
-    prompt = f"""Tạo 1 câu hỏi trắc nghiệm về {topic} Việt Nam.
+    random_seed = random.randint(1, 1000)
+    
+    prompt = f"""Tạo 1 câu hỏi trắc nghiệm về {topic} Việt Nam (seed: {random_seed}).
 
 YÊU CẦU BẮT BUỘC:
-1. Câu hỏi phải rõ ràng, cụ thể
-2. 4 đáp án phải liên quan trực tiếp đến câu hỏi
+1. Câu hỏi phải khác với các câu trước
+2. 4 đáp án phải liên quan trực tiếp 
 3. Chỉ có 1 đáp án đúng
 4. Thông tin phải chính xác 100%
 
-VÍ DỤ MẪU:
-Câu hỏi: Thủ đô của Việt Nam là gì?
-A. Hà Nội
-B. Hồ Chí Minh
-C. Đà Nẵng
-D. Cần Thơ
-Đáp án: A
-Giải thích: Hà Nội là thủ đô của Việt Nam từ năm 1010
-
-BÂY GIỜ TẠO CÂU HỎI VỀ {topic.upper()}:"""
+FORMAT:
+Câu hỏi: [câu hỏi cụ thể về {topic}]
+A. [đáp án A]
+B. [đáp án B]
+C. [đáp án C]
+D. [đáp án D]
+Đáp án: [A/B/C/D]
+Giải thích: [giải thích ngắn gọn]"""
 
     messages = [
         {
             "role": "system", 
-            "content": "Bạn là chuyên gia về Việt Nam. Tạo câu hỏi trắc nghiệm với 4 đáp án liên quan và chỉ 1 đáp án đúng."
+            "content": f"Bạn là chuyên gia về Việt Nam. Tạo câu hỏi trắc nghiệm về {topic} với 4 đáp án và 1 đáp án đúng. Mỗi lần phải tạo câu hỏi khác nhau."
         },
         {"role": "user", "content": prompt}
     ]
     
     try:
-        response = await call_api(messages, model=QUIZ_MODEL, max_tokens=400)
+        response = await call_api(messages, model=CHAT_MODEL, max_tokens=400)
         
         if not response:
             return None
@@ -398,30 +421,23 @@ BÂY GIỜ TẠO CÂU HỎI VỀ {topic.upper()}:"""
         return None
 
 async def goodnight_scheduler(app):
-    """Scheduler gửi lời chúc ngủ ngon"""
     while True:
         now = datetime.now()
         target_time = now.replace(hour=23, minute=0, second=0, microsecond=0)
         
-        # Nếu đã qua 23h hôm nay thì đợi đến 23h ngày mai
         if now >= target_time:
             target_time += timedelta(days=1)
         
-        # Tính thời gian chờ
         wait_seconds = (target_time - now).total_seconds()
         logger.info(f"Waiting {wait_seconds} seconds until 23:00")
         
-        # Đợi đến 23h
         await asyncio.sleep(wait_seconds)
         
-        # Gửi lời chúc
         await send_goodnight_message(app)
         
-        # Đợi 1 phút để tránh gửi lại
         await asyncio.sleep(60)
 
 async def send_goodnight_message(app):
-    """Gửi lời chúc ngủ ngon"""
     chats = get_all_chats()
     
     messages = [
@@ -442,7 +458,6 @@ async def send_goodnight_message(app):
             logger.error(f"Failed to send to {chat_id}: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Lưu chat info
     chat = update.effective_chat
     save_chat_info(chat.id, chat.type, chat.title)
     
@@ -497,15 +512,17 @@ async def start_vua_tieng_viet(update: Update, context: ContextTypes.DEFAULT_TYP
     game = VuaTiengVietGame(chat_id)
     active_games[chat_id] = {"type": "vuatiengviet", "game": game}
     
-    message = game.start_new_round()
-    await update.message.reply_text(message)
+    loading_msg = await update.message.reply_text("⏳ Qwen AI đang tạo câu đố...")
+    
+    message = await game.start_new_round()
+    await loading_msg.edit_text(message)
 
 async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     quiz_mode[chat_id] = True
     quiz_count[chat_id] = 1
     
-    loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi với Claude AI...")
+    loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi với Qwen AI...")
     
     quiz = await generate_quiz(chat_id)
     
@@ -529,7 +546,10 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "địa lý": "🗺️",
         "ẩm thực": "🍜",
         "văn hóa": "🎭",
-        "du lịch": "✈️"
+        "du lịch": "✈️",
+        "nghệ thuật": "🎨",
+        "thể thao": "⚽",
+        "kinh tế": "💰"
     }
     
     emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
@@ -639,7 +659,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             quiz_count[chat_id] = quiz_count.get(chat_id, 1) + 1
             
-            loading_msg = await context.bot.send_message(chat_id, "⏳ Claude AI đang tạo câu hỏi mới...")
+            loading_msg = await context.bot.send_message(chat_id, "⏳ Qwen AI đang tạo câu hỏi mới...")
             
             quiz = await generate_quiz(chat_id)
             
@@ -663,7 +683,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "địa lý": "🗺️",
                 "ẩm thực": "🍜",
                 "văn hóa": "🎭",
-                "du lịch": "✈️"
+                "du lịch": "✈️",
+                "nghệ thuật": "🎨",
+                "thể thao": "⚽",
+                "kinh tế": "💰"
             }
             
             emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
@@ -677,7 +700,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     username = user.username or user.first_name
     
-    # Lưu chat info
     chat = update.effective_chat
     save_chat_info(chat.id, chat.type, chat.title)
     
@@ -705,8 +727,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             game = game_info["game"]
             
             if message.lower() in ["tiếp", "tiep"]:
-                msg = game.start_new_round()
-                await update.message.reply_text(msg)
+                loading_msg = await update.message.reply_text("⏳ Qwen AI đang tạo câu mới...")
+                msg = await game.start_new_round()
+                await loading_msg.edit_text(msg)
             elif message.lower() in ["dừng", "dung", "stop"]:
                 if game.score > 0:
                     save_score(user.id, username, "vuatiengviet", game.score)
@@ -717,12 +740,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(response)
                 
                 if is_correct and "dừng" not in response.lower():
+                    loading_msg = await context.bot.send_message(chat_id, "⏳ Qwen AI đang tạo câu mới...")
                     await asyncio.sleep(2)
-                    msg = game.start_new_round()
-                    await update.message.reply_text(msg)
+                    msg = await game.start_new_round()
+                    await loading_msg.edit_text(msg)
         return
     
-    # Chat AI
     if chat_id not in chat_history:
         chat_history[chat_id] = []
         
@@ -745,13 +768,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("😅 Xin lỗi, mình đang gặp lỗi!")
 
 async def post_init(application: Application) -> None:
-    """Khởi động scheduler sau khi bot init"""
     global goodnight_task
     goodnight_task = asyncio.create_task(goodnight_scheduler(application))
     logger.info("Goodnight scheduler started!")
 
 async def post_shutdown(application: Application) -> None:
-    """Cleanup khi shutdown"""
     global goodnight_task
     if goodnight_task:
         goodnight_task.cancel()
@@ -763,11 +784,9 @@ async def post_shutdown(application: Application) -> None:
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Add post init callback
     application.post_init = post_init
     application.post_shutdown = post_shutdown
     
-    # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("guessnumber", start_guess_number))
     application.add_handler(CommandHandler("vuatiengviet", start_vua_tieng_viet))
@@ -777,7 +796,6 @@ def main():
     application.add_handler(CommandHandler("leaderboard", leaderboard_command))
     application.add_handler(CommandHandler("stats", stats_command))
     
-    # Callback & message handlers
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
