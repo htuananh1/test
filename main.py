@@ -15,6 +15,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "alibaba/qwen-3-32b")
+QUIZ_MODEL = "openai/gpt-4o-mini"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 CTX_TURNS = int(os.getenv("CTX_TURNS", "3"))
 
@@ -236,26 +237,30 @@ Sắp xếp các chữ cái sau thành từ có nghĩa:
 Gõ đáp án của bạn!"""
 
     async def generate_word_puzzle(self) -> Tuple[str, str]:
-        random_number = random.randint(1, 100)
-        prompt = f"""Tạo 1 từ tiếng Việt có nghĩa khác nhau (seed: {random_number}). Từ phải khác với các từ trước.
+        random_number = random.randint(1, 1000)
+        category = random.choice(["động vật", "thực vật", "đồ vật", "cảm xúc", "hành động", "màu sắc", "thời tiết", "gia đình"])
+        
+        prompt = f"""Create a Vietnamese word puzzle. Category: {category}, variation: {random_number}.
 
-VÍ DỤ:
-Từ gốc: yêu
-Xáo trộn: ê / y / u
+Requirements:
+- Generate ONE common Vietnamese word (2-8 letters)
+- Must be different each time
+- Output MUST be in Vietnamese
 
-Từ gốc: hạnh phúc  
-Xáo trộn: h / ạ / p / h / n / ú / c
+Return EXACTLY in this format (in Vietnamese):
+Từ gốc: [vietnamese word]
+Xáo trộn: [scrambled letters separated by /]
 
-BÂY GIỜ TẠO 1 TỪ MỚI KHÁC (chỉ trả về theo format):
-Từ gốc: [từ tiếng việt]
-Xáo trộn: [các chữ cái xáo trộn cách nhau bởi /]"""
+Example output:
+Từ gốc: hạnh phúc
+Xáo trộn: h / ạ / p / h / n / ú / c"""
 
         messages = [
-            {"role": "system", "content": "Tạo từ tiếng Việt và xáo trộn chữ cái. Chỉ trả về theo format yêu cầu. Mỗi lần phải tạo từ khác nhau."},
+            {"role": "system", "content": "You create Vietnamese word puzzles. Always respond in Vietnamese language only."},
             {"role": "user", "content": prompt}
         ]
         
-        response = await call_api(messages, model=CHAT_MODEL, max_tokens=100)
+        response = await call_api(messages, model=QUIZ_MODEL, max_tokens=100)
         
         if response:
             lines = response.strip().split('\n')
@@ -281,7 +286,12 @@ Xáo trộn: [các chữ cái xáo trộn cách nhau bởi /]"""
             ("sông", "ô / s / n / g"),
             ("núi", "ú / n / i"),
             ("trời", "ờ / t / r / i"),
-            ("đất", "ấ / đ / t")
+            ("đất", "ấ / đ / t"),
+            ("mây", "â / m / y"),
+            ("gió", "ó / g / i"),
+            ("sao", "a / s / o"),
+            ("trăng", "ă / t / r / n / g"),
+            ("vàng", "à / v / n / g")
         ]
         return random.choice(fallback_words)
         
@@ -323,8 +333,8 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
             "model": model or CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.7,
-            "top_p": 0.9
+            "temperature": 0.8,
+            "top_p": 0.95
         }
         
         response = requests.post(
@@ -351,38 +361,41 @@ async def generate_quiz(chat_id: int) -> dict:
     if chat_id not in quiz_history:
         quiz_history[chat_id] = []
     
-    topics = ["lịch sử", "địa lý", "ẩm thực", "văn hóa", "du lịch", "nghệ thuật", "thể thao", "kinh tế"]
+    topics = ["lịch sử", "địa lý", "ẩm thực", "văn hóa", "du lịch", "nghệ thuật", "thể thao", "kinh tế", "khoa học", "văn học"]
     topic = random.choice(topics)
     
-    random_seed = random.randint(1, 1000)
+    random_seed = random.randint(1, 10000)
+    difficulty = random.choice(["dễ", "trung bình", "khó"])
     
-    prompt = f"""Tạo 1 câu hỏi trắc nghiệm về {topic} Việt Nam (seed: {random_seed}).
+    prompt = f"""Create a quiz about Vietnamese {topic}. Seed: {random_seed}, difficulty: {difficulty}.
 
-YÊU CẦU BẮT BUỘC:
-1. Câu hỏi phải khác với các câu trước
-2. 4 đáp án phải liên quan trực tiếp 
-3. Chỉ có 1 đáp án đúng
-4. Thông tin phải chính xác 100%
+Requirements:
+1. Question must be unique and specific about Vietnam
+2. 4 answer options, only 1 correct
+3. All content MUST be in Vietnamese language
+4. Include interesting explanation
 
-FORMAT:
-Câu hỏi: [câu hỏi cụ thể về {topic}]
-A. [đáp án A]
-B. [đáp án B]
-C. [đáp án C]
-D. [đáp án D]
+Format EXACTLY (all in Vietnamese):
+Câu hỏi: [question in Vietnamese about {topic}]
+A. [option A in Vietnamese]
+B. [option B in Vietnamese]
+C. [option C in Vietnamese]
+D. [option D in Vietnamese]
 Đáp án: [A/B/C/D]
-Giải thích: [giải thích ngắn gọn]"""
+Giải thích: [explanation in Vietnamese]
+
+Remember: EVERYTHING must be in Vietnamese!"""
 
     messages = [
         {
             "role": "system", 
-            "content": f"Bạn là chuyên gia về Việt Nam. Tạo câu hỏi trắc nghiệm về {topic} với 4 đáp án và 1 đáp án đúng. Mỗi lần phải tạo câu hỏi khác nhau."
+            "content": f"You are a Vietnamese culture expert. Create quiz questions about {topic} in Vietnamese language only. Never use English in the output."
         },
         {"role": "user", "content": prompt}
     ]
     
     try:
-        response = await call_api(messages, model=CHAT_MODEL, max_tokens=400)
+        response = await call_api(messages, model=QUIZ_MODEL, max_tokens=400)
         
         if not response:
             return None
@@ -512,7 +525,7 @@ async def start_vua_tieng_viet(update: Update, context: ContextTypes.DEFAULT_TYP
     game = VuaTiengVietGame(chat_id)
     active_games[chat_id] = {"type": "vuatiengviet", "game": game}
     
-    loading_msg = await update.message.reply_text("⏳ Qwen AI đang tạo câu đố...")
+    loading_msg = await update.message.reply_text("⏳ GPT-4o mini đang tạo câu đố...")
     
     message = await game.start_new_round()
     await loading_msg.edit_text(message)
@@ -522,7 +535,7 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiz_mode[chat_id] = True
     quiz_count[chat_id] = 1
     
-    loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi với Qwen AI...")
+    loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi với GPT-4o mini...")
     
     quiz = await generate_quiz(chat_id)
     
@@ -549,7 +562,9 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "du lịch": "✈️",
         "nghệ thuật": "🎨",
         "thể thao": "⚽",
-        "kinh tế": "💰"
+        "kinh tế": "💰",
+        "khoa học": "🔬",
+        "văn học": "📚"
     }
     
     emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
@@ -659,7 +674,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             quiz_count[chat_id] = quiz_count.get(chat_id, 1) + 1
             
-            loading_msg = await context.bot.send_message(chat_id, "⏳ Qwen AI đang tạo câu hỏi mới...")
+            loading_msg = await context.bot.send_message(chat_id, "⏳ GPT-4o mini đang tạo câu hỏi mới...")
             
             quiz = await generate_quiz(chat_id)
             
@@ -686,7 +701,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "du lịch": "✈️",
                 "nghệ thuật": "🎨",
                 "thể thao": "⚽",
-                "kinh tế": "💰"
+                "kinh tế": "💰",
+                "khoa học": "🔬",
+                "văn học": "📚"
             }
             
             emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
@@ -727,7 +744,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             game = game_info["game"]
             
             if message.lower() in ["tiếp", "tiep"]:
-                loading_msg = await update.message.reply_text("⏳ Qwen AI đang tạo câu mới...")
+                loading_msg = await update.message.reply_text("⏳ GPT-4o mini đang tạo câu mới...")
                 msg = await game.start_new_round()
                 await loading_msg.edit_text(msg)
             elif message.lower() in ["dừng", "dung", "stop"]:
@@ -740,7 +757,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(response)
                 
                 if is_correct and "dừng" not in response.lower():
-                    loading_msg = await context.bot.send_message(chat_id, "⏳ Qwen AI đang tạo câu mới...")
+                    loading_msg = await context.bot.send_message(chat_id, "⏳ GPT-4o mini đang tạo câu mới...")
                     await asyncio.sleep(2)
                     msg = await game.start_new_round()
                     await loading_msg.edit_text(msg)
