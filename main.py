@@ -59,33 +59,28 @@ SIMPLE_WORDS = [
 
 def get_memory_usage():
     """Kiểm tra memory usage"""
-    process = psutil.Process()
-    return process.memory_info().rss / 1024 / 1024  # MB
+    try:
+        process = psutil.Process()
+        return process.memory_info().rss / 1024 / 1024  # MB
+    except:
+        return 0
 
 def cleanup_memory():
     """Dọn dẹp memory khi cần"""
     global chat_history, quiz_sessions
     
-    # Xóa chat history cũ
-    current_time = datetime.now()
-    chats_to_remove = []
-    
-    for chat_id in chat_history:
+    for chat_id in list(chat_history.keys()):
         if len(chat_history[chat_id]) > 4:
             chat_history[chat_id] = chat_history[chat_id][-4:]
     
     # Xóa quiz sessions cũ
-    quiz_to_remove = []
-    for chat_id in quiz_sessions:
-        quiz_to_remove.append(chat_id)
+    if len(quiz_sessions) > 20:
+        quiz_to_remove = list(quiz_sessions.keys())[:10]
+        for chat_id in quiz_to_remove:
+            if chat_id in quiz_sessions:
+                del quiz_sessions[chat_id]
     
-    for chat_id in quiz_to_remove[:len(quiz_to_remove)//2]:
-        if chat_id in quiz_sessions:
-            del quiz_sessions[chat_id]
-    
-    # Force garbage collection
     gc.collect()
-    
     logger.info(f"Memory cleaned. Current usage: {get_memory_usage():.1f} MB")
 
 async def auto_cleanup():
@@ -338,35 +333,23 @@ async def call_vercel_api(messages: List[dict], max_tokens: int = 500) -> str:
         return "Lỗi kết nối!"
 
 async def generate_quiz() -> dict:
-    prompt = """Tạo 1 câu hỏi LỊCH SỬ VIỆT NAM với yêu cầu NGHIÊM NGẶT:
+    prompt = """Tạo 1 câu hỏi LỊCH SỬ VIỆT NAM với yêu cầu:
 
-1. Phải có SỰ KIỆN CỤ THỂ với NĂM CHÍNH XÁC
-2. CHỈ hỏi về: Vua/Hoàng đế, Chiến tranh/Trận đánh, Triều đại, Khởi nghĩa
-3. KHÔNG hỏi về: văn hóa, địa lý, ẩm thực, phong tục
-4. Các đáp án phải có NĂM hoặc THỜI GIAN cụ thể
-5. Thông tin phải CHÍNH XÁC 100% theo sách giáo khoa lịch sử
+1. Phải có NĂM CHÍNH XÁC
+2. CHỈ hỏi về: Vua, Chiến tranh, Triều đại, Khởi nghĩa
+3. Thông tin CHÍNH XÁC 100%
 
 Format:
-Câu hỏi: [VD: Vua Lý Thái Tổ dời đô từ Hoa Lư về Thăng Long năm nào?]
-A. [năm cụ thể]
-B. [năm cụ thể]
-C. [năm cụ thể]
-D. [năm cụ thể]
+Câu hỏi: [câu hỏi có năm]
+A. [năm]
+B. [năm]
+C. [năm]
+D. [năm]
 Đáp án: [A/B/C/D]
-Giải thích: [sự kiện và năm chính xác]"""
+Giải thích: [sự kiện và năm]"""
 
     messages = [
-        {"role": "system", "content": """Bạn là chuyên gia lịch sử Việt Nam. 
-        TẠO CÂU HỎI VỚI THÔNG TIN CHÍNH XÁC TUYỆT ĐỐI.
-        Ưu tiên các mốc lịch sử quan trọng:
-        - Năm 938: Ngô Quyền đánh tan quân Nam Hán
-        - Năm 1010: Lý Thái Tổ dời đô
-        - Năm 1075: Chiến thắng Như Nguyệt
-        - Năm 1288: Chiến thắng Bạch Đằng (Trần)
-        - Năm 1427: Lê Lợi lên ngôi
-        - Năm 1789: Quang Trung đại phá quân Thanh
-        - Năm 1945: Cách mạng tháng Tám
-        TUYỆT ĐỐI KHÔNG sai năm, sai sự kiện."""},
+        {"role": "system", "content": "Tạo câu hỏi lịch sử VN chính xác. Ví dụ: 1010-Lý Thái Tổ dời đô, 1428-Lê Lợi lên ngôi, 1789-Quang Trung phá Thanh."},
         {"role": "user", "content": prompt}
     ]
     
@@ -397,14 +380,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎮 **Game:**
 /guessnumber - Đoán số
 /noitu - Nối từ  
-/quiz - Câu đố lịch sử VN (chính xác)
+/quiz - Câu đố lịch sử VN
 /stopquiz - Dừng câu đố
 
 🏆 /leaderboard - BXH 24h
 📊 /stats - Điểm của bạn
 🧹 /cleanup - Dọn RAM
 
-💡 Câu hỏi lịch sử đảm bảo chính xác 100%!
+💡 Quiz lịch sử chính xác 100%!
 """)
 
 async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -462,7 +445,7 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     quiz_mode[chat_id] = True
     
-    await send_quiz(chat_id, update)
+    await send_quiz(chat_id, update, context)
 
 async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -472,29 +455,40 @@ async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del quiz_sessions[chat_id]
     await update.message.reply_text("✅ Đã dừng câu đố lịch sử!")
 
-async def send_quiz(chat_id: int, update_or_context):
-    """Gửi câu quiz mới"""
-    quiz = await generate_quiz()
-    
-    if quiz["question"] and len(quiz["options"]) == 4:
-        quiz_sessions[chat_id] = quiz
+async def send_quiz(chat_id: int, update_or_query, context: ContextTypes.DEFAULT_TYPE):
+    """Gửi câu quiz mới - Fixed version"""
+    try:
+        quiz = await generate_quiz()
         
-        keyboard = []
-        for option in quiz["options"]:
-            keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
-        keyboard.append([InlineKeyboardButton("❌ Dừng", callback_data="quiz_stop")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        message = f"📜 **CÂU HỎI LỊCH SỬ**\n\n{quiz['question']}"
-        
-        if hasattr(update_or_context, 'message'):
-            await update_or_context.message.reply_text(message, reply_markup=reply_markup)
-        elif hasattr(update_or_context, 'effective_chat'):
-            await update_or_context.bot.send_message(
+        if quiz["question"] and len(quiz["options"]) >= 4:
+            quiz_sessions[chat_id] = quiz
+            
+            keyboard = []
+            for option in quiz["options"][:4]:  # Chỉ lấy 4 đáp án đầu
+                keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
+            keyboard.append([InlineKeyboardButton("❌ Dừng", callback_data="quiz_stop")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            message = f"📜 **CÂU HỎI LỊCH SỬ**\n\n{quiz['question']}"
+            
+            # Gửi message mới
+            await context.bot.send_message(
                 chat_id=chat_id,
                 text=message,
                 reply_markup=reply_markup
             )
+        else:
+            # Nếu không tạo được quiz, thử lại
+            logger.warning("Failed to generate quiz, retrying...")
+            await asyncio.sleep(1)
+            await send_quiz(chat_id, update_or_query, context)
+            
+    except Exception as e:
+        logger.error(f"Error sending quiz: {e}")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ Lỗi tạo câu hỏi! Dùng /quiz để thử lại."
+        )
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scores = get_leaderboard_24h()
@@ -556,13 +550,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             result = f"❌ Sai! Đáp án: {quiz['correct']}\n{quiz['explanation']}"
         
-        del quiz_sessions[chat_id]
+        # Xóa quiz session cũ
+        if chat_id in quiz_sessions:
+            del quiz_sessions[chat_id]
         
+        # Edit message cũ với kết quả
         await query.message.edit_text(result)
         
+        # Nếu đang ở chế độ quiz liên tục, gửi câu mới
         if chat_id in quiz_mode:
-            await asyncio.sleep(1.5)
-            await send_quiz(chat_id, context)
+            await asyncio.sleep(2)  # Đợi 2 giây
+            # Gửi câu mới với context
+            await send_quiz(chat_id, query, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
@@ -638,7 +637,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot started with accurate history quiz! 📚")
+    logger.info("Linh Bot started - Quiz fixed! 🎯")
     application.run_polling()
 
 if __name__ == "__main__":
