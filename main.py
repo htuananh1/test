@@ -6,7 +6,6 @@ import requests
 import json
 import sqlite3
 import gc
-import psutil
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -47,102 +46,81 @@ chat_history: Dict[int, List[dict]] = {}
 quiz_sessions: Dict[int, dict] = {}
 quiz_mode: Dict[int, bool] = {}
 
-# Từ điển đơn giản cho game nối từ
 SIMPLE_WORDS = [
     "trong", "sạch", "đẹp", "tươi", "vui", "mạnh", "nhanh", "xinh", 
     "sáng", "tối", "cao", "thấp", "to", "nhỏ", "dài", "ngắn",
     "nóng", "lạnh", "cứng", "mềm", "đen", "trắng", "xanh", "đỏ",
     "già", "trẻ", "mới", "cũ", "tốt", "xấu", "khó", "dễ",
-    "nặng", "nhẹ", "rộng", "hẹp", "dày", "mỏng", "xa", "gần",
-    "sẽ", "đẽ", "mẽ", "vẻ", "nhẹn", "xắn", "khỏe", "yếu"
+    "nặng", "nhẹ", "rộng", "hẹp", "dày", "mỏng", "xa", "gần"
 ]
 
-def get_memory_usage():
-    """Kiểm tra memory usage"""
-    try:
-        process = psutil.Process()
-        return process.memory_info().rss / 1024 / 1024  # MB
-    except:
-        return 0
-
 def cleanup_memory():
-    """Dọn dẹp memory khi cần"""
-    global chat_history, quiz_sessions
-    
+    global chat_history
     for chat_id in list(chat_history.keys()):
         if len(chat_history[chat_id]) > 4:
             chat_history[chat_id] = chat_history[chat_id][-4:]
-    
-    # Xóa quiz sessions cũ
-    if len(quiz_sessions) > 20:
-        quiz_to_remove = list(quiz_sessions.keys())[:10]
-        for chat_id in quiz_to_remove:
-            if chat_id in quiz_sessions:
-                del quiz_sessions[chat_id]
-    
     gc.collect()
-    logger.info(f"Memory cleaned. Current usage: {get_memory_usage():.1f} MB")
-
-async def auto_cleanup():
-    """Tự động dọn memory khi dùng nhiều"""
-    memory_usage = get_memory_usage()
-    if memory_usage > 400:
-        cleanup_memory()
-        return True
-    return False
 
 def save_score(user_id: int, username: str, game_type: str, score: int):
-    conn = sqlite3.connect('bot_scores.db')
-    c = conn.cursor()
-    c.execute('INSERT INTO scores (user_id, username, game_type, score) VALUES (?, ?, ?, ?)',
-              (user_id, username, game_type, score))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect('bot_scores.db')
+        c = conn.cursor()
+        c.execute('INSERT INTO scores (user_id, username, game_type, score) VALUES (?, ?, ?, ?)',
+                  (user_id, username, game_type, score))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Save score error: {e}")
 
 def get_leaderboard_24h(limit: int = 10) -> List[tuple]:
-    conn = sqlite3.connect('bot_scores.db')
-    c = conn.cursor()
-    yesterday = datetime.now() - timedelta(days=1)
-    c.execute('''
-        SELECT username, SUM(score) as total_score, COUNT(DISTINCT game_type) as games_played
-        FROM scores
-        WHERE timestamp >= ?
-        GROUP BY user_id
-        ORDER BY total_score DESC
-        LIMIT ?
-    ''', (yesterday, limit))
-    results = c.fetchall()
-    conn.close()
-    return results
+    try:
+        conn = sqlite3.connect('bot_scores.db')
+        c = conn.cursor()
+        yesterday = datetime.now() - timedelta(days=1)
+        c.execute('''
+            SELECT username, SUM(score) as total_score, COUNT(DISTINCT game_type) as games_played
+            FROM scores
+            WHERE timestamp >= ?
+            GROUP BY user_id
+            ORDER BY total_score DESC
+            LIMIT ?
+        ''', (yesterday, limit))
+        results = c.fetchall()
+        conn.close()
+        return results
+    except Exception as e:
+        logger.error(f"Get leaderboard error: {e}")
+        return []
 
 def get_user_stats_24h(user_id: int) -> dict:
-    conn = sqlite3.connect('bot_scores.db')
-    c = conn.cursor()
-    yesterday = datetime.now() - timedelta(days=1)
-    
-    c.execute('''
-        SELECT game_type, COUNT(*) as games_played, SUM(score) as total_score, MAX(score) as best_score
-        FROM scores
-        WHERE user_id = ? AND timestamp >= ?
-        GROUP BY game_type
-    ''', (user_id, yesterday))
-    results = c.fetchall()
-    
-    stats = {
-        'total': 0,
-        'games': {}
-    }
-    
-    for game_type, games_played, total_score, best_score in results:
-        stats['games'][game_type] = {
-            'played': games_played,
-            'total': total_score,
-            'best': best_score
-        }
-        stats['total'] += total_score
+    try:
+        conn = sqlite3.connect('bot_scores.db')
+        c = conn.cursor()
+        yesterday = datetime.now() - timedelta(days=1)
         
-    conn.close()
-    return stats
+        c.execute('''
+            SELECT game_type, COUNT(*) as games_played, SUM(score) as total_score, MAX(score) as best_score
+            FROM scores
+            WHERE user_id = ? AND timestamp >= ?
+            GROUP BY game_type
+        ''', (user_id, yesterday))
+        results = c.fetchall()
+        
+        stats = {'total': 0, 'games': {}}
+        
+        for game_type, games_played, total_score, best_score in results:
+            stats['games'][game_type] = {
+                'played': games_played,
+                'total': total_score,
+                'best': best_score
+            }
+            stats['total'] += total_score
+            
+        conn.close()
+        return stats
+    except Exception as e:
+        logger.error(f"Get stats error: {e}")
+        return {'total': 0, 'games': {}}
 
 class GuessNumberGame:
     def __init__(self, chat_id: int):
@@ -158,17 +136,14 @@ class GuessNumberGame:
             
     def generate_riddle(self) -> str:
         riddles = []
-        
         if self.secret_number % 2 == 0:
             riddles.append("số chẵn")
         else:
             riddles.append("số lẻ")
-            
         if self.secret_number < 50:
             riddles.append("nhỏ hơn 50")
         else:
             riddles.append("lớn hơn hoặc bằng 50")
-            
         return f"Số bí mật là {' và '.join(riddles)}"
         
     def get_hint(self) -> str:
@@ -188,7 +163,6 @@ class GuessNumberGame:
             lower = (self.secret_number // 10) * 10
             upper = lower + 9 if lower > 0 else 9
             hint = f"💡 Gợi ý 3: Số từ {max(1, lower)} đến {upper}"
-                
         return f"{hint}\n🎯 Còn {self.max_hints - self.hints_used} gợi ý"
         
     def make_guess(self, guess: int) -> Tuple[bool, str]:
@@ -222,34 +196,13 @@ class NoiTuGame:
         word2 = random.choice([w for w in SIMPLE_WORDS if w != word1])
         self.current_word = f"{word1} {word2}"
         self.history = [self.current_word]
-        last_word = word2
-        
         return f"""🎮 **Nối Từ với Linh!**
 
 Luật: Nối từ ghép 2 từ tiếng Việt
 VD: trong sạch → sạch sẽ
 
 🎯 **{self.current_word}**
-Nối với '{last_word}' | Gõ 'thua' kết thúc"""
-        
-    def check_compound(self, word: str) -> bool:
-        parts = word.split()
-        if len(parts) != 2:
-            return False
-        return all(len(part) > 1 for part in parts)
-        
-    def find_bot_word(self, start_word: str) -> Optional[str]:
-        possible_words = []
-        
-        for word in SIMPLE_WORDS:
-            if word != start_word:
-                compound = f"{start_word} {word}"
-                if compound not in self.history:
-                    possible_words.append(compound)
-        
-        if possible_words:
-            return random.choice(possible_words[:10])
-        return None
+Nối với '{word2}' | Gõ 'thua' kết thúc"""
         
     def play_word(self, word: str) -> Tuple[bool, str]:
         word = word.lower().strip()
@@ -267,42 +220,32 @@ Nối với '{last_word}' | Gõ 'thua' kết thúc"""
             
         if word in self.history:
             return False, "❌ Từ đã dùng!"
-        
-        if not self.check_compound(word):
-            return False, "❌ Từ không hợp lệ!"
             
         self.history.append(word)
         self.current_word = word
         self.player_words += 1
         self.score += 100
         
-        bot_word = self.find_bot_word(parts[1])
+        # Bot tìm từ
+        possible = []
+        for w in SIMPLE_WORDS:
+            if w != parts[1]:
+                compound = f"{parts[1]} {w}"
+                if compound not in self.history:
+                    possible.append(compound)
         
-        if bot_word:
+        if possible:
+            bot_word = random.choice(possible[:10])
             self.history.append(bot_word)
             self.current_word = bot_word
             self.bot_words += 1
             return False, f"✅ +100đ\n🤖 Linh: **{bot_word}**\n📊 {self.score}đ | Nối '{bot_word.split()[1]}'"
         else:
             self.score += 500
-            time_taken = (datetime.now() - self.start_time).seconds
-            return True, f"""🎉 **CHIẾN THẮNG!**
-
-Linh không nối được từ nào với '{parts[1]}'!
-
-📊 Kết quả:
-• Điểm: {self.score} (+500 bonus)
-• Thời gian: {time_taken}s
-• Tổng từ: {len(self.history)}
-• Của bạn: {self.player_words}
-• Của Linh: {self.bot_words}
-
-Giỏi quá! 🏆"""
+            return True, f"🎉 **THẮNG!** +500đ\n📊 Tổng: {self.score} điểm"
 
 async def call_vercel_api(messages: List[dict], max_tokens: int = 500) -> str:
     try:
-        await auto_cleanup()
-        
         headers = {
             "Authorization": f"Bearer {VERCEL_API_KEY}",
             "Content-Type": "application/json"
@@ -326,52 +269,50 @@ async def call_vercel_api(messages: List[dict], max_tokens: int = 500) -> str:
             result = response.json()
             return result['choices'][0]['message']['content']
         else:
-            return "Lỗi rồi! Thử lại nhé!"
+            logger.error(f"API error: {response.status_code}")
+            return "Lỗi API!"
             
     except Exception as e:
         logger.error(f"API error: {e}")
         return "Lỗi kết nối!"
 
 async def generate_quiz() -> dict:
-    prompt = """Tạo 1 câu hỏi LỊCH SỬ VIỆT NAM với yêu cầu:
-
-1. Phải có NĂM CHÍNH XÁC
-2. CHỈ hỏi về: Vua, Chiến tranh, Triều đại, Khởi nghĩa
-3. Thông tin CHÍNH XÁC 100%
-
-Format:
+    prompt = """Tạo câu hỏi lịch sử VN:
 Câu hỏi: [câu hỏi có năm]
 A. [năm]
 B. [năm]
 C. [năm]
 D. [năm]
 Đáp án: [A/B/C/D]
-Giải thích: [sự kiện và năm]"""
+Giải thích: [ngắn]"""
 
     messages = [
-        {"role": "system", "content": "Tạo câu hỏi lịch sử VN chính xác. Ví dụ: 1010-Lý Thái Tổ dời đô, 1428-Lê Lợi lên ngôi, 1789-Quang Trung phá Thanh."},
+        {"role": "system", "content": "Tạo câu hỏi lịch sử VN với năm chính xác"},
         {"role": "user", "content": prompt}
     ]
     
-    response = await call_vercel_api(messages, max_tokens=300)
-    
-    lines = response.strip().split('\n')
-    quiz = {"question": "", "options": [], "correct": "", "explanation": ""}
-    
-    for line in lines:
-        line = line.strip()
-        if line.startswith("Câu hỏi:"):
-            quiz["question"] = line[8:].strip()
-        elif line[:2] in ["A.", "B.", "C.", "D."] and len(quiz["options"]) < 4:
-            quiz["options"].append(line)
-        elif line.startswith("Đáp án:"):
-            ans = line[7:].strip()
-            if ans and ans[0] in "ABCD":
-                quiz["correct"] = ans[0]
-        elif line.startswith("Giải thích:"):
-            quiz["explanation"] = line[11:].strip()
-            
-    return quiz
+    try:
+        response = await call_vercel_api(messages, 300)
+        lines = response.strip().split('\n')
+        quiz = {"question": "", "options": [], "correct": "", "explanation": ""}
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith("Câu hỏi:"):
+                quiz["question"] = line[8:].strip()
+            elif line[:2] in ["A.", "B.", "C.", "D."] and len(quiz["options"]) < 4:
+                quiz["options"].append(line)
+            elif line.startswith("Đáp án:"):
+                ans = line[7:].strip()
+                if ans and ans[0] in "ABCD":
+                    quiz["correct"] = ans[0]
+            elif line.startswith("Giải thích:"):
+                quiz["explanation"] = line[11:].strip()
+        
+        return quiz
+    except Exception as e:
+        logger.error(f"Generate quiz error: {e}")
+        return {"question": "Lỗi", "options": [], "correct": "", "explanation": ""}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("""
@@ -380,28 +321,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎮 **Game:**
 /guessnumber - Đoán số
 /noitu - Nối từ  
-/quiz - Câu đố lịch sử VN
+/quiz - Câu đố lịch sử
 /stopquiz - Dừng câu đố
 
 🏆 /leaderboard - BXH 24h
 📊 /stats - Điểm của bạn
-🧹 /cleanup - Dọn RAM
-
-💡 Quiz lịch sử chính xác 100%!
 """)
-
-async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lệnh dọn RAM thủ công"""
-    before = get_memory_usage()
-    cleanup_memory()
-    after = get_memory_usage()
-    
-    await update.message.reply_text(
-        f"🧹 **Đã dọn RAM!**\n"
-        f"Trước: {before:.1f} MB\n"
-        f"Sau: {after:.1f} MB\n"
-        f"Đã giải phóng: {before-after:.1f} MB"
-    )
 
 async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -445,7 +370,22 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     quiz_mode[chat_id] = True
     
-    await send_quiz(chat_id, update, context)
+    quiz = await generate_quiz()
+    
+    if quiz["question"] and len(quiz["options"]) >= 4:
+        quiz_sessions[chat_id] = quiz
+        
+        keyboard = []
+        for option in quiz["options"][:4]:
+            keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
+        keyboard.append([InlineKeyboardButton("❌ Dừng", callback_data="quiz_stop")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message = f"📜 **CÂU HỎI LỊCH SỬ**\n\n{quiz['question']}"
+        
+        await update.message.reply_text(message, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text("❌ Lỗi tạo câu hỏi! Thử lại sau.")
 
 async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -453,42 +393,7 @@ async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del quiz_mode[chat_id]
     if chat_id in quiz_sessions:
         del quiz_sessions[chat_id]
-    await update.message.reply_text("✅ Đã dừng câu đố lịch sử!")
-
-async def send_quiz(chat_id: int, update_or_query, context: ContextTypes.DEFAULT_TYPE):
-    """Gửi câu quiz mới - Fixed version"""
-    try:
-        quiz = await generate_quiz()
-        
-        if quiz["question"] and len(quiz["options"]) >= 4:
-            quiz_sessions[chat_id] = quiz
-            
-            keyboard = []
-            for option in quiz["options"][:4]:  # Chỉ lấy 4 đáp án đầu
-                keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
-            keyboard.append([InlineKeyboardButton("❌ Dừng", callback_data="quiz_stop")])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            message = f"📜 **CÂU HỎI LỊCH SỬ**\n\n{quiz['question']}"
-            
-            # Gửi message mới
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=message,
-                reply_markup=reply_markup
-            )
-        else:
-            # Nếu không tạo được quiz, thử lại
-            logger.warning("Failed to generate quiz, retrying...")
-            await asyncio.sleep(1)
-            await send_quiz(chat_id, update_or_query, context)
-            
-    except Exception as e:
-        logger.error(f"Error sending quiz: {e}")
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="❌ Lỗi tạo câu hỏi! Dùng /quiz để thử lại."
-        )
+    await update.message.reply_text("✅ Đã dừng câu đố!")
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scores = get_leaderboard_24h()
@@ -534,7 +439,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del quiz_mode[chat_id]
             if chat_id in quiz_sessions:
                 del quiz_sessions[chat_id]
-            await query.message.edit_text("✅ Đã dừng câu đố lịch sử!")
+            await query.message.edit_text("✅ Đã dừng câu đố!")
             return
             
         if chat_id not in quiz_sessions:
@@ -550,26 +455,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             result = f"❌ Sai! Đáp án: {quiz['correct']}\n{quiz['explanation']}"
         
-        # Xóa quiz session cũ
-        if chat_id in quiz_sessions:
-            del quiz_sessions[chat_id]
-        
-        # Edit message cũ với kết quả
+        del quiz_sessions[chat_id]
         await query.message.edit_text(result)
         
-        # Nếu đang ở chế độ quiz liên tục, gửi câu mới
+        # Nếu còn quiz mode, tạo câu mới
         if chat_id in quiz_mode:
-            await asyncio.sleep(2)  # Đợi 2 giây
-            # Gửi câu mới với context
-            await send_quiz(chat_id, query, context)
+            await asyncio.sleep(2)
+            
+            quiz = await generate_quiz()
+            if quiz["question"] and len(quiz["options"]) >= 4:
+                quiz_sessions[chat_id] = quiz
+                
+                keyboard = []
+                for option in quiz["options"][:4]:
+                    keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
+                keyboard.append([InlineKeyboardButton("❌ Dừng", callback_data="quiz_stop")])
+                
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                message = f"📜 **CÂU HỎI LỊCH SỬ**\n\n{quiz['question']}"
+                
+                await context.bot.send_message(chat_id, message, reply_markup=reply_markup)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
     chat_id = update.effective_chat.id
     user = update.effective_user
     username = user.username or user.first_name
-    
-    await auto_cleanup()
     
     if chat_id in active_games:
         game_info = active_games[chat_id]
@@ -583,7 +494,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     if is_finished and "Đúng" in response:
                         save_score(user.id, username, "guessnumber", game_info["game"].score)
-                        
+                    
                     if is_finished:
                         del active_games[chat_id]
                 else:
@@ -595,13 +506,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_finished, response = game_info["game"].play_word(message)
             await update.message.reply_text(response)
             
-            if is_finished:
-                if game_info["game"].score > 0:
-                    save_score(user.id, username, "noitu", game_info["game"].score)
+            if is_finished and game_info["game"].score > 0:
+                save_score(user.id, username, "noitu", game_info["game"].score)
                 del active_games[chat_id]
-                
         return
     
+    # Chat AI
     if chat_id not in chat_history:
         chat_history[chat_id] = []
         
@@ -616,7 +526,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     messages.extend(chat_history[chat_id])
     
     response = await call_vercel_api(messages, 300)
-    
     chat_history[chat_id].append({"role": "assistant", "content": response})
     
     await update.message.reply_text(response)
@@ -632,12 +541,11 @@ def main():
     application.add_handler(CommandHandler("hint", hint_command))
     application.add_handler(CommandHandler("leaderboard", leaderboard_command))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot started - Quiz fixed! 🎯")
+    logger.info("Bot started! ✅")
     application.run_polling()
 
 if __name__ == "__main__":
