@@ -11,7 +11,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
+VERCEL_API_KEY = os.environ.get("AI_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "anthropic/claude-3-haiku")
 PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
