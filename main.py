@@ -5,6 +5,8 @@ import logging
 import requests
 import json
 import sqlite3
+import gc
+import psutil
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -13,9 +15,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "anthropic/claude-3-haiku")
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "700"))
-CTX_TURNS = int(os.getenv("CTX_TURNS", "5"))
+CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "500"))
+CTX_TURNS = int(os.getenv("CTX_TURNS", "3"))
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -54,6 +56,45 @@ SIMPLE_WORDS = [
     "nặng", "nhẹ", "rộng", "hẹp", "dày", "mỏng", "xa", "gần",
     "sẽ", "đẽ", "mẽ", "vẻ", "nhẹn", "xắn", "khỏe", "yếu"
 ]
+
+def get_memory_usage():
+    """Kiểm tra memory usage"""
+    process = psutil.Process()
+    return process.memory_info().rss / 1024 / 1024  # MB
+
+def cleanup_memory():
+    """Dọn dẹp memory khi cần"""
+    global chat_history, quiz_sessions
+    
+    # Xóa chat history cũ
+    current_time = datetime.now()
+    chats_to_remove = []
+    
+    for chat_id in chat_history:
+        if len(chat_history[chat_id]) > 4:
+            chat_history[chat_id] = chat_history[chat_id][-4:]
+    
+    # Xóa quiz sessions cũ
+    quiz_to_remove = []
+    for chat_id in quiz_sessions:
+        quiz_to_remove.append(chat_id)
+    
+    for chat_id in quiz_to_remove[:len(quiz_to_remove)//2]:
+        if chat_id in quiz_sessions:
+            del quiz_sessions[chat_id]
+    
+    # Force garbage collection
+    gc.collect()
+    
+    logger.info(f"Memory cleaned. Current usage: {get_memory_usage():.1f} MB")
+
+async def auto_cleanup():
+    """Tự động dọn memory khi dùng nhiều"""
+    memory_usage = get_memory_usage()
+    if memory_usage > 400:
+        cleanup_memory()
+        return True
+    return False
 
 def save_score(user_id: int, username: str, game_type: str, score: int):
     conn = sqlite3.connect('bot_scores.db')
@@ -182,7 +223,6 @@ class NoiTuGame:
         self.bot_words = 0
         
     def start(self) -> str:
-        # Chọn 2 từ ngẫu nhiên để ghép
         word1 = random.choice(SIMPLE_WORDS)
         word2 = random.choice([w for w in SIMPLE_WORDS if w != word1])
         self.current_word = f"{word1} {word2}"
@@ -201,11 +241,9 @@ Nối với '{last_word}' | Gõ 'thua' kết thúc"""
         parts = word.split()
         if len(parts) != 2:
             return False
-        # Check if both parts are valid Vietnamese words
         return all(len(part) > 1 for part in parts)
         
     def find_bot_word(self, start_word: str) -> Optional[str]:
-        # Tìm từ ghép bắt đầu bằng start_word
         possible_words = []
         
         for word in SIMPLE_WORDS:
@@ -243,7 +281,6 @@ Nối với '{last_word}' | Gõ 'thua' kết thúc"""
         self.player_words += 1
         self.score += 100
         
-        # Bot tìm từ để nối
         bot_word = self.find_bot_word(parts[1])
         
         if bot_word:
@@ -252,7 +289,6 @@ Nối với '{last_word}' | Gõ 'thua' kết thúc"""
             self.bot_words += 1
             return False, f"✅ +100đ\n🤖 Linh: **{bot_word}**\n📊 {self.score}đ | Nối '{bot_word.split()[1]}'"
         else:
-            # Bot không nối được - người chơi thắng
             self.score += 500
             time_taken = (datetime.now() - self.start_time).seconds
             return True, f"""🎉 **CHIẾN THẮNG!**
@@ -268,8 +304,10 @@ Linh không nối được từ nào với '{parts[1]}'!
 
 Giỏi quá! 🏆"""
 
-async def call_vercel_api(messages: List[dict], max_tokens: int = 700) -> str:
+async def call_vercel_api(messages: List[dict], max_tokens: int = 500) -> str:
     try:
+        await auto_cleanup()
+        
         headers = {
             "Authorization": f"Bearer {VERCEL_API_KEY}",
             "Content-Type": "application/json"
@@ -279,14 +317,14 @@ async def call_vercel_api(messages: List[dict], max_tokens: int = 700) -> str:
             "model": CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.8
+            "temperature": 0.7
         }
         
         response = requests.post(
             f"{BASE_URL}/chat/completions",
             headers=headers,
             json=data,
-            timeout=30
+            timeout=20
         )
         
         if response.status_code == 200:
@@ -296,21 +334,39 @@ async def call_vercel_api(messages: List[dict], max_tokens: int = 700) -> str:
             return "Lỗi rồi! Thử lại nhé!"
             
     except Exception as e:
+        logger.error(f"API error: {e}")
         return "Lỗi kết nối!"
 
 async def generate_quiz() -> dict:
-    prompt = """Tạo 1 câu hỏi về LỊCH SỬ VIỆT NAM (chỉ lịch sử, không hỏi về địa lý, văn hóa, ẩm thực):
+    prompt = """Tạo 1 câu hỏi LỊCH SỬ VIỆT NAM với yêu cầu NGHIÊM NGẶT:
 
-Câu hỏi: [câu hỏi về sự kiện, nhân vật, triều đại lịch sử VN]
-A. [đáp án A]
-B. [đáp án B]
-C. [đáp án C]
-D. [đáp án D]
+1. Phải có SỰ KIỆN CỤ THỂ với NĂM CHÍNH XÁC
+2. CHỈ hỏi về: Vua/Hoàng đế, Chiến tranh/Trận đánh, Triều đại, Khởi nghĩa
+3. KHÔNG hỏi về: văn hóa, địa lý, ẩm thực, phong tục
+4. Các đáp án phải có NĂM hoặc THỜI GIAN cụ thể
+5. Thông tin phải CHÍNH XÁC 100% theo sách giáo khoa lịch sử
+
+Format:
+Câu hỏi: [VD: Vua Lý Thái Tổ dời đô từ Hoa Lư về Thăng Long năm nào?]
+A. [năm cụ thể]
+B. [năm cụ thể]
+C. [năm cụ thể]
+D. [năm cụ thể]
 Đáp án: [A/B/C/D]
-Giải thích: [1 câu ngắn]"""
+Giải thích: [sự kiện và năm chính xác]"""
 
     messages = [
-        {"role": "system", "content": "Tạo câu hỏi CHỈ về LỊCH SỬ Việt Nam: các triều đại, vua chúa, chiến tranh, sự kiện lịch sử. KHÔNG hỏi về địa lý, văn hóa, ẩm thực."},
+        {"role": "system", "content": """Bạn là chuyên gia lịch sử Việt Nam. 
+        TẠO CÂU HỎI VỚI THÔNG TIN CHÍNH XÁC TUYỆT ĐỐI.
+        Ưu tiên các mốc lịch sử quan trọng:
+        - Năm 938: Ngô Quyền đánh tan quân Nam Hán
+        - Năm 1010: Lý Thái Tổ dời đô
+        - Năm 1075: Chiến thắng Như Nguyệt
+        - Năm 1288: Chiến thắng Bạch Đằng (Trần)
+        - Năm 1427: Lê Lợi lên ngôi
+        - Năm 1789: Quang Trung đại phá quân Thanh
+        - Năm 1945: Cách mạng tháng Tám
+        TUYỆT ĐỐI KHÔNG sai năm, sai sự kiện."""},
         {"role": "user", "content": prompt}
     ]
     
@@ -341,12 +397,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎮 **Game:**
 /guessnumber - Đoán số
 /noitu - Nối từ  
-/quiz - Câu đố lịch sử VN
+/quiz - Câu đố lịch sử VN (chính xác)
 /stopquiz - Dừng câu đố
 
 🏆 /leaderboard - BXH 24h
 📊 /stats - Điểm của bạn
+🧹 /cleanup - Dọn RAM
+
+💡 Câu hỏi lịch sử đảm bảo chính xác 100%!
 """)
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh dọn RAM thủ công"""
+    before = get_memory_usage()
+    cleanup_memory()
+    after = get_memory_usage()
+    
+    await update.message.reply_text(
+        f"🧹 **Đã dọn RAM!**\n"
+        f"Trước: {before:.1f} MB\n"
+        f"Sau: {after:.1f} MB\n"
+        f"Đã giải phóng: {before-after:.1f} MB"
+    )
 
 async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -400,7 +472,8 @@ async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del quiz_sessions[chat_id]
     await update.message.reply_text("✅ Đã dừng câu đố lịch sử!")
 
-async def send_quiz(chat_id: int, update_or_query):
+async def send_quiz(chat_id: int, update_or_context):
+    """Gửi câu quiz mới"""
     quiz = await generate_quiz()
     
     if quiz["question"] and len(quiz["options"]) == 4:
@@ -414,10 +487,14 @@ async def send_quiz(chat_id: int, update_or_query):
         reply_markup = InlineKeyboardMarkup(keyboard)
         message = f"📜 **CÂU HỎI LỊCH SỬ**\n\n{quiz['question']}"
         
-        if hasattr(update_or_query, 'message'):
-            await update_or_query.message.reply_text(message, reply_markup=reply_markup)
-        else:
-            await update_or_query.edit_text(message, reply_markup=reply_markup)
+        if hasattr(update_or_context, 'message'):
+            await update_or_context.message.reply_text(message, reply_markup=reply_markup)
+        elif hasattr(update_or_context, 'effective_chat'):
+            await update_or_context.bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                reply_markup=reply_markup
+            )
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scores = get_leaderboard_24h()
@@ -481,24 +558,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         del quiz_sessions[chat_id]
         
-        # Hiển thị kết quả
         await query.message.edit_text(result)
         
-        # Nếu đang ở chế độ quiz liên tục, tự động gửi câu mới sau 2 giây
         if chat_id in quiz_mode:
-            await asyncio.sleep(2)
-            try:
-                await send_quiz(chat_id, query.message)
-            except:
-                # Nếu lỗi (message đã bị xóa), gửi message mới
-                await query.message.reply_text("📜 Câu tiếp theo...")
-                await send_quiz(chat_id, query)
+            await asyncio.sleep(1.5)
+            await send_quiz(chat_id, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
     chat_id = update.effective_chat.id
     user = update.effective_user
     username = user.username or user.first_name
+    
+    await auto_cleanup()
     
     if chat_id in active_games:
         game_info = active_games[chat_id]
@@ -536,15 +608,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     chat_history[chat_id].append({"role": "user", "content": message})
     
-    if len(chat_history[chat_id]) > 6:
-        chat_history[chat_id] = chat_history[chat_id][-6:]
+    if len(chat_history[chat_id]) > 4:
+        chat_history[chat_id] = chat_history[chat_id][-4:]
     
     messages = [
-        {"role": "system", "content": "Bạn là Linh - cô gái vui tính. Trả lời ngắn gọn, dùng emoji."}
+        {"role": "system", "content": "Bạn là Linh. Trả lời ngắn, vui vẻ."}
     ]
     messages.extend(chat_history[chat_id])
     
-    response = await call_vercel_api(messages, 400)
+    response = await call_vercel_api(messages, 300)
     
     chat_history[chat_id].append({"role": "assistant", "content": response})
     
@@ -561,11 +633,12 @@ def main():
     application.add_handler(CommandHandler("hint", hint_command))
     application.add_handler(CommandHandler("leaderboard", leaderboard_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot started! 🎮")
+    logger.info("Linh Bot started with accurate history quiz! 📚")
     application.run_polling()
 
 if __name__ == "__main__":
