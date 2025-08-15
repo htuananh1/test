@@ -3,6 +3,7 @@ import asyncio
 import random
 import json
 import aiohttp
+import io
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import logging
@@ -84,8 +85,6 @@ class GameManager:
         ]
         
         self.math_operations = ['+', '-', '*']
-        
-        self.tic_tac_toe_board = [[" " for _ in range(3)] for _ in range(3)]
 
     def create_tic_tac_toe_keyboard(self, board):
         keyboard = []
@@ -211,27 +210,18 @@ async def generate_image(prompt: str) -> bytes:
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         
-        contents = [
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=prompt)]
-            )
-        ]
-        
-        config = types.GenerateContentConfig(
-            response_modalities=["IMAGE"]
-        )
-        
-        response = client.models.generate_content(
+        response = client.models.generate_image(
             model=GEMINI_IMAGE_MODEL,
-            contents=contents,
-            config=config
+            prompt=prompt,
+            number_of_images=1,
+            safety_filter_level="block_none",
+            person_generation="allow_adult",
+            aspect_ratio="1:1"
         )
         
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.inline_data and part.inline_data.data:
-                    return part.inline_data.data
+        for image in response.images:
+            return image._image_bytes
+            
     except Exception as e:
         logger.error(f"Image generation error: {e}")
     return None
@@ -264,7 +254,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
+    help_text = f"""
 📚 **HƯỚNG DẪN SỬ DỤNG BOT**
 
 **💬 Chat AI:**
@@ -279,8 +269,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **🖼 Tạo ảnh:**
 • /img [mô tả] - Tạo ảnh từ văn bản
-• Mô tả chi tiết để có kết quả tốt
-• VD: /img vẽ phong cảnh Vịnh Hạ Long
+• VD: /img sunset on beach
+• VD: /img futuristic city
 
 **🌤 Thời tiết:**
 • /weather [thành phố] - Xem thời tiết
@@ -304,7 +294,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Gửi "thời tiết Hà Nội" để xem nhanh
 • Hỏi "code Python tính giai thừa"
 • Chat tự nhiên như với người
-    """.format(CTX_TURNS=CTX_TURNS)
+    """
     
     keyboard = [
         [InlineKeyboardButton("💬 Chat ngay", callback_data="chat")],
@@ -312,11 +302,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
-        help_text, 
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=reply_markup
-    )
+    if hasattr(update, 'message') and update.message:
+        await update.message.reply_text(
+            help_text, 
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup
+        )
+    else:
+        await update.callback_query.message.reply_text(
+            help_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup
+        )
 
 async def code_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -368,10 +365,10 @@ async def img_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🖼 **TẠO ẢNH VỚI AI**\n\n"
             "Mô tả hình ảnh bạn muốn tạo:\n"
-            "• Phong cảnh: vẽ bãi biển hoàng hôn\n"
-            "• Nhân vật: robot tương lai công nghệ cao\n"
-            "• Trừu tượng: vũ trụ với các vì sao\n\n"
-            "Mô tả càng chi tiết, ảnh càng đẹp!"
+            "• sunset on beach\n"
+            "• futuristic robot\n"
+            "• fantasy dragon\n\n"
+            "Gửi mô tả bằng tiếng Anh để có kết quả tốt nhất!"
         )
         return
     
@@ -380,18 +377,17 @@ async def img_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎨 Đang tạo ảnh, vui lòng đợi...")
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_PHOTO)
     
-    enhanced_prompt = f"{prompt}, high quality, detailed, 4k resolution"
-    
-    image_data = await generate_image(enhanced_prompt)
+    image_data = await generate_image(prompt)
     
     if image_data:
         await update.message.reply_photo(
-            photo=image_data,
+            photo=io.BytesIO(image_data),
             caption=f"🖼 **Ảnh được tạo từ:** {prompt}\n\n💡 Mẹo: Thêm chi tiết để có ảnh đẹp hơn!"
         )
     else:
         await update.message.reply_text(
-            "❌ Không thể tạo ảnh. Vui lòng thử lại với mô tả khác."
+            "❌ Không thể tạo ảnh. Vui lòng thử lại với mô tả khác.\n"
+            "💡 Mẹo: Dùng tiếng Anh và mô tả rõ ràng hơn."
         )
 
 async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -447,9 +443,262 @@ async def game_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    if hasattr(update, 'message') and update.message:
+        await update.message.reply_text(
+            "🎮 **CHỌN TRÒ CHƠI:**\n\n"
+            "Chọn một trò chơi bên dưới để bắt đầu!",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup
+        )
+    else:
+        await update.callback_query.message.reply_text(
+            "🎮 **CHỌN TRÒ CHƠI:**\n\n"
+            "Chọn một trò chơi bên dưới để bắt đầu!",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup
+        )
+
+async def guess_number_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if hasattr(update, 'callback_query'):
+        user_id = update.callback_query.from_user.id
+        message = update.callback_query.message
+    else:
+        user_id = update.effective_user.id
+        message = update.message
+    
+    if user_id not in user_games:
+        user_games[user_id] = {}
+    
+    user_games[user_id]['guess_number'] = {
+        'number': random.randint(1, 100),
+        'attempts': 0,
+        'max_attempts': 7
+    }
+    
+    await message.reply_text(
+        "🎯 **TRÒ CHƠI ĐOÁN SỐ**\n\n"
+        "Tôi đang nghĩ một số từ 1 đến 100.\n"
+        "Bạn có 7 lần đoán. Hãy gửi số dự đoán!",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def quiz_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if hasattr(update, 'callback_query'):
+        user_id = update.callback_query.from_user.id
+        message = update.callback_query.message
+    else:
+        user_id = update.effective_user.id
+        message = update.message
+    
+    game_manager = GameManager()
+    
+    if user_id not in user_games:
+        user_games[user_id] = {}
+    
+    question = random.choice(game_manager.quiz_questions)
+    user_games[user_id]['quiz'] = {
+        'question': question,
+        'score': user_games[user_id].get('quiz', {}).get('score', 0)
+    }
+    
+    keyboard = []
+    for i, option in enumerate(question['options']):
+        keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{i}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await message.reply_text(
+        f"❓ **QUIZ VIỆT NAM**\n\n{question['question']}",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=reply_markup
+    )
+
+async def math_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if hasattr(update, 'callback_query'):
+        user_id = update.callback_query.from_user.id
+        message = update.callback_query.message
+    else:
+        user_id = update.effective_user.id
+        message = update.message
+    
+    game_manager = GameManager()
+    
+    if user_id not in user_games:
+        user_games[user_id] = {}
+    
+    num1 = random.randint(1, 50)
+    num2 = random.randint(1, 50)
+    operation = random.choice(game_manager.math_operations)
+    
+    if operation == '+':
+        answer = num1 + num2
+    elif operation == '-':
+        answer = num1 - num2
+    else:
+        answer = num1 * num2
+    
+    user_games[user_id]['math'] = {
+        'answer': answer,
+        'score': user_games[user_id].get('math', {}).get('score', 0)
+    }
+    
+    await message.reply_text(
+        f"🧮 **GAME TOÁN HỌC**\n\n"
+        f"Tính: {num1} {operation} {num2} = ?\n\n"
+        f"Điểm hiện tại: {user_games[user_id]['math']['score']}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def riddle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if hasattr(update, 'callback_query'):
+        user_id = update.callback_query.from_user.id
+        message = update.callback_query.message
+    else:
+        user_id = update.effective_user.id
+        message = update.message
+    
+    game_manager = GameManager()
+    
+    if user_id not in user_games:
+        user_games[user_id] = {}
+    
+    riddle = random.choice(game_manager.riddles)
+    user_games[user_id]['riddle'] = riddle
+    
+    await message.reply_text(
+        f"🤔 **CÂU ĐỐ VUI**\n\n{riddle['riddle']}\n\n"
+        f"Gửi câu trả lời của bạn!",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def tic_tac_toe_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if hasattr(update, 'callback_query'):
+        user_id = update.callback_query.from_user.id
+        message = update.callback_query.message
+    else:
+        user_id = update.effective_user.id
+        message = update.message
+    
+    game_manager = GameManager()
+    
+    if user_id not in user_games:
+        user_games[user_id] = {}
+    
+    user_games[user_id]['tictactoe'] = {
+        'board': [[" " for _ in range(3)] for _ in range(3)],
+        'player': 'X',
+        'ai': 'O'
+    }
+    
+    keyboard = game_manager.create_tic_tac_toe_keyboard(user_games[user_id]['tictactoe']['board'])
+    
+    await message.reply_text(
+        "⭕ **CỜ CARO VỚI AI**\n\n"
+        "Bạn là X, AI là O\n"
+        "Chọn ô để đánh:",
+        reply_markup=keyboard
+    )
+
+async def rock_paper_scissors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if hasattr(update, 'callback_query'):
+        message = update.callback_query.message
+    else:
+        message = update.message
+        
+    keyboard = [
+        [InlineKeyboardButton("🪨 Đá", callback_data="rps_rock")],
+        [InlineKeyboardButton("📄 Giấy", callback_data="rps_paper")],
+        [InlineKeyboardButton("✂️ Kéo", callback_data="rps_scissors")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await message.reply_text(
+        "✂️ **OẲN TÙ TÌ**\n\nChọn nước đi của bạn:",
+        reply_markup=reply_markup
+    )
+
+async def dice_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if hasattr(update, 'callback_query'):
+        message = update.callback_query.message
+    else:
+        message = update.message
+        
+    user_dice = random.randint(1, 6)
+    bot_dice = random.randint(1, 6)
+    
+    result = "🎉 Bạn thắng!" if user_dice > bot_dice else "🤖 Bot thắng!" if bot_dice > user_dice else "🤝 Hòa!"
+    
+    await message.reply_text(
+        f"🎲 **XÚC XẮC**\n\n"
+        f"Bạn: {user_dice} 🎲\n"
+        f"Bot: {bot_dice} 🎲\n\n"
+        f"{result}"
+    )
+
+async def word_chain_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if hasattr(update, 'callback_query'):
+        user_id = update.callback_query.from_user.id
+        message = update.callback_query.message
+    else:
+        user_id = update.effective_user.id
+        message = update.message
+    
+    if user_id not in user_games:
+        user_games[user_id] = {}
+    
+    starter_words = ["con mèo", "bầu trời", "hoa sen", "đất nước", "tình yêu", "mặt trời", "biển cả"]
+    start_word = random.choice(starter_words)
+    
+    user_games[user_id]['word_chain'] = {
+        'last_word': start_word,
+        'used_words': [start_word],
+        'score': 0
+    }
+    
+    await message.reply_text(
+        f"🔤 **TRÒ CHƠI NỐI TỪ**\n\n"
+        f"Từ đầu tiên: **{start_word}**\n"
+        f"Hãy nối với một từ bắt đầu bằng chữ '{start_word.split()[-1][-1]}'\n\n"
+        f"Gõ /stop để dừng chơi",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def vietnam_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    info_text = """
+🇻🇳 **THÔNG TIN VỀ VIỆT NAM**
+
+**Thông tin cơ bản:**
+• Thủ đô: Hà Nội
+• Dân số: ~98 triệu người
+• Diện tích: 331,690 km²
+• Ngôn ngữ: Tiếng Việt
+• Tiền tệ: Đồng (VND)
+
+**Địa lý:**
+• 63 tỉnh thành
+• 3,260 km bờ biển
+• 2 đồng bằng lớn: Sông Hồng & Cửu Long
+
+**Di sản UNESCO:**
+• Vịnh Hạ Long
+• Phố cổ Hội An
+• Cố đô Huế
+• Thánh địa Mỹ Sơn
+• Phong Nha - Kẻ Bàng
+
+**Ẩm thực nổi tiếng:**
+• Phở, Bánh mì, Bún bò Huế
+• Bánh xèo, Gỏi cuốn, Nem rán
+    """
+    
+    keyboard = [
+        [InlineKeyboardButton("🌤 Thời tiết", callback_data="weather")],
+        [InlineKeyboardButton("🎮 Chơi Quiz VN", callback_data="game_quiz")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await update.message.reply_text(
-        "🎮 **CHỌN TRÒ CHƠI:**\n\n"
-        "Chọn một trò chơi bên dưới để bắt đầu!",
+        info_text,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=reply_markup
     )
@@ -503,7 +752,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 pass
         
-        if 'math' in user_games[user_id]:
+        if 'math' in user_games[user_id] and 'answer' in user_games[user_id]['math']:
             try:
                 answer = int(message_text)
                 if answer == user_games[user_id]['math']['answer']:
@@ -521,6 +770,73 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             except ValueError:
                 pass
+        
+        if 'riddle' in user_games[user_id]:
+            riddle = user_games[user_id]['riddle']
+            if riddle['answer'].lower() in message_text.lower():
+                await update.message.reply_text(
+                    f"🎉 Chính xác! Đáp án là: {riddle['answer']}\n"
+                    f"Gõ /riddle để chơi tiếp"
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Sai rồi! Đáp án là: {riddle['answer']}"
+                )
+            del user_games[user_id]['riddle']
+            return
+        
+        if 'word_chain' in user_games[user_id]:
+            if message_text.lower() == "/stop":
+                score = user_games[user_id]['word_chain']['score']
+                await update.message.reply_text(f"🏁 Kết thúc! Điểm của bạn: {score}")
+                del user_games[user_id]['word_chain']
+                return
+                
+            game = user_games[user_id]['word_chain']
+            last_word = game['last_word']
+            last_char = last_word.split()[-1][-1]
+            
+            if message_text[0] == last_char and message_text not in game['used_words']:
+                game['used_words'].append(message_text)
+                game['last_word'] = message_text
+                game['score'] += 1
+                
+                vietnamese_words = {
+                    'a': ['anh', 'ăn cơm', 'áo dài'],
+                    'b': ['bàn', 'bút', 'bánh mì'],
+                    'c': ['cây', 'con', 'cửa sổ'],
+                    'd': ['đường', 'đất', 'đêm tối'],
+                    'g': ['gà', 'gió', 'giấy'],
+                    'h': ['hoa', 'hồ', 'hát'],
+                    'i': ['ít', 'im lặng'],
+                    'm': ['mẹ', 'mưa', 'máy'],
+                    'n': ['nhà', 'nước', 'người'],
+                    't': ['tay', 'trời', 'tình'],
+                }
+                
+                bot_words = vietnamese_words.get(message_text[-1], ['từ'])
+                available_words = [w for w in bot_words if w not in game['used_words']]
+                if available_words:
+                    bot_word = random.choice(available_words)
+                else:
+                    bot_word = "từ"
+                    
+                game['used_words'].append(bot_word)
+                game['last_word'] = bot_word
+                
+                await update.message.reply_text(
+                    f"✅ Đúng! Điểm: {game['score']}\n"
+                    f"Từ của tôi: **{bot_word}**\n"
+                    f"Nối với chữ '{bot_word[-1]}'",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Không hợp lệ!\n"
+                    f"Điểm cuối: {game['score']}"
+                )
+                del user_games[user_id]['word_chain']
+            return
     
     message_lower = message_text.lower()
     
@@ -562,7 +878,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🖼 Để tạo ảnh, dùng lệnh:\n"
             "`/img [mô tả hình ảnh]`\n\n"
-            "Ví dụ: `/img vẽ mặt trời mọc trên biển`",
+            "Ví dụ: `/img sunset on beach`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -595,176 +911,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"📄 Trang {i+1}/{len(parts)}\n\n{part}")
     else:
         await update.message.reply_text(response)
-
-async def guess_number_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if user_id not in user_games:
-        user_games[user_id] = {}
-    
-    user_games[user_id]['guess_number'] = {
-        'number': random.randint(1, 100),
-        'attempts': 0,
-        'max_attempts': 7
-    }
-    
-    await update.message.reply_text(
-        "🎯 **TRÒ CHƠI ĐOÁN SỐ**\n\n"
-        "Tôi đang nghĩ một số từ 1 đến 100.\n"
-        "Bạn có 7 lần đoán. Hãy gửi số dự đoán!"
-    )
-
-async def quiz_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    game_manager = GameManager()
-    
-    if user_id not in user_games:
-        user_games[user_id] = {}
-    
-    question = random.choice(game_manager.quiz_questions)
-    user_games[user_id]['quiz'] = {
-        'question': question,
-        'score': user_games[user_id].get('quiz', {}).get('score', 0)
-    }
-    
-    keyboard = []
-    for i, option in enumerate(question['options']):
-        keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{i}")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        f"❓ **QUIZ VIỆT NAM**\n\n{question['question']}",
-        reply_markup=reply_markup
-    )
-
-async def math_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    game_manager = GameManager()
-    
-    if user_id not in user_games:
-        user_games[user_id] = {}
-    
-    num1 = random.randint(1, 50)
-    num2 = random.randint(1, 50)
-    operation = random.choice(game_manager.math_operations)
-    
-    if operation == '+':
-        answer = num1 + num2
-    elif operation == '-':
-        answer = num1 - num2
-    else:
-        answer = num1 * num2
-    
-    user_games[user_id]['math'] = {
-        'answer': answer,
-        'score': user_games[user_id].get('math', {}).get('score', 0)
-    }
-    
-    await update.message.reply_text(
-        f"🧮 **GAME TOÁN HỌC**\n\n"
-        f"Tính: {num1} {operation} {num2} = ?\n\n"
-        f"Điểm hiện tại: {user_games[user_id]['math']['score']}"
-    )
-
-async def riddle_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    game_manager = GameManager()
-    
-    if user_id not in user_games:
-        user_games[user_id] = {}
-    
-    riddle = random.choice(game_manager.riddles)
-    user_games[user_id]['riddle'] = riddle
-    
-    await update.message.reply_text(
-        f"🤔 **CÂU ĐỐ VUI**\n\n{riddle['riddle']}\n\n"
-        f"Gửi câu trả lời của bạn!"
-    )
-
-async def tic_tac_toe_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    game_manager = GameManager()
-    
-    if user_id not in user_games:
-        user_games[user_id] = {}
-    
-    user_games[user_id]['tictactoe'] = {
-        'board': [[" " for _ in range(3)] for _ in range(3)],
-        'player': 'X',
-        'ai': 'O'
-    }
-    
-    keyboard = game_manager.create_tic_tac_toe_keyboard(user_games[user_id]['tictactoe']['board'])
-    
-    await update.message.reply_text(
-        "⭕ **CỜ CARO VỚI AI**\n\n"
-        "Bạn là X, AI là O\n"
-        "Chọn ô để đánh:",
-        reply_markup=keyboard
-    )
-
-async def word_chain_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if user_id not in user_games:
-        user_games[user_id] = {}
-    
-    starter_words = ["con mèo", "bầu trời", "hoa sen", "đất nước", "tình yêu", "mặt trời", "biển cả"]
-    start_word = random.choice(starter_words)
-    
-    user_games[user_id]['word_chain'] = {
-        'last_word': start_word,
-        'used_words': [start_word],
-        'score': 0
-    }
-    
-    await update.message.reply_text(
-        f"🔤 **TRÒ CHƠI NỐI TỪ**\n\n"
-        f"Từ đầu tiên: **{start_word}**\n"
-        f"Hãy nối với một từ bắt đầu bằng chữ '{start_word.split()[-1][-1]}'\n\n"
-        f"Gõ /stop để dừng chơi"
-    )
-
-async def vietnam_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    info_text = """
-🇻🇳 **THÔNG TIN VỀ VIỆT NAM**
-
-**Thông tin cơ bản:**
-• Thủ đô: Hà Nội
-• Dân số: ~98 triệu người
-• Diện tích: 331,690 km²
-• Ngôn ngữ: Tiếng Việt
-• Tiền tệ: Đồng (VND)
-
-**Địa lý:**
-• 63 tỉnh thành
-• 3,260 km bờ biển
-• 2 đồng bằng lớn: Sông Hồng & Cửu Long
-
-**Di sản UNESCO:**
-• Vịnh Hạ Long
-• Phố cổ Hội An
-• Cố đô Huế
-• Thánh địa Mỹ Sơn
-• Phong Nha - Kẻ Bàng
-
-**Ẩm thực nổi tiếng:**
-• Phở, Bánh mì, Bún bò Huế
-• Bánh xèo, Gỏi cuốn, Nem rán
-    """
-    
-    keyboard = [
-        [InlineKeyboardButton("🌤 Thời tiết", callback_data="weather")],
-        [InlineKeyboardButton("🎮 Chơi Quiz VN", callback_data="game_quiz")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        info_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=reply_markup
-    )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -800,7 +946,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states[user_id] = "waiting_image_prompt"
         await query.message.reply_text(
             "🖼 **TẠO ẢNH**\n\n"
-            "Mô tả hình ảnh bạn muốn tạo:"
+            "Mô tả hình ảnh bạn muốn tạo (tiếng Anh):"
         )
     
     elif query.data == "game":
@@ -841,6 +987,91 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await word_chain_game(query, context)
         elif game_type == "tictactoe":
             await tic_tac_toe_game(query, context)
+        elif game_type == "rps":
+            await rock_paper_scissors(query, context)
+        elif game_type == "dice":
+            await dice_game(query, context)
+    
+    elif query.data.startswith("quiz_"):
+        answer_idx = int(query.data.split("_")[1])
+        if user_id in user_games and 'quiz' in user_games[user_id]:
+            question = user_games[user_id]['quiz']['question']
+            if answer_idx == question['correct']:
+                user_games[user_id]['quiz']['score'] += 1
+                await query.message.edit_text(
+                    f"✅ Đúng!\nĐiểm: {user_games[user_id]['quiz']['score']}\n\n/quiz để chơi tiếp"
+                )
+            else:
+                await query.message.edit_text(
+                    f"❌ Sai! Đáp án đúng: {question['options'][question['correct']]}\n"
+                    f"Điểm: {user_games[user_id]['quiz']['score']}"
+                )
+    
+    elif query.data.startswith("rps_"):
+        choice = query.data.split("_")[1]
+        choices = {"rock": "🪨 Đá", "paper": "📄 Giấy", "scissors": "✂️ Kéo"}
+        bot_choice = random.choice(list(choices.keys()))
+        
+        win_conditions = {
+            ("rock", "scissors"), 
+            ("paper", "rock"),
+            ("scissors", "paper")
+        }
+        
+        if choice == bot_choice:
+            result = "🤝 Hòa!"
+        elif (choice, bot_choice) in win_conditions:
+            result = "🎉 Bạn thắng!"
+        else:
+            result = "🤖 Bot thắng!"
+        
+        await query.message.edit_text(
+            f"Bạn: {choices[choice]}\n"
+            f"Bot: {choices[bot_choice]}\n\n{result}"
+        )
+    
+    elif query.data.startswith("ttt_"):
+        if user_id not in user_games or 'tictactoe' not in user_games[user_id]:
+            await tic_tac_toe_game(query, context)
+            return
+        
+        if query.data == "ttt_reset":
+            await tic_tac_toe_game(query, context)
+            return
+        
+        row = int(query.data.split("_")[1])
+        col = int(query.data.split("_")[2])
+        
+        game = user_games[user_id]['tictactoe']
+        board = game['board']
+        
+        if board[row][col] == " ":
+            board[row][col] = game['player']
+            
+            winner = game_manager.check_winner(board)
+            if winner:
+                if winner == "Draw":
+                    await query.message.edit_text("🤝 Hòa!")
+                else:
+                    await query.message.edit_text(f"🎉 {winner} thắng!")
+                del user_games[user_id]['tictactoe']
+                return
+            
+            ai_move = game_manager.ai_move(board)
+            if ai_move:
+                board[ai_move[0]][ai_move[1]] = game['ai']
+            
+            winner = game_manager.check_winner(board)
+            if winner:
+                keyboard = game_manager.create_tic_tac_toe_keyboard(board)
+                if winner == "Draw":
+                    await query.message.edit_text("🤝 Hòa!", reply_markup=keyboard)
+                else:
+                    await query.message.edit_text(f"{'🎉 Bạn' if winner == 'X' else '🤖 AI'} thắng!", reply_markup=keyboard)
+                del user_games[user_id]['tictactoe']
+            else:
+                keyboard = game_manager.create_tic_tac_toe_keyboard(board)
+                await query.message.edit_reply_markup(reply_markup=keyboard)
 
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
