@@ -15,7 +15,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "alibaba/qwen-3-32b")
-QUIZ_MODEL = "openai/gpt-4o-mini"
+QUIZ_MODEL = "openai/gpt-oss-120b"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 CTX_TURNS = int(os.getenv("CTX_TURNS", "3"))
 
@@ -216,18 +216,26 @@ class VuaTiengVietGame:
         self.score = 0
         self.start_time = datetime.now()
         self.round_count = 0
+        self.difficulty_level = 1
         
     async def start_new_round(self) -> str:
         self.round_count += 1
         self.attempts = 0
         
+        # Tăng độ khó sau mỗi 3 câu
+        if self.round_count % 3 == 0:
+            self.difficulty_level = min(self.difficulty_level + 1, 3)
+        
         await asyncio.sleep(5)
         
         self.current_word, self.scrambled = await self.generate_word_puzzle()
         
+        difficulty_text = ["DỄ", "TRUNG BÌNH", "KHÓ"][self.difficulty_level - 1]
+        
         return f"""🎮 **VUA TIẾNG VIỆT - CÂU {self.round_count}**
+📊 Độ khó: **{difficulty_text}**
 
-Sắp xếp các chữ cái sau thành từ có nghĩa:
+Sắp xếp các ký tự sau thành từ/cụm từ có nghĩa:
 
 🔤 **{self.scrambled}**
 
@@ -237,77 +245,127 @@ Sắp xếp các chữ cái sau thành từ có nghĩa:
 Gõ đáp án của bạn!"""
 
     async def generate_word_puzzle(self) -> Tuple[str, str]:
-        random_number = random.randint(1, 1000)
-        category = random.choice(["động vật", "thực vật", "đồ vật", "cảm xúc", "hành động", "màu sắc", "thời tiết", "gia đình"])
+        # Từ vựng theo độ khó
+        difficulty_words = {
+            1: [  # Dễ (4-6 chữ)
+                "học sinh", "giáo viên", "bạn bè", "gia đình", "mùa xuân",
+                "mùa hạ", "mùa thu", "mùa đông", "trái tim", "nụ cười",
+                "ánh sáng", "bóng tối", "sức khỏe", "hạnh phúc", "tình yêu"
+            ],
+            2: [  # Trung bình (6-8 chữ)
+                "thành công", "cố gắng", "kiên trì", "phấn đấu", "ước mơ",
+                "hoài bão", "tri thức", "văn hóa", "lịch sử", "truyền thống",
+                "phát triển", "công nghệ", "khoa học", "nghệ thuật", "sáng tạo"
+            ],
+            3: [  # Khó (8+ chữ)
+                "độc lập tự do", "cách mạng công nghiệp", "phát triển bền vững",
+                "kinh tế thị trường", "toàn cầu hóa", "chuyển đổi số",
+                "trí tuệ nhân tạo", "bảo vệ môi trường", "biến đổi khí hậu",
+                "văn minh nhân loại", "di sản văn hóa", "danh lam thắng cảnh"
+            ]
+        }
         
-        prompt = f"""Create a Vietnamese word puzzle. Category: {category}, variation: {random_number}.
+        # Lựa chọn từ theo độ khó
+        word_list = difficulty_words.get(self.difficulty_level, difficulty_words[1])
+        
+        # Nếu AI có thể tạo từ
+        prompt = f"""Tạo 1 câu đố xáo trộn chữ cái tiếng Việt.
 
-Requirements:
-- Generate ONE common Vietnamese word (2-8 letters)
-- Must be different each time
-- Output MUST be in Vietnamese
+Yêu cầu:
+1. Tạo 1 từ/cụm từ tiếng Việt độ khó {self.difficulty_level}/3
+2. Từ phải {'4-6' if self.difficulty_level == 1 else '6-8' if self.difficulty_level == 2 else '8-12'} chữ cái
+3. Xáo trộn các CHỮ CÁI (giữ nguyên dấu thanh với chữ cái)
+4. Giữ các cụm phụ âm: th, tr, ch, ph, nh, ng, gh, kh không tách
 
-Return EXACTLY in this format (in Vietnamese):
-Từ gốc: [vietnamese word]
-Xáo trộn: [scrambled letters separated by /]
+Trả về JSON:
+{{
+  "original": "từ gốc",
+  "scrambled": "chữ cái xáo trộn cách nhau bởi /"
+}}
 
-Example output:
-Từ gốc: hạnh phúc
-Xáo trộn: h / ạ / p / h / n / ú / c"""
+Ví dụ:
+{{
+  "original": "thành công",
+  "scrambled": "th / ô / c / g / n / à / n / h"
+}}"""
 
         messages = [
-            {"role": "system", "content": "You create Vietnamese word puzzles. Always respond in Vietnamese language only."},
+            {"role": "system", "content": "Bạn tạo câu đố xáo trộn chữ cái tiếng Việt. Giữ cụm phụ âm không tách."},
             {"role": "user", "content": prompt}
         ]
         
-        response = await call_api(messages, model=QUIZ_MODEL, max_tokens=100)
-        
-        if response:
-            lines = response.strip().split('\n')
-            word = ""
-            scrambled = ""
+        try:
+            response = await call_api(messages, model=QUIZ_MODEL, max_tokens=150)
             
-            for line in lines:
-                if line.startswith("Từ gốc:"):
-                    word = line.replace("Từ gốc:", "").strip()
-                elif line.startswith("Xáo trộn:"):
-                    scrambled = line.replace("Xáo trộn:", "").strip()
-            
-            if word and scrambled:
-                return word, scrambled
+            if response:
+                json_start = response.find('{')
+                json_end = response.rfind('}') + 1
+                if json_start != -1 and json_end > json_start:
+                    json_str = response[json_start:json_end]
+                    data = json.loads(json_str)
+                    
+                    original = data.get("original", "").strip()
+                    scrambled = data.get("scrambled", "").strip()
+                    
+                    if original and scrambled:
+                        return original, scrambled
+        except Exception as e:
+            logger.error(f"Generate word puzzle error: {e}")
         
-        fallback_words = [
-            ("yêu", "ê / y / u"),
-            ("mưa", "ư / m / a"),
-            ("nắng", "ắ / n / g / n"),
-            ("hoa", "o / h / a"),
-            ("cây", "â / c / y"),
-            ("biển", "ể / b / i / n"),
-            ("sông", "ô / s / n / g"),
-            ("núi", "ú / n / i"),
-            ("trời", "ờ / t / r / i"),
-            ("đất", "ấ / đ / t"),
-            ("mây", "â / m / y"),
-            ("gió", "ó / g / i"),
-            ("sao", "a / s / o"),
-            ("trăng", "ă / t / r / n / g"),
-            ("vàng", "à / v / n / g")
-        ]
-        return random.choice(fallback_words)
+        # Fallback - tự xáo trộn
+        word = random.choice(word_list)
+        
+        # Xáo trộn thông minh - giữ cụm phụ âm
+        def smart_scramble(text):
+            # Định nghĩa cụm phụ âm
+            clusters = ['th', 'tr', 'ch', 'ph', 'nh', 'ng', 'gh', 'kh', 'gi', 'qu']
+            result = []
+            i = 0
+            text_no_space = text.replace(' ', '')
+            
+            while i < len(text_no_space):
+                # Kiểm tra cụm phụ âm
+                found_cluster = False
+                for cluster in clusters:
+                    if text_no_space[i:i+len(cluster)].lower() == cluster:
+                        result.append(text_no_space[i:i+len(cluster)])
+                        i += len(cluster)
+                        found_cluster = True
+                        break
+                
+                if not found_cluster:
+                    result.append(text_no_space[i])
+                    i += 1
+            
+            # Xáo trộn
+            random.shuffle(result)
+            return ' / '.join(result)
+        
+        scrambled = smart_scramble(word)
+        return word, scrambled
         
     def check_answer(self, answer: str) -> Tuple[bool, str]:
         answer = answer.lower().strip()
         self.attempts += 1
         
-        if answer == self.current_word:
-            points = (self.max_attempts - self.attempts + 1) * 100
+        # So sánh không phân biệt dấu cách
+        answer_normalized = ''.join(answer.split())
+        original_normalized = ''.join(self.current_word.lower().split())
+        
+        if answer_normalized == original_normalized:
+            # Điểm thưởng theo độ khó
+            base_points = (self.max_attempts - self.attempts + 1) * 100
+            difficulty_bonus = self.difficulty_level * 50
+            points = base_points + difficulty_bonus
+            
             self.score += points
             time_taken = (datetime.now() - self.start_time).seconds
             
             return True, f"""✅ **CHÍNH XÁC!**
 
 Đáp án: **{self.current_word}**
-Điểm: +{points} (Tổng: {self.score})
+Điểm: +{points} (Cơ bản: {base_points} + Độ khó: {difficulty_bonus})
+Tổng điểm: {self.score}
 Thời gian: {time_taken}s
 
 Gõ 'tiếp' để chơi tiếp hoặc 'dừng' để kết thúc"""
@@ -333,8 +391,8 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
             "model": model or CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.8,
-            "top_p": 0.95
+            "temperature": 0.7,
+            "top_p": 0.9
         }
         
         response = requests.post(
@@ -361,35 +419,36 @@ async def generate_quiz(chat_id: int) -> dict:
     if chat_id not in quiz_history:
         quiz_history[chat_id] = []
     
-    topics = ["lịch sử", "địa lý", "ẩm thực", "văn hóa", "du lịch", "nghệ thuật", "thể thao", "kinh tế", "khoa học", "văn học"]
+    recent_questions = quiz_history[chat_id][-10:] if len(quiz_history[chat_id]) > 0 else []
+    history_text = "\n".join(recent_questions) if recent_questions else "Chưa có"
+    
+    topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam"]
     topic = random.choice(topics)
     
-    random_seed = random.randint(1, 10000)
-    difficulty = random.choice(["dễ", "trung bình", "khó"])
-    
-    prompt = f"""Create a quiz about Vietnamese {topic}. Seed: {random_seed}, difficulty: {difficulty}.
+    prompt = f"""Tạo câu hỏi trắc nghiệm về {topic}.
 
-Requirements:
-1. Question must be unique and specific about Vietnam
-2. 4 answer options, only 1 correct
-3. All content MUST be in Vietnamese language
-4. Include interesting explanation
+Yêu cầu:
+1. Câu hỏi phải MỚI, không trùng với các câu đã hỏi
+2. Phù hợp kiến thức phổ thông
+3. Có 4 đáp án, chỉ 1 đáp án đúng
+4. Giải thích ngắn gọn
 
-Format EXACTLY (all in Vietnamese):
-Câu hỏi: [question in Vietnamese about {topic}]
-A. [option A in Vietnamese]
-B. [option B in Vietnamese]
-C. [option C in Vietnamese]
-D. [option D in Vietnamese]
-Đáp án: [A/B/C/D]
-Giải thích: [explanation in Vietnamese]
+Câu đã hỏi:
+{history_text}
 
-Remember: EVERYTHING must be in Vietnamese!"""
+Trả về JSON:
+{{
+  "topic": "{topic}",
+  "question": "câu hỏi",
+  "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
+  "answer": "A hoặc B hoặc C hoặc D",
+  "explain": "giải thích"
+}}"""
 
     messages = [
         {
             "role": "system", 
-            "content": f"You are a Vietnamese culture expert. Create quiz questions about {topic} in Vietnamese language only. Never use English in the output."
+            "content": "Bạn là chuyên gia về Việt Nam. Tạo câu hỏi trắc nghiệm mới, thú vị. Chỉ trả về JSON."
         },
         {"role": "user", "content": prompt}
     ]
@@ -399,35 +458,43 @@ Remember: EVERYTHING must be in Vietnamese!"""
         
         if not response:
             return None
+        
+        json_start = response.find('{')
+        json_end = response.rfind('}') + 1
+        
+        if json_start == -1 or json_end <= json_start:
+            logger.error(f"No JSON found in response: {response}")
+            return None
             
-        lines = response.strip().split('\n')
+        json_str = response[json_start:json_end]
         
-        quiz = {"question": "", "options": [], "correct": "", "explanation": "", "topic": topic}
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parse error: {e}, Response: {json_str}")
+            return None
         
-        for line in lines:
-            line = line.strip()
-            if line.startswith("Câu hỏi:"):
-                quiz["question"] = line.replace("Câu hỏi:", "").strip()
-            elif line.startswith("A."):
-                quiz["options"].append(line)
-            elif line.startswith("B."):
-                quiz["options"].append(line)
-            elif line.startswith("C."):
-                quiz["options"].append(line)
-            elif line.startswith("D."):
-                quiz["options"].append(line)
-            elif line.startswith("Đáp án:"):
-                answer = line.replace("Đáp án:", "").strip()
-                if answer and answer[0] in "ABCD":
-                    quiz["correct"] = answer[0]
-            elif line.startswith("Giải thích:"):
-                quiz["explanation"] = line.replace("Giải thích:", "").strip()
+        quiz = {
+            "topic": data.get("topic", topic),
+            "question": data.get("question", ""),
+            "options": data.get("options", []),
+            "correct": data.get("answer", ""),
+            "explanation": data.get("explain", "")
+        }
         
-        if quiz["question"] and len(quiz["options"]) == 4 and quiz["correct"]:
-            quiz_history[chat_id].append(quiz["question"][:60])
+        # Chuẩn hóa đáp án
+        if quiz["correct"] and len(quiz["correct"]) > 0:
+            quiz["correct"] = quiz["correct"][0].upper()
+        
+        if (quiz["question"] and 
+            len(quiz["options"]) == 4 and 
+            quiz["correct"] in ["A", "B", "C", "D"]):
+            
+            quiz_history[chat_id].append(quiz["question"][:100])
             return quiz
-        
-        return None
+        else:
+            logger.error(f"Invalid quiz data: {quiz}")
+            return None
             
     except Exception as e:
         logger.error(f"Generate quiz error: {e}")
@@ -479,7 +546,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🎮 **Game:**
 /guessnumber - Đoán số
-/vuatiengviet - Sắp xếp chữ cái
+/vuatiengviet - Sắp xếp chữ cái (3 cấp độ)
 /quiz - Câu đố về Việt Nam
 /stopquiz - Dừng câu đố
 
@@ -525,7 +592,7 @@ async def start_vua_tieng_viet(update: Update, context: ContextTypes.DEFAULT_TYP
     game = VuaTiengVietGame(chat_id)
     active_games[chat_id] = {"type": "vuatiengviet", "game": game}
     
-    loading_msg = await update.message.reply_text("⏳ GPT-4o mini đang tạo câu đố...")
+    loading_msg = await update.message.reply_text("⏳ GPT đang tạo câu đố...")
     
     message = await game.start_new_round()
     await loading_msg.edit_text(message)
@@ -535,7 +602,7 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiz_mode[chat_id] = True
     quiz_count[chat_id] = 1
     
-    loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi với GPT-4o mini...")
+    loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi với GPT...")
     
     quiz = await generate_quiz(chat_id)
     
@@ -555,16 +622,10 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     topic_emojis = {
-        "lịch sử": "📜",
-        "địa lý": "🗺️",
-        "ẩm thực": "🍜",
-        "văn hóa": "🎭",
-        "du lịch": "✈️",
-        "nghệ thuật": "🎨",
-        "thể thao": "⚽",
-        "kinh tế": "💰",
-        "khoa học": "🔬",
-        "văn học": "📚"
+        "Lịch sử Việt Nam": "📜",
+        "Địa lý Việt Nam": "🗺️",
+        "Ẩm thực Việt Nam": "🍜",
+        "Văn hóa Việt Nam": "🎭"
     }
     
     emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
@@ -674,7 +735,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             quiz_count[chat_id] = quiz_count.get(chat_id, 1) + 1
             
-            loading_msg = await context.bot.send_message(chat_id, "⏳ GPT-4o mini đang tạo câu hỏi mới...")
+            loading_msg = await context.bot.send_message(chat_id, "⏳ GPT đang tạo câu hỏi mới...")
             
             quiz = await generate_quiz(chat_id)
             
@@ -694,16 +755,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             topic_emojis = {
-                "lịch sử": "📜",
-                "địa lý": "🗺️",
-                "ẩm thực": "🍜",
-                "văn hóa": "🎭",
-                "du lịch": "✈️",
-                "nghệ thuật": "🎨",
-                "thể thao": "⚽",
-                "kinh tế": "💰",
-                "khoa học": "🔬",
-                "văn học": "📚"
+                "Lịch sử Việt Nam": "📜",
+                "Địa lý Việt Nam": "🗺️",
+                "Ẩm thực Việt Nam": "🍜",
+                "Văn hóa Việt Nam": "🎭"
             }
             
             emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
@@ -744,7 +799,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             game = game_info["game"]
             
             if message.lower() in ["tiếp", "tiep"]:
-                loading_msg = await update.message.reply_text("⏳ GPT-4o mini đang tạo câu mới...")
+                loading_msg = await update.message.reply_text("⏳ GPT đang tạo câu mới...")
                 msg = await game.start_new_round()
                 await loading_msg.edit_text(msg)
             elif message.lower() in ["dừng", "dung", "stop"]:
@@ -757,7 +812,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(response)
                 
                 if is_correct and "dừng" not in response.lower():
-                    loading_msg = await context.bot.send_message(chat_id, "⏳ GPT-4o mini đang tạo câu mới...")
+                    loading_msg = await context.bot.send_message(chat_id, "⏳ GPT đang tạo câu mới...")
                     await asyncio.sleep(2)
                     msg = await game.start_new_round()
                     await loading_msg.edit_text(msg)
