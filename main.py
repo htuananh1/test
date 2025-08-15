@@ -45,7 +45,8 @@ active_games: Dict[int, dict] = {}
 chat_history: Dict[int, List[dict]] = {}
 quiz_sessions: Dict[int, dict] = {}
 quiz_mode: Dict[int, bool] = {}
-quiz_count: Dict[int, int] = {}  # Đếm số câu đã trả lời
+quiz_count: Dict[int, int] = {}
+quiz_history: Dict[int, List[str]] = {}  # Lưu câu hỏi đã hỏi
 used_words_global: set = set()
 
 SIMPLE_WORDS = [
@@ -57,14 +58,19 @@ SIMPLE_WORDS = [
     "sâu", "cạn", "đông", "tây", "nam", "bắc", "trong", "ngoài"
 ]
 
-# Các chủ đề quiz
 QUIZ_TOPICS = ["lịch sử", "địa lý", "ẩm thực", "văn hóa", "du lịch"]
 
 def cleanup_memory():
-    global chat_history
+    global chat_history, quiz_history
     for chat_id in list(chat_history.keys()):
         if len(chat_history[chat_id]) > 4:
             chat_history[chat_id] = chat_history[chat_id][-4:]
+    
+    # Xóa quiz history cũ
+    for chat_id in list(quiz_history.keys()):
+        if len(quiz_history[chat_id]) > 20:
+            quiz_history[chat_id] = quiz_history[chat_id][-20:]
+    
     gc.collect()
 
 def save_score(user_id: int, username: str, game_type: str, score: int):
@@ -277,8 +283,8 @@ async def call_qwen_api(messages: List[dict], max_tokens: int = 400) -> str:
             "model": CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.7,
-            "top_p": 0.9
+            "temperature": 0.8,  # Tăng để đa dạng hơn
+            "top_p": 0.95
         }
         
         response = requests.post(
@@ -293,42 +299,60 @@ async def call_qwen_api(messages: List[dict], max_tokens: int = 400) -> str:
             return result['choices'][0]['message']['content']
         else:
             logger.error(f"API error: {response.status_code}")
-            return "Lỗi API!"
+            return None
             
     except Exception as e:
         logger.error(f"API error: {e}")
-        return "Lỗi kết nối!"
+        return None
 
-async def generate_quiz() -> dict:
-    """Tạo quiz đa dạng về Việt Nam"""
+async def generate_quiz(chat_id: int) -> dict:
+    """Tạo quiz mới không lặp"""
+    global quiz_history
+    
+    if chat_id not in quiz_history:
+        quiz_history[chat_id] = []
+    
     topic = random.choice(QUIZ_TOPICS)
     
+    # Tạo prompt với yêu cầu không lặp
     topic_prompts = {
-        "lịch sử": "Tạo câu hỏi về lịch sử Việt Nam (vua chúa, triều đại, chiến tranh, sự kiện)",
-        "địa lý": "Tạo câu hỏi về địa lý Việt Nam (tỉnh thành, sông núi, biển đảo, địa danh)",
-        "ẩm thực": "Tạo câu hỏi về ẩm thực Việt Nam (món ăn, đặc sản, nguyên liệu, vùng miền)",
-        "văn hóa": "Tạo câu hỏi về văn hóa Việt Nam (lễ hội, phong tục, trang phục, nghệ thuật)",
-        "du lịch": "Tạo câu hỏi về du lịch Việt Nam (điểm đến, di tích, danh lam thắng cảnh)"
+        "lịch sử": "Tạo câu hỏi về lịch sử Việt Nam (vua chúa, triều đại, chiến tranh, sự kiện quan trọng)",
+        "địa lý": "Tạo câu hỏi về địa lý Việt Nam (tỉnh thành, sông núi, biển đảo, vùng miền)",
+        "ẩm thực": "Tạo câu hỏi về ẩm thực Việt Nam (món ăn đặc sản, nguyên liệu, cách chế biến)",
+        "văn hóa": "Tạo câu hỏi về văn hóa Việt Nam (lễ hội, phong tục, tín ngưỡng, nghệ thuật)",
+        "du lịch": "Tạo câu hỏi về du lịch Việt Nam (điểm đến nổi tiếng, di tích, danh lam)"
     }
+    
+    # Thêm danh sách câu đã hỏi vào prompt
+    avoid_questions = ""
+    if quiz_history[chat_id]:
+        recent = quiz_history[chat_id][-5:]  # 5 câu gần nhất
+        avoid_questions = f"\nTRÁNH các câu đã hỏi: {'; '.join(recent)}"
     
     prompt = f"""{topic_prompts[topic]}
 
+TẠO CÂU HỎI MỚI, KHÔNG TRÙNG LẶP{avoid_questions}
+
 Format CHÍNH XÁC:
-Câu hỏi: [câu hỏi]
+Câu hỏi: [câu hỏi mới và thú vị]
 A. [đáp án]
 B. [đáp án]  
 C. [đáp án]
 D. [đáp án]
 Đáp án: [A/B/C/D]
-Giải thích: [ngắn gọn]"""
+Giải thích: [thông tin bổ ích]"""
 
     messages = [
-        {"role": "system", "content": f"Tạo câu hỏi về {topic} Việt Nam. Trả lời đúng format."},
+        {"role": "system", "content": f"Tạo câu hỏi {topic} Việt Nam. MỖI LẦN phải là câu KHÁC NHAU. Sáng tạo và đa dạng."},
         {"role": "user", "content": prompt}
     ]
     
     try:
-        response = await call_qwen_api(messages, 250)
+        response = await call_qwen_api(messages, 300)
+        
+        if not response:
+            return None
+            
         lines = response.strip().split('\n')
         
         quiz = {"question": "", "options": [], "correct": "", "explanation": "", "topic": topic}
@@ -347,44 +371,17 @@ Giải thích: [ngắn gọn]"""
             elif line.startswith("Giải thích:"):
                 quiz["explanation"] = line.replace("Giải thích:", "").strip()
         
+        # Kiểm tra quiz hợp lệ
         if quiz["question"] and len(quiz["options"]) == 4 and quiz["correct"]:
+            # Lưu câu hỏi vào history
+            quiz_history[chat_id].append(quiz["question"][:50])  # Lưu 50 ký tự đầu
             return quiz
-        else:
-            # Fallback quiz theo chủ đề
-            fallback_quizzes = {
-                "lịch sử": {
-                    "question": "Thủ đô của Việt Nam được dời về Thăng Long năm nào?",
-                    "options": ["A. 1009", "B. 1010", "C. 1011", "D. 1012"],
-                    "correct": "B",
-                    "explanation": "Năm 1010, Lý Thái Tổ dời đô về Thăng Long",
-                    "topic": "lịch sử"
-                },
-                "địa lý": {
-                    "question": "Đỉnh núi cao nhất Việt Nam là gì?",
-                    "options": ["A. Phan Xi Păng", "B. Bà Đen", "C. Bà Nà", "D. Langbiang"],
-                    "correct": "A",
-                    "explanation": "Phan Xi Păng cao 3.143m, ở Lào Cai",
-                    "topic": "địa lý"
-                },
-                "ẩm thực": {
-                    "question": "Phở có nguồn gốc từ vùng nào?",
-                    "options": ["A. Hà Nội", "B. Nam Định", "C. Hải Phòng", "D. Ninh Bình"],
-                    "correct": "B",
-                    "explanation": "Phở có nguồn gốc từ Nam Định đầu thế kỷ 20",
-                    "topic": "ẩm thực"
-                }
-            }
-            return fallback_quizzes.get(topic, fallback_quizzes["lịch sử"])
+        
+        return None
             
     except Exception as e:
         logger.error(f"Generate quiz error: {e}")
-        return {
-            "question": "Việt Nam có bao nhiêu tỉnh thành?",
-            "options": ["A. 61", "B. 62", "C. 63", "D. 64"],
-            "correct": "C",
-            "explanation": "Việt Nam có 63 tỉnh thành",
-            "topic": "địa lý"
-        }
+        return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("""
@@ -445,7 +442,17 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiz_mode[chat_id] = True
     quiz_count[chat_id] = 1
     
-    quiz = await generate_quiz()
+    # Tạo câu hỏi mới
+    loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi...")
+    
+    quiz = await generate_quiz(chat_id)
+    
+    if not quiz:
+        await loading_msg.edit_text("❌ Lỗi tạo câu hỏi! Thử lại /quiz")
+        if chat_id in quiz_mode:
+            del quiz_mode[chat_id]
+        return
+    
     quiz_sessions[chat_id] = quiz
     
     keyboard = []
@@ -466,7 +473,7 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
     message = f"{emoji} **CÂU {quiz_count[chat_id]} - {quiz.get('topic', '').upper()}**\n\n{quiz['question']}"
     
-    await update.message.reply_text(message, reply_markup=reply_markup)
+    await loading_msg.edit_text(message, reply_markup=reply_markup)
 
 async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -479,6 +486,8 @@ async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del quiz_sessions[chat_id]
     if chat_id in quiz_count:
         del quiz_count[chat_id]
+    if chat_id in quiz_history:
+        quiz_history[chat_id] = []
         
     await update.message.reply_text(f"✅ Đã dừng câu đố!\n📊 Bạn đã trả lời {total_questions} câu")
 
@@ -530,6 +539,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del quiz_sessions[chat_id]
             if chat_id in quiz_count:
                 del quiz_count[chat_id]
+            if chat_id in quiz_history:
+                quiz_history[chat_id] = []
                 
             await query.message.edit_text(f"✅ Đã dừng câu đố!\n📊 Bạn đã trả lời {total_questions} câu")
             return
@@ -552,14 +563,34 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Hiển thị kết quả
         await query.message.edit_text(result)
         
-        # Tạo câu mới nếu còn quiz mode
+        # Nếu còn quiz mode, thông báo đợi và tạo câu mới
         if chat_id in quiz_mode:
-            await asyncio.sleep(1.5)
+            # Gửi thông báo đợi
+            wait_msg = await context.bot.send_message(
+                chat_id, 
+                "⏳ **Đợi 5 giây để có câu tiếp theo...**"
+            )
+            
+            # Đợi 5 giây
+            await asyncio.sleep(5)
+            
+            # Xóa thông báo đợi
+            await wait_msg.delete()
             
             # Tăng số câu
             quiz_count[chat_id] = quiz_count.get(chat_id, 1) + 1
             
-            quiz = await generate_quiz()
+            # Tạo câu mới với loading
+            loading_msg = await context.bot.send_message(chat_id, "⏳ Đang tạo câu hỏi mới...")
+            
+            quiz = await generate_quiz(chat_id)
+            
+            if not quiz:
+                await loading_msg.edit_text("❌ Lỗi tạo câu hỏi! Dùng /quiz để thử lại")
+                if chat_id in quiz_mode:
+                    del quiz_mode[chat_id]
+                return
+            
             quiz_sessions[chat_id] = quiz
             
             keyboard = []
@@ -580,7 +611,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
             message = f"{emoji} **CÂU {quiz_count[chat_id]} - {quiz.get('topic', '').upper()}**\n\n{quiz['question']}"
             
-            await context.bot.send_message(chat_id, message, reply_markup=reply_markup)
+            await loading_msg.edit_text(message, reply_markup=reply_markup)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
@@ -617,7 +648,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del active_games[chat_id]
         return
     
-    # Chat AI với Qwen
     if chat_id not in chat_history:
         chat_history[chat_id] = []
         
@@ -632,9 +662,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     messages.extend(chat_history[chat_id])
     
     response = await call_qwen_api(messages, 300)
-    chat_history[chat_id].append({"role": "assistant", "content": response})
     
-    await update.message.reply_text(response)
+    if response:
+        chat_history[chat_id].append({"role": "assistant", "content": response})
+        await update.message.reply_text(response)
+    else:
+        await update.message.reply_text("😅 Xin lỗi, mình đang gặp lỗi!")
 
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
@@ -651,7 +684,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Bot started with diverse Vietnam quiz! 🇻🇳")
+    logger.info("Bot started with unique quiz questions! 🎯")
     application.run_polling()
 
 if __name__ == "__main__":
