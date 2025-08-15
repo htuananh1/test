@@ -14,11 +14,8 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "anthropic/claude-3-haiku")
-PAGE_CHARS = int(os.getenv("PAGE_CHARS", "3200"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "700"))
-MAX_TOKENS_CODE = int(os.getenv("MAX_TOKENS_CODE", "4000"))
-CTX_TURNS = int(os.getenv("CTX_TURNS", "15"))
-WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "")
+CTX_TURNS = int(os.getenv("CTX_TURNS", "5"))  # Giảm để tiết kiệm memory
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -43,25 +40,25 @@ def init_db():
 
 init_db()
 
+# Giảm memory usage
 active_games: Dict[int, dict] = {}
 chat_history: Dict[int, List[dict]] = {}
-vietnamese_words: set = set()
 quiz_sessions: Dict[int, dict] = {}
+quiz_mode: Dict[int, bool] = {}  # Track quiz mode
 
-def load_vietnamese_dictionary():
-    global vietnamese_words
+# Tối ưu từ điển - chỉ load khi cần
+def check_vietnamese_word(word: str) -> bool:
     try:
-        response = requests.get("https://raw.githubusercontent.com/undertheseanlp/dictionary/refs/heads/hongocduc/data/Viet74K.txt")
+        response = requests.get(
+            "https://raw.githubusercontent.com/undertheseanlp/dictionary/refs/heads/hongocduc/data/Viet74K.txt",
+            timeout=5
+        )
         if response.status_code == 200:
-            words = response.text.strip().split('\n')
-            vietnamese_words = {word.lower().strip() for word in words if word.strip() and len(word.strip()) > 1}
-            logger.info(f"Loaded {len(vietnamese_words)} Vietnamese words")
-        else:
-            logger.error("Failed to load Vietnamese dictionary")
-    except Exception as e:
-        logger.error(f"Error loading dictionary: {e}")
-
-load_vietnamese_dictionary()
+            words = response.text.lower().strip().split('\n')
+            return word.lower() in words
+        return False
+    except:
+        return False
 
 def save_score(user_id: int, username: str, game_type: str, score: int):
     conn = sqlite3.connect('bot_scores.db')
@@ -117,103 +114,51 @@ def get_user_stats_24h(user_id: int) -> dict:
     return stats
 
 class GuessNumberGame:
-    def __init__(self, chat_id: int, use_ai: bool = False):
+    def __init__(self, chat_id: int):
         self.chat_id = chat_id
         self.attempts = 0
         self.max_attempts = 10
         self.hints_used = 0
         self.max_hints = 3
         self.start_time = datetime.now()
-        self.use_ai = use_ai
         self.score = 1000
-        
-        if use_ai:
-            self.secret_number, self.riddle = self.generate_ai_number()
-        else:
-            self.secret_number = random.randint(1, 100)
-            self.riddle = self.generate_riddle()
+        self.secret_number = random.randint(1, 100)
+        self.riddle = self.generate_riddle()
             
-    def generate_ai_number(self) -> Tuple[int, str]:
-        number = random.randint(1, 100)
-        riddle = self.generate_riddle_for_number(number)
-        return number, riddle
-        
     def generate_riddle(self) -> str:
-        if self.secret_number % 2 == 0:
-            riddle = "Số bí mật là số chẵn"
-        else:
-            riddle = "Số bí mật là số lẻ"
-            
-        if self.secret_number < 50:
-            riddle += " và nhỏ hơn 50"
-        else:
-            riddle += " và lớn hơn hoặc bằng 50"
-            
-        return riddle
-        
-    def generate_riddle_for_number(self, number: int) -> str:
         riddles = []
         
-        if number % 2 == 0:
-            riddles.append("là số chẵn")
+        if self.secret_number % 2 == 0:
+            riddles.append("số chẵn")
         else:
-            riddles.append("là số lẻ")
+            riddles.append("số lẻ")
             
-        if number <= 25:
-            riddles.append("nằm trong khoảng 1-25")
-        elif number <= 50:
-            riddles.append("nằm trong khoảng 26-50")
-        elif number <= 75:
-            riddles.append("nằm trong khoảng 51-75")
+        if self.secret_number < 50:
+            riddles.append("nhỏ hơn 50")
         else:
-            riddles.append("nằm trong khoảng 76-100")
+            riddles.append("lớn hơn hoặc bằng 50")
             
-        if number % 5 == 0:
-            riddles.append("chia hết cho 5")
-        if number % 10 == 0:
-            riddles.append("chia hết cho 10")
-        if self.is_prime(number):
-            riddles.append("là số nguyên tố")
-            
-        return f"Số bí mật {' và '.join(riddles[:2])}"
-        
-    def is_prime(self, n: int) -> bool:
-        if n < 2:
-            return False
-        for i in range(2, int(n**0.5) + 1):
-            if n % i == 0:
-                return False
-        return True
+        return f"Số bí mật là {' và '.join(riddles)}"
         
     def get_hint(self) -> str:
         if self.hints_used >= self.max_hints:
-            return "❌ Hết gợi ý rồi! Cố lên nào!"
+            return "❌ Hết gợi ý rồi!"
             
         self.hints_used += 1
         self.score -= 100
         
-        hints = []
-        
         if self.hints_used == 1:
             tens = self.secret_number // 10
-            if tens == 0:
-                hints.append("💡 Gợi ý 1: Số có 1 chữ số thôi")
-            else:
-                hints.append(f"💡 Gợi ý 1: Chữ số hàng chục là {tens}")
-                
+            hint = f"💡 Gợi ý 1: {'Số có 1 chữ số' if tens == 0 else f'Chữ số hàng chục là {tens}'}"
         elif self.hints_used == 2:
             digit_sum = sum(int(d) for d in str(self.secret_number))
-            hints.append(f"💡 Gợi ý 2: Tổng các chữ số là {digit_sum}")
-            
-        elif self.hints_used == 3:
+            hint = f"💡 Gợi ý 2: Tổng các chữ số là {digit_sum}"
+        else:
             lower = (self.secret_number // 10) * 10
-            upper = lower + 9
-            if lower == 0:
-                hints.append(f"💡 Gợi ý 3: Số nằm từ 1 đến 9")
-            else:
-                hints.append(f"💡 Gợi ý 3: Số nằm từ {lower} đến {upper}")
+            upper = lower + 9 if lower > 0 else 9
+            hint = f"💡 Gợi ý 3: Số từ {max(1, lower)} đến {upper}"
                 
-        return f"{hints[0]}\n\n🎯 Còn {self.max_hints - self.hints_used} gợi ý"
+        return f"{hint}\n🎯 Còn {self.max_hints - self.hints_used} gợi ý"
         
     def make_guess(self, guess: int) -> Tuple[bool, str]:
         self.attempts += 1
@@ -222,14 +167,14 @@ class GuessNumberGame:
         if guess == self.secret_number:
             time_taken = (datetime.now() - self.start_time).seconds
             final_score = max(self.score, 100)
-            return True, f"🎉 Giỏi lắm! Đoán đúng số {self.secret_number} sau {self.attempts} lần trong {time_taken} giây!\n\n🏆 Điểm: {final_score}"
+            return True, f"🎉 Đúng rồi! Số {self.secret_number}!\n⏱️ {time_taken}s | 🏆 {final_score} điểm"
             
         if self.attempts >= self.max_attempts:
-            return True, f"😤 Hết lượt rồi! Số là {self.secret_number} đó!\n\n💡 Gợi ý: {self.riddle}\n\nChơi lại đi! /guessnumber"
+            return True, f"😤 Hết lượt! Số là {self.secret_number}\n💡 {self.riddle}"
             
         hint = "📈 cao hơn" if guess < self.secret_number else "📉 thấp hơn"
         remaining = self.max_attempts - self.attempts
-        return False, f"Số {guess} {hint}!\n\n📊 Còn {remaining} lượt\n💰 Điểm: {self.score}\n\n💡 Gõ /hint xem gợi ý (-100 điểm)"
+        return False, f"{guess} {hint}! Còn {remaining} lượt | 💰 {self.score}đ | /hint"
 
 class NoiTuGame:
     def __init__(self, chat_id: int):
@@ -240,136 +185,69 @@ class NoiTuGame:
         self.start_time = datetime.now()
         self.player_words = 0
         self.bot_words = 0
-        self.two_word_compounds = self.get_two_word_compounds()
-        
-    def get_two_word_compounds(self) -> set:
-        compounds = set()
-        words_list = list(vietnamese_words)
-        
-        for i in range(len(words_list)):
-            for j in range(len(words_list)):
-                if i != j:
-                    compound = f"{words_list[i]} {words_list[j]}"
-                    if len(compound.split()) == 2:
-                        compounds.add(compound)
-        
-        return compounds
         
     def start(self) -> str:
-        start_compounds = ["trong sạch", "sạch sẽ", "đẹp đẽ", "tươi tốt", "vui vẻ", "mạnh mẽ", "nhanh nhẹn", "xinh xắn"]
-        valid_starts = []
-        
-        for compound in start_compounds:
-            parts = compound.split()
-            if len(parts) == 2 and all(part in vietnamese_words for part in parts):
-                valid_starts.append(compound)
-                
-        if valid_starts:
-            self.current_word = random.choice(valid_starts)
-        else:
-            self.current_word = "trong sáng"
-            
+        start_words = ["trong sạch", "sạch sẽ", "đẹp đẽ", "vui vẻ", "mạnh mẽ"]
+        self.current_word = random.choice(start_words)
         self.history = [self.current_word]
         last_word = self.current_word.split()[1]
         
-        return f"""🎮 **Linh thách đấu Nối Từ!**
+        return f"""🎮 **Nối Từ với Linh!**
 
-📖 Luật: Nối từ 2 từ ghép tiếng Việt
-VD: trong sạch → sạch sẽ → sẽ sàng...
+Luật: Nối từ ghép 2 từ tiếng Việt
+VD: trong sạch → sạch sẽ
 
-🎯 Từ đầu: **{self.current_word}**
-
-Nối tiếp với từ bắt đầu bằng '{last_word}'
-Gõ 'thua' để kết thúc"""
+🎯 **{self.current_word}**
+Nối với '{last_word}' | Gõ 'thua' kết thúc"""
         
-    def check_valid_compound(self, word: str) -> bool:
+    def check_compound(self, word: str) -> bool:
         parts = word.split()
         if len(parts) != 2:
             return False
-        return all(part in vietnamese_words for part in parts)
+        # Simplified check for memory optimization
+        return len(parts[0]) > 1 and len(parts[1]) > 1
         
     def play_word(self, word: str) -> Tuple[bool, str]:
         word = word.lower().strip()
         
         if word == "thua":
-            time_taken = (datetime.now() - self.start_time).seconds
-            return True, f"""😏 Chịu thua rồi à!
-
-📊 Kết quả:
-- Điểm: {self.score}
-- Thời gian: {time_taken} giây
-- Tổng từ: {len(self.history)}
-- Của bạn: {self.player_words}
-- Của Linh: {self.bot_words}
-
-Chơi lại không? /noitu"""
-        
-        if not word:
-            return False, "❌ Gõ gì đó đi chứ!"
+            return True, f"📊 Điểm: {self.score} | {len(self.history)} từ"
         
         parts = word.split()
         if len(parts) != 2:
-            return False, "❌ Phải là từ ghép 2 từ! VD: sạch sẽ"
+            return False, "❌ Phải 2 từ ghép!"
         
         last_word = self.current_word.split()[1]
-        first_word = parts[0]
-        
-        if first_word != last_word:
-            return False, f"❌ Phải bắt đầu bằng '{last_word}' chứ!"
+        if parts[0] != last_word:
+            return False, f"❌ Phải bắt đầu '{last_word}'"
             
         if word in self.history:
-            return False, "❌ Từ này dùng rồi! Nghĩ từ khác đi!"
+            return False, "❌ Từ đã dùng!"
         
-        if not self.check_valid_compound(word):
-            return False, "❌ Từ không hợp lệ! Phải có trong từ điển!"
+        if not self.check_compound(word):
+            return False, "❌ Từ không hợp lệ!"
             
         self.history.append(word)
         self.current_word = word
         self.player_words += 1
-        points = 100
-        self.score += points
+        self.score += 100
         
-        bot_word = self.find_bot_word(parts[1])
+        # Bot turn - simplified
+        bot_options = ["sẽ sàng", "đẹp đẽ", "vui vẻ", "tốt đẹp", "mạnh mẽ"]
+        bot_word = None
+        for option in bot_options:
+            if option.split()[0] == parts[1] and option not in self.history:
+                bot_word = option
+                break
+                
         if bot_word:
             self.history.append(bot_word)
             self.current_word = bot_word
             self.bot_words += 1
-            bot_last_word = bot_word.split()[1]
-            return False, f"""✅ Được đó! (+{points} điểm)
-
-🤖 Linh nối: **{bot_word}**
-
-📊 Điểm: {self.score} | Số từ: {len(self.history)}
-
-Đến lượt bạn, nối với '{bot_last_word}'"""
+            return False, f"✅ +100đ\n🤖 Linh: **{bot_word}**\n📊 {self.score}đ | Nối '{bot_word.split()[1]}'"
         else:
-            time_taken = (datetime.now() - self.start_time).seconds
             self.score += 500
-            return True, f"""😱 Trời ơi! Linh không nối được!
-
-🏆 **BẠN THẮNG RỒI!**
-
-📊 Kết quả:
-- Điểm: {self.score} (bonus +500)
-- Thời gian: {time_taken} giây
-- Tổng từ: {len(self.history)}
-- Của bạn: {self.player_words}
-- Của Linh: {self.bot_words}
-
-Giỏi ghê! 🔥"""
-            
-    def find_bot_word(self, start_word: str) -> Optional[str]:
-        possible_words = []
-        
-        for word in vietnamese_words:
-            if word != start_word:
-                compound = f"{start_word} {word}"
-                if compound not in self.history and self.check_valid_compound(compound):
-                    possible_words.append(compound)
-                    
-        if possible_words:
-            return random.choice(possible_words[:20])
-        return None
+            return True, f"🏆 Thắng! +500đ\n📊 Tổng: {self.score} điểm"
 
 async def call_vercel_api(messages: List[dict], max_tokens: int = 700) -> str:
     try:
@@ -396,230 +274,60 @@ async def call_vercel_api(messages: List[dict], max_tokens: int = 700) -> str:
             result = response.json()
             return result['choices'][0]['message']['content']
         else:
-            logger.error(f"API error: {response.status_code} - {response.text}")
-            return "Ủa lỗi gì vậy? Thử lại đi!"
+            return "Lỗi rồi! Thử lại nhé!"
             
     except Exception as e:
-        logger.error(f"API call error: {e}")
-        return "Lỗi rồi! Thử lại sau nhé!"
-
-async def get_weather(city: str) -> str:
-    if not WEATHER_API_KEY:
-        messages = [
-            {"role": "system", "content": "Bạn là Linh, cô gái Việt Nam nóng nảy. Khi được hỏi về thời tiết mà không có dữ liệu, hãy trả lời theo phong cách hài hước."},
-            {"role": "user", "content": f"Thời tiết ở {city} như thế nào?"}
-        ]
-        return await call_vercel_api(messages)
-        
-    try:
-        city_map = {
-            "hà nội": "Hanoi",
-            "hồ chí minh": "Ho Chi Minh City", 
-            "sài gòn": "Ho Chi Minh City",
-            "đà nẵng": "Da Nang",
-            "cần thơ": "Can Tho",
-            "hải phòng": "Hai Phong",
-            "nha trang": "Nha Trang",
-            "đà lạt": "Da Lat",
-            "huế": "Hue",
-            "vũng tàu": "Vung Tau",
-            "phú quốc": "Phu Quoc",
-            "quy nhơn": "Quy Nhon"
-        }
-        
-        city_query = city_map.get(city.lower(), city)
-        
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={city_query},VN&appid={WEATHER_API_KEY}&units=metric&lang=vi"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            weather_info = f"""
-🌤️ **Thời tiết {data['name']}**
-
-🌡️ Nhiệt độ: {data['main']['temp']}°C (cảm giác {data['main']['feels_like']}°C)
-💨 Gió: {data['wind']['speed']} m/s
-💧 Độ ẩm: {data['main']['humidity']}%
-☁️ Mây: {data['clouds']['all']}%
-
-📝 {data['weather'][0]['description'].capitalize()}
-
-💬 Linh mách: {"Nóng vậy nhớ uống nước!" if data['main']['temp'] > 30 else "Lạnh vậy mặc ấm vào!" if data['main']['temp'] < 20 else "Thời tiết dễ chịu, đi chơi không?"}
-"""
-            return weather_info
-        else:
-            return f"😤 Không tìm thấy {city}! Gõ đúng tên thành phố đi!"
-            
-    except Exception as e:
-        logger.error(f"Weather API error: {e}")
-        return "😩 Lỗi rồi! Check thời tiết trên mạng đi!"
+        return "Lỗi kết nối!"
 
 async def generate_quiz() -> dict:
-    prompt = """Tạo câu đố vui tiếng Việt theo format CHÍNH XÁC sau (mỗi đáp án chỉ xuất hiện 1 lần):
+    prompt = """Tạo 1 câu đố về Việt Nam:
 
 Câu hỏi: [câu hỏi]
 A. [đáp án A]
 B. [đáp án B]
 C. [đáp án C]
 D. [đáp án D]
-Đáp án: [chỉ chữ A hoặc B hoặc C hoặc D]
-Giải thích: [giải thích]"""
+Đáp án: [A/B/C/D]
+Giải thích: [1 câu ngắn]"""
 
     messages = [
-        {"role": "system", "content": "Bạn là Linh. Tạo 1 câu đố về Việt Nam (văn hóa, lịch sử, ẩm thực, địa lý). Mỗi đáp án A,B,C,D chỉ viết 1 lần, không lặp lại."},
+        {"role": "system", "content": "Tạo câu đố về Việt Nam. Mỗi đáp án viết 1 lần."},
         {"role": "user", "content": prompt}
     ]
     
-    response = await call_vercel_api(messages, max_tokens=400)
+    response = await call_vercel_api(messages, max_tokens=300)
     
     lines = response.strip().split('\n')
-    quiz = {
-        "question": "",
-        "options": [],
-        "correct": "",
-        "explanation": ""
-    }
-    
-    options_found = {"A": False, "B": False, "C": False, "D": False}
+    quiz = {"question": "", "options": [], "correct": "", "explanation": ""}
     
     for line in lines:
         line = line.strip()
         if line.startswith("Câu hỏi:"):
-            quiz["question"] = line.replace("Câu hỏi:", "").strip()
-        elif line.startswith("A.") and not options_found["A"]:
+            quiz["question"] = line[8:].strip()
+        elif line[:2] in ["A.", "B.", "C.", "D."] and len(quiz["options"]) < 4:
             quiz["options"].append(line)
-            options_found["A"] = True
-        elif line.startswith("B.") and not options_found["B"]:
-            quiz["options"].append(line)
-            options_found["B"] = True
-        elif line.startswith("C.") and not options_found["C"]:
-            quiz["options"].append(line)
-            options_found["C"] = True
-        elif line.startswith("D.") and not options_found["D"]:
-            quiz["options"].append(line)
-            options_found["D"] = True
         elif line.startswith("Đáp án:"):
-            answer = line.replace("Đáp án:", "").strip()
-            if answer and answer[0] in ["A", "B", "C", "D"]:
-                quiz["correct"] = answer[0]
+            ans = line[7:].strip()
+            if ans and ans[0] in "ABCD":
+                quiz["correct"] = ans[0]
         elif line.startswith("Giải thích:"):
-            quiz["explanation"] = line.replace("Giải thích:", "").strip()
-    
-    if len(quiz["options"]) != 4:
-        quiz["options"] = quiz["options"][:4]
+            quiz["explanation"] = line[11:].strip()
             
     return quiz
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = """
-👋 **Chào! Mình là Linh nè!**
+    await update.message.reply_text("""
+👋 **Xin chào! Mình là Linh!**
 
-🎮 **Chơi game với Linh:**
-/guessnumber - Đoán số (Linh nghĩ số)
-/noitu - Nối từ (thách đấu Linh)
-/quiz - Câu đố vui
+🎮 **Game:**
+/guessnumber - Đoán số
+/noitu - Nối từ  
+/quiz - Câu đố (liên tục)
+/stopquiz - Dừng câu đố
 
-🏆 /leaderboard - BXH 24h gần nhất
+🏆 /leaderboard - BXH 24h
 📊 /stats - Điểm của bạn
-
-💬 Chat với Linh về game hoặc bất cứ gì!
-⚡ Linh hơi nóng tính nhưng vui lắm! 😄
-"""
-    await update.message.reply_text(welcome_message)
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """
-📚 **HƯỚNG DẪN CHƠI**
-
-**🎮 Game của Linh:**
-• /guessnumber - Đoán số 1-100
-  → 10 lần đoán, 3 gợi ý
-• /noitu - Nối từ ghép 2 từ
-  → VD: trong sạch → sạch sẽ
-• /quiz - Trả lời câu đố
-• /hint - Gợi ý (trong đoán số)
-
-**📊 Điểm & BXH:**
-• /leaderboard - BXH 24h
-• /stats - Điểm của bạn
-
-**💬 Chat & Khác:**
-• Chat trực tiếp với Linh
-• /weather <city> - Thời tiết
-
-💡 Càng chơi nhiều càng lên top!
-"""
-    await update.message.reply_text(help_text)
-
-async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    about_text = """
-🤖 **VỀ LINH**
-
-Xin chào! Mình là Linh - AI assistant vui tính!
-
-**Tính cách:**
-• Nóng nảy nhưng thân thiện
-• Thích thách đấu game
-• Biết nhiều về Việt Nam
-
-**Game & Điểm:**
-• BXH reset sau 24h
-• Điểm = Tổng các game
-• Chơi nhiều = Điểm cao
-
-**Tech:** Claude 3 Haiku x Vercel
-"""
-    await update.message.reply_text(about_text)
-
-async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id in chat_history:
-        chat_history[chat_id] = []
-    await update.message.reply_text("✅ Đã xóa lịch sử chat! Nói chuyện lại từ đầu nhé!")
-
-async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❌ Gõ tên thành phố đi!\n\nVD: /weather hanoi")
-        return
-        
-    city = " ".join(context.args)
-    weather_info = await get_weather(city)
-    await update.message.reply_text(weather_info)
-
-async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    scores = get_leaderboard_24h()
-    
-    message = "🏆 **BẢNG XẾP HẠNG 24H**\n\n"
-    
-    if scores:
-        for i, (username, total_score, games_played) in enumerate(scores, 1):
-            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-            message += f"{medal} {username}: {total_score:,}đ ({games_played} game)\n"
-    else:
-        message += "Chưa ai chơi! Làm người đầu tiên đi!"
-        
-    message += f"\n⏰ BXH reset sau 24h\n💡 Chơi nhiều game để lên top!"
-    await update.message.reply_text(message)
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    stats = get_user_stats_24h(user.id)
-    
-    message = f"📊 **ĐIỂM CỦA {user.first_name.upper()} (24H)**\n\n"
-    message += f"💰 Tổng: {stats['total']:,} điểm\n\n"
-    
-    if stats['games']:
-        for game_type, data in stats['games'].items():
-            game_name = "Đoán Số" if game_type == "guessnumber" else "Nối Từ" if game_type == "noitu" else "Câu Đố"
-            message += f"**{game_name}:**\n"
-            message += f"• Số lần: {data['played']}\n"
-            message += f"• Tổng điểm: {data['total']:,}\n"
-            message += f"• Cao nhất: {data['best']:,}\n\n"
-    else:
-        message += "Chưa chơi game nào!\nThử /guessnumber hoặc /noitu đi!"
-        
-    await update.message.reply_text(message)
+""")
 
 async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -627,32 +335,26 @@ async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if chat_id in active_games:
         del active_games[chat_id]
         
-    use_ai = random.choice([True, False])
-    game = GuessNumberGame(chat_id, use_ai)
+    game = GuessNumberGame(chat_id)
     active_games[chat_id] = {"type": "guessnumber", "game": game}
     
-    message = f"""🎮 **LINH THÁCH ĐOÁN SỐ!**
+    await update.message.reply_text(f"""🎮 **ĐOÁN SỐ 1-100**
 
-🎯 Linh nghĩ 1 số từ 1-100
-📝 Bạn có 10 lần đoán
-💡 3 gợi ý (/hint)
+💡 {game.riddle}
+📝 10 lần | 💰 1000đ
+/hint - Gợi ý (-100đ)
 
-🔍 **Mách nước:** {game.riddle}
-
-Đoán thử xem!"""
-    
-    await update.message.reply_text(message)
+Đoán đi!""")
 
 async def hint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
     if chat_id not in active_games or active_games[chat_id]["type"] != "guessnumber":
-        await update.message.reply_text("❌ Đang không chơi đoán số!\n\n/guessnumber để chơi")
+        await update.message.reply_text("❌ Không trong game đoán số!")
         return
         
     game = active_games[chat_id]["game"]
-    hint = game.get_hint()
-    await update.message.reply_text(hint)
+    await update.message.reply_text(game.get_hint())
 
 async def start_noitu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -663,12 +365,23 @@ async def start_noitu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game = NoiTuGame(chat_id)
     active_games[chat_id] = {"type": "noitu", "game": game}
     
-    message = game.start()
-    await update.message.reply_text(message)
+    await update.message.reply_text(game.start())
 
 async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    quiz_mode[chat_id] = True  # Bật chế độ quiz liên tục
     
+    await send_quiz(chat_id, update)
+
+async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id in quiz_mode:
+        del quiz_mode[chat_id]
+    if chat_id in quiz_sessions:
+        del quiz_sessions[chat_id]
+    await update.message.reply_text("✅ Đã dừng câu đố!")
+
+async def send_quiz(chat_id: int, update_or_query):
     quiz = await generate_quiz()
     
     if quiz["question"] and len(quiz["options"]) == 4:
@@ -676,17 +389,46 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = []
         for option in quiz["options"]:
-            letter = option[0]
-            keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{letter}")])
-        keyboard.append([InlineKeyboardButton("❌ Bỏ qua", callback_data="quiz_skip")])
+            keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
+        keyboard.append([InlineKeyboardButton("⏭️ Câu khác", callback_data="quiz_next")])
+        keyboard.append([InlineKeyboardButton("❌ Dừng", callback_data="quiz_stop")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
+        message = f"❓ **CÂU ĐỐ**\n\n{quiz['question']}"
         
-        message = f"❓ **LINH HỎI NÈ!**\n\n{quiz['question']}"
-        
-        await update.message.reply_text(message, reply_markup=reply_markup)
+        if hasattr(update_or_query, 'message'):
+            await update_or_query.message.reply_text(message, reply_markup=reply_markup)
+        else:
+            await update_or_query.edit_text(message, reply_markup=reply_markup)
+
+async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    scores = get_leaderboard_24h()
+    
+    message = "🏆 **BXH 24H**\n\n"
+    
+    if scores:
+        for i, (username, total_score, games_played) in enumerate(scores, 1):
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            message += f"{medal} {username}: {total_score:,}đ\n"
     else:
-        await update.message.reply_text("😤 Lỗi rồi! Thử lại đi!")
+        message += "Chưa có ai chơi!"
+        
+    await update.message.reply_text(message)
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    stats = get_user_stats_24h(user.id)
+    
+    message = f"📊 **{user.first_name} (24H)**\n\n"
+    message += f"💰 Tổng: {stats['total']:,}đ\n"
+    
+    if stats['games']:
+        message += "\n"
+        for game_type, data in stats['games'].items():
+            game_name = {"guessnumber": "Đoán số", "noitu": "Nối từ", "quiz": "Câu đố"}.get(game_type, game_type)
+            message += f"{game_name}: {data['total']:,}đ ({data['played']} lần)\n"
+            
+    await update.message.reply_text(message)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -698,31 +440,52 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = user.username or user.first_name
     
     if data.startswith("quiz_"):
+        if data == "quiz_stop":
+            if chat_id in quiz_mode:
+                del quiz_mode[chat_id]
+            if chat_id in quiz_sessions:
+                del quiz_sessions[chat_id]
+            await query.message.edit_text("✅ Đã dừng câu đố!")
+            return
+            
+        if data == "quiz_next":
+            await send_quiz(chat_id, query.message)
+            return
+            
         if chat_id not in quiz_sessions:
-            await query.message.edit_text("❌ Hết giờ rồi!")
+            await query.message.edit_text("❌ Hết giờ!")
             return
             
         quiz = quiz_sessions[chat_id]
+        answer = data.split("_")[1]
         
-        if data == "quiz_skip":
-            await query.message.edit_text(f"😏 Bỏ cuộc à?\n\nĐáp án: **{quiz['correct']}**\n\n{quiz['explanation']}")
+        if answer == quiz["correct"]:
+            save_score(user.id, username, "quiz", 200)
+            result = f"✅ Đúng! (+200đ)\n{quiz['explanation']}"
         else:
-            answer = data.split("_")[1]
-            if answer == quiz["correct"]:
-                save_score(user.id, username, "quiz", 200)
-                await query.message.edit_text(f"✅ Giỏi! (+200 điểm)\n\n{quiz['explanation']}")
-            else:
-                await query.message.edit_text(f"❌ Sai rồi!\n\nĐáp án: **{quiz['correct']}**\n\n{quiz['explanation']}")
+            result = f"❌ Sai! Đáp án: {quiz['correct']}\n{quiz['explanation']}"
         
         del quiz_sessions[chat_id]
+        
+        # Nếu đang ở chế độ quiz liên tục
+        if chat_id in quiz_mode:
+            keyboard = [[InlineKeyboardButton("➡️ Câu tiếp", callback_data="quiz_continue")],
+                       [InlineKeyboardButton("❌ Dừng", callback_data="quiz_stop")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.edit_text(result, reply_markup=reply_markup)
+        else:
+            await query.message.edit_text(result)
+            
+    elif data == "quiz_continue":
+        await send_quiz(chat_id, query.message)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
     chat_id = update.effective_chat.id
     user = update.effective_user
-    user_name = user.first_name
-    username = user.username or user_name
+    username = user.username or user.first_name
     
+    # Xử lý game đang chơi
     if chat_id in active_games:
         game_info = active_games[chat_id]
         
@@ -733,54 +496,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     is_finished, response = game_info["game"].make_guess(guess)
                     await update.message.reply_text(response)
                     
-                    if is_finished and "Giỏi lắm" in response:
-                        final_score = max(game_info["game"].score, 100)
-                        save_score(user.id, username, "guessnumber", final_score)
+                    if is_finished and "Đúng" in response:
+                        save_score(user.id, username, "guessnumber", game_info["game"].score)
                         
                     if is_finished:
                         del active_games[chat_id]
                 else:
-                    await update.message.reply_text("❌ Từ 1 đến 100 thôi!")
+                    await update.message.reply_text("❌ Từ 1-100 thôi!")
             except ValueError:
-                await update.message.reply_text("❌ Gõ số đi!\n\n💡 /hint để xem gợi ý")
+                await update.message.reply_text("❌ Nhập số!")
                 
         elif game_info["type"] == "noitu":
             is_finished, response = game_info["game"].play_word(message)
             await update.message.reply_text(response)
             
             if is_finished:
-                save_score(user.id, username, "noitu", game_info["game"].score)
+                if game_info["game"].score > 0:
+                    save_score(user.id, username, "noitu", game_info["game"].score)
                 del active_games[chat_id]
                 
         return
     
-    if "thời tiết" in message.lower():
-        words = message.lower().split()
-        if "thời tiết" in words:
-            idx = words.index("thời tiết")
-            if idx + 1 < len(words):
-                city = " ".join(words[idx + 1:])
-                weather_info = await get_weather(city)
-                await update.message.reply_text(weather_info)
-                return
-    
+    # Chat AI - giảm context để tiết kiệm memory
     if chat_id not in chat_history:
         chat_history[chat_id] = []
         
     chat_history[chat_id].append({"role": "user", "content": message})
     
-    if len(chat_history[chat_id]) > CTX_TURNS * 2:
-        chat_history[chat_id] = chat_history[chat_id][-(CTX_TURNS * 2):]
+    # Giữ ít tin nhắn hơn
+    if len(chat_history[chat_id]) > 6:
+        chat_history[chat_id] = chat_history[chat_id][-6:]
     
     messages = [
-        {"role": "system", "content": f"""Bạn là Linh - cô gái Việt Nam 20 tuổi, nóng nảy, vui tính, thích chơi game. 
-        Tính cách: hơi nóng, hay cười 😄, dùng emoji, nói chuyện tự nhiên như gen Z Việt Nam.
-        Khi được hỏi về bot/game: giới thiệu /guessnumber, /noitu, /quiz và hệ thống BXH 24h.
-        Hay thách thức người chơi thử game, khoe mình giỏi nối từ."""}
+        {"role": "system", "content": "Bạn là Linh - cô gái vui tính. Trả lời ngắn gọn, dùng emoji."}
     ]
     messages.extend(chat_history[chat_id])
     
-    response = await call_vercel_api(messages, MAX_TOKENS)
+    response = await call_vercel_api(messages, 400)  # Giảm token
     
     chat_history[chat_id].append({"role": "assistant", "content": response})
     
@@ -789,21 +541,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
+    # Commands
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("about", about))
-    application.add_handler(CommandHandler("clear", clear_history))
-    application.add_handler(CommandHandler("weather", weather_command))
-    application.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    
     application.add_handler(CommandHandler("guessnumber", start_guess_number))
     application.add_handler(CommandHandler("noitu", start_noitu))
     application.add_handler(CommandHandler("quiz", quiz_command))
+    application.add_handler(CommandHandler("stopquiz", stop_quiz))
     application.add_handler(CommandHandler("hint", hint_command))
+    application.add_handler(CommandHandler("leaderboard", leaderboard_command))
+    application.add_handler(CommandHandler("stats", stats_command))
     
+    # Callbacks & Messages
     application.add_handler(CallbackQueryHandler(button_callback))
-    
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Linh Bot started! 🎮")
