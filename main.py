@@ -9,7 +9,7 @@ import gc
 from datetime import datetime, timedelta, time
 from typing import Dict, List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters, JobQueue
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
@@ -56,6 +56,7 @@ quiz_mode: Dict[int, bool] = {}
 quiz_count: Dict[int, int] = {}
 quiz_history: Dict[int, List[str]] = {}
 word_game_sessions: Dict[int, dict] = {}
+goodnight_task = None  # Task cho lời chúc ngủ ngon
 
 # Từ vựng cho game Vua Tiếng Việt
 VIETNAMESE_VOCABULARY = [
@@ -251,15 +252,12 @@ Gõ đáp án của bạn!"""
         
     def scramble_word(self, word: str) -> str:
         """Xáo trộn chữ cái"""
-        # Tách từng ký tự (bao gồm dấu)
         chars = list(word.replace(' ', ''))
         
-        # Xáo trộn
         scrambled = chars.copy()
         while ''.join(scrambled) == word.replace(' ', ''):
             random.shuffle(scrambled)
         
-        # Trả về với dấu /
         return ' / '.join(scrambled)
         
     def check_answer(self, answer: str) -> Tuple[bool, str]:
@@ -302,7 +300,7 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
             "model": model or CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.5,  # Giảm để chính xác hơn
+            "temperature": 0.5,
             "top_p": 0.9
         }
         
@@ -333,7 +331,6 @@ async def generate_quiz(chat_id: int) -> dict:
     
     topic = random.choice(QUIZ_TOPICS)
     
-    # Prompt rõ ràng hơn
     prompt = f"""Tạo 1 câu hỏi trắc nghiệm về {topic} Việt Nam.
 
 YÊU CẦU BẮT BUỘC:
@@ -390,7 +387,6 @@ BÂY GIỜ TẠO CÂU HỎI VỀ {topic.upper()}:"""
             elif line.startswith("Giải thích:"):
                 quiz["explanation"] = line.replace("Giải thích:", "").strip()
         
-        # Kiểm tra quiz hợp lệ
         if quiz["question"] and len(quiz["options"]) == 4 and quiz["correct"]:
             quiz_history[chat_id].append(quiz["question"][:60])
             return quiz
@@ -401,51 +397,31 @@ BÂY GIỜ TẠO CÂU HỎI VỀ {topic.upper()}:"""
         logger.error(f"Generate quiz error: {e}")
         return None
 
-async def generate_word_game() -> dict:
-    """Tạo câu hỏi cho game Vua Tiếng Việt với Claude"""
-    prompt = """Tạo 1 từ/cụm từ tiếng Việt phổ biến để chơi game sắp xếp chữ cái.
-
-Yêu cầu:
-- Từ 2-4 âm tiết
-- Là từ có nghĩa, phổ biến
-- Phù hợp mọi lứa tuổi
-
-Format:
-Từ: [từ tiếng Việt]
-Gợi ý: [gợi ý về nghĩa của từ]"""
-
-    messages = [
-        {"role": "system", "content": "Tạo từ tiếng Việt cho game sắp xếp chữ cái."},
-        {"role": "user", "content": prompt}
-    ]
-    
-    try:
-        response = await call_api(messages, model=QUIZ_MODEL, max_tokens=100)
+async def goodnight_scheduler(app):
+    """Scheduler gửi lời chúc ngủ ngon"""
+    while True:
+        now = datetime.now()
+        target_time = now.replace(hour=23, minute=0, second=0, microsecond=0)
         
-        if response:
-            lines = response.strip().split('\n')
-            word_data = {"word": "", "hint": ""}
-            
-            for line in lines:
-                if line.startswith("Từ:"):
-                    word_data["word"] = line.replace("Từ:", "").strip()
-                elif line.startswith("Gợi ý:"):
-                    word_data["hint"] = line.replace("Gợi ý:", "").strip()
-            
-            if word_data["word"]:
-                return word_data
-                
-        # Fallback
-        word = random.choice(VIETNAMESE_VOCABULARY)
-        return {"word": word, "hint": "Từ tiếng Việt phổ biến"}
+        # Nếu đã qua 23h hôm nay thì đợi đến 23h ngày mai
+        if now >= target_time:
+            target_time += timedelta(days=1)
         
-    except Exception as e:
-        logger.error(f"Generate word game error: {e}")
-        word = random.choice(VIETNAMESE_VOCABULARY)
-        return {"word": word, "hint": "Từ tiếng Việt phổ biến"}
+        # Tính thời gian chờ
+        wait_seconds = (target_time - now).total_seconds()
+        logger.info(f"Waiting {wait_seconds} seconds until 23:00")
+        
+        # Đợi đến 23h
+        await asyncio.sleep(wait_seconds)
+        
+        # Gửi lời chúc
+        await send_goodnight_message(app)
+        
+        # Đợi 1 phút để tránh gửi lại
+        await asyncio.sleep(60)
 
-async def send_goodnight_message(context: ContextTypes.DEFAULT_TYPE):
-    """Gửi lời chúc ngủ ngon lúc 23h"""
+async def send_goodnight_message(app):
+    """Gửi lời chúc ngủ ngon"""
     chats = get_all_chats()
     
     messages = [
@@ -460,7 +436,7 @@ async def send_goodnight_message(context: ContextTypes.DEFAULT_TYPE):
     
     for chat_id, chat_type in chats:
         try:
-            await context.bot.send_message(chat_id=chat_id, text=message)
+            await app.bot.send_message(chat_id=chat_id, text=message)
             logger.info(f"Sent goodnight to {chat_id}")
         except Exception as e:
             logger.error(f"Failed to send to {chat_id}: {e}")
@@ -741,7 +717,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(response)
                 
                 if is_correct and "dừng" not in response.lower():
-                    # Tự động câu mới sau 2s nếu đúng
                     await asyncio.sleep(2)
                     msg = game.start_new_round()
                     await update.message.reply_text(msg)
@@ -769,8 +744,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("😅 Xin lỗi, mình đang gặp lỗi!")
 
+async def post_init(application: Application) -> None:
+    """Khởi động scheduler sau khi bot init"""
+    global goodnight_task
+    goodnight_task = asyncio.create_task(goodnight_scheduler(application))
+    logger.info("Goodnight scheduler started!")
+
+async def post_shutdown(application: Application) -> None:
+    """Cleanup khi shutdown"""
+    global goodnight_task
+    if goodnight_task:
+        goodnight_task.cancel()
+        try:
+            await goodnight_task
+        except asyncio.CancelledError:
+            pass
+
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Add post init callback
+    application.post_init = post_init
+    application.post_shutdown = post_shutdown
     
     # Command handlers
     application.add_handler(CommandHandler("start", start))
@@ -785,14 +780,6 @@ def main():
     # Callback & message handlers
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Schedule goodnight message at 23:00
-    job_queue = application.job_queue
-    job_queue.run_daily(
-        send_goodnight_message,
-        time=time(hour=23, minute=0, second=0),
-        days=(0, 1, 2, 3, 4, 5, 6)
-    )
     
     logger.info("Linh Bot started! 💕")
     application.run_polling()
