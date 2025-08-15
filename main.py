@@ -14,8 +14,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "500"))
+CHAT_MODEL = os.getenv("CHAT_MODEL", "alibaba/qwen-3-32b")
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 CTX_TURNS = int(os.getenv("CTX_TURNS", "3"))
 
 logging.basicConfig(
@@ -45,13 +45,15 @@ active_games: Dict[int, dict] = {}
 chat_history: Dict[int, List[dict]] = {}
 quiz_sessions: Dict[int, dict] = {}
 quiz_mode: Dict[int, bool] = {}
+used_words_global: set = set()  # Lưu từ đã dùng toàn cục
 
 SIMPLE_WORDS = [
     "trong", "sạch", "đẹp", "tươi", "vui", "mạnh", "nhanh", "xinh", 
     "sáng", "tối", "cao", "thấp", "to", "nhỏ", "dài", "ngắn",
     "nóng", "lạnh", "cứng", "mềm", "đen", "trắng", "xanh", "đỏ",
     "già", "trẻ", "mới", "cũ", "tốt", "xấu", "khó", "dễ",
-    "nặng", "nhẹ", "rộng", "hẹp", "dày", "mỏng", "xa", "gần"
+    "nặng", "nhẹ", "rộng", "hẹp", "dày", "mỏng", "xa", "gần",
+    "sâu", "cạn", "đông", "tây", "nam", "bắc", "trong", "ngoài"
 ]
 
 def cleanup_memory():
@@ -192,19 +194,36 @@ class NoiTuGame:
         self.bot_words = 0
         
     def start(self) -> str:
-        word1 = random.choice(SIMPLE_WORDS)
-        word2 = random.choice([w for w in SIMPLE_WORDS if w != word1])
-        self.current_word = f"{word1} {word2}"
+        global used_words_global
+        
+        # Tìm từ ghép chưa dùng
+        available_starts = []
+        for w1 in SIMPLE_WORDS:
+            for w2 in SIMPLE_WORDS:
+                if w1 != w2:
+                    compound = f"{w1} {w2}"
+                    if compound not in used_words_global:
+                        available_starts.append(compound)
+        
+        if not available_starts:
+            # Reset nếu hết từ
+            used_words_global.clear()
+            available_starts = [f"{w1} {w2}" for w1 in SIMPLE_WORDS for w2 in SIMPLE_WORDS if w1 != w2]
+        
+        self.current_word = random.choice(available_starts)
         self.history = [self.current_word]
+        used_words_global.add(self.current_word)
+        
         return f"""🎮 **Nối Từ với Linh!**
 
 Luật: Nối từ ghép 2 từ tiếng Việt
 VD: trong sạch → sạch sẽ
 
 🎯 **{self.current_word}**
-Nối với '{word2}' | Gõ 'thua' kết thúc"""
+Nối với '{self.current_word.split()[1]}' | Gõ 'thua' kết thúc"""
         
     def play_word(self, word: str) -> Tuple[bool, str]:
+        global used_words_global
         word = word.lower().strip()
         
         if word == "thua":
@@ -218,25 +237,27 @@ Nối với '{word2}' | Gõ 'thua' kết thúc"""
         if parts[0] != last_word:
             return False, f"❌ Phải bắt đầu '{last_word}'"
             
-        if word in self.history:
-            return False, "❌ Từ đã dùng!"
+        if word in self.history or word in used_words_global:
+            return False, "❌ Từ đã dùng rồi!"
             
         self.history.append(word)
+        used_words_global.add(word)
         self.current_word = word
         self.player_words += 1
         self.score += 100
         
-        # Bot tìm từ
+        # Bot tìm từ chưa dùng
         possible = []
         for w in SIMPLE_WORDS:
             if w != parts[1]:
                 compound = f"{parts[1]} {w}"
-                if compound not in self.history:
+                if compound not in self.history and compound not in used_words_global:
                     possible.append(compound)
         
         if possible:
             bot_word = random.choice(possible[:10])
             self.history.append(bot_word)
+            used_words_global.add(bot_word)
             self.current_word = bot_word
             self.bot_words += 1
             return False, f"✅ +100đ\n🤖 Linh: **{bot_word}**\n📊 {self.score}đ | Nối '{bot_word.split()[1]}'"
@@ -244,25 +265,28 @@ Nối với '{word2}' | Gõ 'thua' kết thúc"""
             self.score += 500
             return True, f"🎉 **THẮNG!** +500đ\n📊 Tổng: {self.score} điểm"
 
-async def call_vercel_api(messages: List[dict], max_tokens: int = 500) -> str:
+async def call_qwen_api(messages: List[dict], max_tokens: int = 400) -> str:
+    """Gọi Qwen-3-32B API với tối ưu cho model"""
     try:
         headers = {
             "Authorization": f"Bearer {VERCEL_API_KEY}",
             "Content-Type": "application/json"
         }
         
+        # Tối ưu cho Qwen
         data = {
             "model": CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.7
+            "temperature": 0.6,  # Giảm để ổn định hơn
+            "top_p": 0.9
         }
         
         response = requests.post(
             f"{BASE_URL}/chat/completions",
             headers=headers,
             json=data,
-            timeout=20
+            timeout=25
         )
         
         if response.status_code == 200:
@@ -277,42 +301,71 @@ async def call_vercel_api(messages: List[dict], max_tokens: int = 500) -> str:
         return "Lỗi kết nối!"
 
 async def generate_quiz() -> dict:
-    prompt = """Tạo câu hỏi lịch sử VN:
-Câu hỏi: [câu hỏi có năm]
+    """Tạo quiz với Qwen-3-32B"""
+    prompt = """Tạo 1 câu hỏi lịch sử Việt Nam theo format CHÍNH XÁC:
+
+Câu hỏi: [hỏi về năm của sự kiện lịch sử]
 A. [năm]
-B. [năm]
+B. [năm]  
 C. [năm]
 D. [năm]
-Đáp án: [A/B/C/D]
-Giải thích: [ngắn]"""
+Đáp án: [chỉ 1 chữ A hoặc B hoặc C hoặc D]
+Giải thích: [1 câu ngắn]
+
+Ví dụ:
+Câu hỏi: Vua Lý Thái Tổ dời đô về Thăng Long năm nào?
+A. 1009
+B. 1010
+C. 1011
+D. 1012
+Đáp án: B
+Giải thích: Năm 1010 vua Lý Thái Tổ dời đô từ Hoa Lư về Thăng Long"""
 
     messages = [
-        {"role": "system", "content": "Tạo câu hỏi lịch sử VN với năm chính xác"},
+        {"role": "system", "content": "Tạo câu hỏi lịch sử Việt Nam. Trả lời ĐÚNG format, NGẮN GỌN."},
         {"role": "user", "content": prompt}
     ]
     
     try:
-        response = await call_vercel_api(messages, 300)
+        response = await call_qwen_api(messages, 250)
         lines = response.strip().split('\n')
+        
         quiz = {"question": "", "options": [], "correct": "", "explanation": ""}
         
         for line in lines:
             line = line.strip()
             if line.startswith("Câu hỏi:"):
-                quiz["question"] = line[8:].strip()
-            elif line[:2] in ["A.", "B.", "C.", "D."] and len(quiz["options"]) < 4:
-                quiz["options"].append(line)
+                quiz["question"] = line.replace("Câu hỏi:", "").strip()
+            elif line.startswith(("A.", "B.", "C.", "D.")):
+                if len(quiz["options"]) < 4:
+                    quiz["options"].append(line)
             elif line.startswith("Đáp án:"):
-                ans = line[7:].strip()
-                if ans and ans[0] in "ABCD":
-                    quiz["correct"] = ans[0]
+                answer = line.replace("Đáp án:", "").strip()
+                if answer and answer[0] in "ABCD":
+                    quiz["correct"] = answer[0]
             elif line.startswith("Giải thích:"):
-                quiz["explanation"] = line[11:].strip()
+                quiz["explanation"] = line.replace("Giải thích:", "").strip()
         
-        return quiz
+        # Validate quiz
+        if quiz["question"] and len(quiz["options"]) == 4 and quiz["correct"]:
+            return quiz
+        else:
+            # Fallback quiz
+            return {
+                "question": "Chiến thắng Bạch Đằng năm 938 do ai chỉ huy?",
+                "options": ["A. Ngô Quyền", "B. Đinh Bộ Lĩnh", "C. Lý Thái Tổ", "D. Trần Hưng Đạo"],
+                "correct": "A",
+                "explanation": "Ngô Quyền chỉ huy chiến thắng Bạch Đằng năm 938"
+            }
+            
     except Exception as e:
         logger.error(f"Generate quiz error: {e}")
-        return {"question": "Lỗi", "options": [], "correct": "", "explanation": ""}
+        return {
+            "question": "Lê Lợi lên ngôi năm nào?",
+            "options": ["A. 1426", "B. 1427", "C. 1428", "D. 1429"],
+            "correct": "C",
+            "explanation": "Lê Lợi lên ngôi năm 1428"
+        }
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("""
@@ -320,12 +373,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🎮 **Game:**
 /guessnumber - Đoán số
-/noitu - Nối từ  
+/noitu - Nối từ (không lặp)
 /quiz - Câu đố lịch sử
 /stopquiz - Dừng câu đố
 
 🏆 /leaderboard - BXH 24h
 📊 /stats - Điểm của bạn
+
+🤖 Powered by Qwen-3-32B
 """)
 
 async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -371,21 +426,17 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiz_mode[chat_id] = True
     
     quiz = await generate_quiz()
+    quiz_sessions[chat_id] = quiz
     
-    if quiz["question"] and len(quiz["options"]) >= 4:
-        quiz_sessions[chat_id] = quiz
-        
-        keyboard = []
-        for option in quiz["options"][:4]:
-            keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
-        keyboard.append([InlineKeyboardButton("❌ Dừng", callback_data="quiz_stop")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        message = f"📜 **CÂU HỎI LỊCH SỬ**\n\n{quiz['question']}"
-        
-        await update.message.reply_text(message, reply_markup=reply_markup)
-    else:
-        await update.message.reply_text("❌ Lỗi tạo câu hỏi! Thử lại sau.")
+    keyboard = []
+    for option in quiz["options"]:
+        keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
+    keyboard.append([InlineKeyboardButton("❌ Dừng", callback_data="quiz_stop")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    message = f"📜 **CÂU HỎI LỊCH SỬ**\n\n{quiz['question']}"
+    
+    await update.message.reply_text(message, reply_markup=reply_markup)
 
 async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -458,23 +509,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del quiz_sessions[chat_id]
         await query.message.edit_text(result)
         
-        # Nếu còn quiz mode, tạo câu mới
+        # Tạo câu mới nếu còn quiz mode
         if chat_id in quiz_mode:
             await asyncio.sleep(2)
             
             quiz = await generate_quiz()
-            if quiz["question"] and len(quiz["options"]) >= 4:
-                quiz_sessions[chat_id] = quiz
-                
-                keyboard = []
-                for option in quiz["options"][:4]:
-                    keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
-                keyboard.append([InlineKeyboardButton("❌ Dừng", callback_data="quiz_stop")])
-                
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                message = f"📜 **CÂU HỎI LỊCH SỬ**\n\n{quiz['question']}"
-                
-                await context.bot.send_message(chat_id, message, reply_markup=reply_markup)
+            quiz_sessions[chat_id] = quiz
+            
+            keyboard = []
+            for option in quiz["options"]:
+                keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
+            keyboard.append([InlineKeyboardButton("❌ Dừng", callback_data="quiz_stop")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            message = f"📜 **CÂU HỎI LỊCH SỬ**\n\n{quiz['question']}"
+            
+            await context.bot.send_message(chat_id, message, reply_markup=reply_markup)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
@@ -511,7 +561,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del active_games[chat_id]
         return
     
-    # Chat AI
+    # Chat AI với Qwen
     if chat_id not in chat_history:
         chat_history[chat_id] = []
         
@@ -521,11 +571,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_history[chat_id] = chat_history[chat_id][-4:]
     
     messages = [
-        {"role": "system", "content": "Bạn là Linh. Trả lời ngắn, vui vẻ."}
+        {"role": "system", "content": "Bạn là Linh - trợ lý AI vui vẻ. Trả lời ngắn gọn, thân thiện."}
     ]
     messages.extend(chat_history[chat_id])
     
-    response = await call_vercel_api(messages, 300)
+    response = await call_qwen_api(messages, 300)
     chat_history[chat_id].append({"role": "assistant", "content": response})
     
     await update.message.reply_text(response)
@@ -545,7 +595,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Bot started! ✅")
+    logger.info("Bot started with Qwen-3-32B! 🚀")
     application.run_polling()
 
 if __name__ == "__main__":
