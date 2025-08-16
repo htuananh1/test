@@ -4,11 +4,12 @@ import asyncio
 import logging
 import requests
 import json
-import sqlite3
+import base64
 import gc
 from datetime import datetime, timedelta, time
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+from github import Github
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -19,8 +20,9 @@ CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
 CLAUDE_MODEL = "anthropic/claude-3.5-sonnet"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 CTX_TURNS = int(os.getenv("CTX_TURNS", "3"))
+GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+GITHUB_REPO = "htuananh1/Data-manager"
 
-# Cấu hình Tài Xỉu
 ROUND_DURATION_S = 45
 START_BALANCE = 1000
 MIN_BET = 10
@@ -33,7 +35,196 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ====== Tài Xỉu Classes ======
+class GitHubStorage:
+    def __init__(self, token: str, repo_name: str):
+        self.g = Github(token)
+        self.repo = self.g.get_repo(repo_name)
+        self.branch = "main"
+        self._cache = {}
+        self._last_save = {}
+        
+    def _get_file_content(self, path: str) -> Optional[dict]:
+        if path in self._cache:
+            return self._cache[path]
+            
+        try:
+            file = self.repo.get_contents(path, ref=self.branch)
+            content = base64.b64decode(file.content).decode('utf-8')
+            data = json.loads(content)
+            self._cache[path] = data
+            return data
+        except:
+            return None
+    
+    def _save_file(self, path: str, data: dict, message: str, force: bool = False):
+        if not force:
+            last_save = self._last_save.get(path, 0)
+            if datetime.now().timestamp() - last_save < 300:
+                self._cache[path] = data
+                return
+                
+        content = json.dumps(data, ensure_ascii=False, indent=2)
+        
+        try:
+            file = self.repo.get_contents(path, ref=self.branch)
+            self.repo.update_file(
+                path=path,
+                message=message,
+                content=content,
+                sha=file.sha,
+                branch=self.branch
+            )
+        except:
+            self.repo.create_file(
+                path=path,
+                message=message,
+                content=content,
+                branch=self.branch
+            )
+        
+        self._cache[path] = data
+        self._last_save[path] = datetime.now().timestamp()
+    
+    def save_score(self, user_id: int, username: str, game_type: str, score: int):
+        scores = self._get_file_content("data/scores.json") or {"scores": []}
+        
+        scores["scores"].append({
+            "user_id": user_id,
+            "username": username,
+            "game_type": game_type,
+            "score": score,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        if len(scores["scores"]) > 1000:
+            scores["scores"] = scores["scores"][-1000:]
+        
+        self._save_file("data/scores.json", scores, f"Update score: {username} - {game_type}")
+    
+    def get_leaderboard_24h(self, limit: int = 10) -> List[tuple]:
+        scores = self._get_file_content("data/scores.json") or {"scores": []}
+        
+        yesterday = datetime.now().timestamp() - 86400
+        recent_scores = [
+            s for s in scores["scores"] 
+            if datetime.fromisoformat(s["timestamp"]).timestamp() >= yesterday
+        ]
+        
+        user_scores = {}
+        for s in recent_scores:
+            uid = s["user_id"]
+            if uid not in user_scores:
+                user_scores[uid] = {
+                    "username": s["username"],
+                    "total": 0,
+                    "games": set()
+                }
+            user_scores[uid]["total"] += s["score"]
+            user_scores[uid]["games"].add(s["game_type"])
+        
+        sorted_users = sorted(
+            [(v["username"], v["total"], len(v["games"])) for v in user_scores.values()],
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        return sorted_users[:limit]
+    
+    def get_user_stats_24h(self, user_id: int) -> dict:
+        scores = self._get_file_content("data/scores.json") or {"scores": []}
+        yesterday = datetime.now().timestamp() - 86400
+        
+        user_scores = [
+            s for s in scores["scores"]
+            if s["user_id"] == user_id and 
+            datetime.fromisoformat(s["timestamp"]).timestamp() >= yesterday
+        ]
+        
+        stats = {'total': 0, 'games': {}}
+        
+        for s in user_scores:
+            game = s["game_type"]
+            if game not in stats['games']:
+                stats['games'][game] = {
+                    'played': 0,
+                    'total': 0,
+                    'best': 0
+                }
+            stats['games'][game]['played'] += 1
+            stats['games'][game]['total'] += s['score']
+            stats['games'][game]['best'] = max(stats['games'][game]['best'], s['score'])
+            stats['total'] += s['score']
+            
+        return stats
+    
+    def get_quiz_pool(self) -> List[dict]:
+        data = self._get_file_content("data/quiz_pool.json")
+        return data.get("questions", []) if data else []
+    
+    def add_quiz(self, quiz: dict):
+        data = self._get_file_content("data/quiz_pool.json") or {"questions": []}
+        data["questions"].append(quiz)
+        self._save_file("data/quiz_pool.json", data, "Add new quiz")
+    
+    def get_word_pool(self) -> List[str]:
+        data = self._get_file_content("data/word_pool.json")
+        if data and "words" in data:
+            return data["words"]
+        
+        default_words = [
+            "học sinh", "giáo viên", "bạn bè", "gia đình", "mùa xuân",
+            "mùa hạ", "mùa thu", "mùa đông", "trái tim", "nụ cười",
+            "ánh sáng", "bóng tối", "sức khỏe", "hạnh phúc", "tình yêu",
+            "thành công", "cố gắng", "kiên trì", "phấn đấu", "ước mơ",
+            "hoài bão", "tri thức", "văn hóa", "lịch sử", "truyền thống",
+            "phát triển", "công nghệ", "khoa học", "nghệ thuật", "sáng tạo",
+            "thời gian", "không gian", "vũ trụ", "thiên nhiên", "môi trường",
+            "biển cả", "núi non", "sông ngòi", "đồng bằng", "cao nguyên",
+            "thành phố", "nông thôn", "làng quê", "đô thị", "giao thông",
+            "âm nhạc", "hội họa", "điện ảnh", "văn học", "thơ ca",
+            "bánh mì", "phở bò", "bún chả", "cơm tấm", "chả giò",
+            "cà phê", "trà sữa", "nước mía", "sinh tố", "bia hơi"
+        ]
+        
+        self._save_file("data/word_pool.json", {"words": default_words}, "Initialize word pool")
+        return default_words
+    
+    def get_balances(self, chat_id: int) -> Dict[int, int]:
+        data = self._get_file_content(f"data/taixiu/{chat_id}.json")
+        return data.get("balances", {}) if data else {}
+    
+    def save_balances(self, chat_id: int, balances: Dict[int, int]):
+        data = {"balances": balances, "updated": datetime.now().isoformat()}
+        self._save_file(f"data/taixiu/{chat_id}.json", data, f"Update balances for chat {chat_id}")
+    
+    def get_chat_list(self) -> List[tuple]:
+        data = self._get_file_content("data/chats.json")
+        return data.get("chats", []) if data else []
+    
+    def save_chat_info(self, chat_id: int, chat_type: str, title: str = None):
+        data = self._get_file_content("data/chats.json") or {"chats": []}
+        
+        existing = False
+        for i, chat in enumerate(data["chats"]):
+            if chat[0] == chat_id:
+                data["chats"][i] = (chat_id, chat_type, title)
+                existing = True
+                break
+        
+        if not existing:
+            data["chats"].append((chat_id, chat_type, title))
+        
+        self._save_file("data/chats.json", data, f"Update chat info: {chat_id}")
+    
+    async def force_save_all(self):
+        for path, data in self._cache.items():
+            try:
+                self._save_file(path, data, "Periodic save", force=True)
+            except Exception as e:
+                logger.error(f"Error saving {path}: {e}")
+
+storage = GitHubStorage(GITHUB_TOKEN, GITHUB_REPO)
+
 @dataclass
 class RoundState:
     is_open: bool = False
@@ -41,6 +232,9 @@ class RoundState:
     starter_id: int = 0
     end_ts: float = 0.0
     task: Optional[asyncio.Task] = None
+    countdown_task: Optional[asyncio.Task] = None
+    message_id: Optional[int] = None
+    bet_notifications: Dict[int, str] = field(default_factory=dict)
 
 @dataclass
 class ChatState:
@@ -49,30 +243,6 @@ class ChatState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 CHAT_STATES: Dict[int, ChatState] = {}
-
-def init_db():
-    conn = sqlite3.connect('bot_scores.db')
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS scores (
-            user_id INTEGER,
-            username TEXT,
-            game_type TEXT,
-            score INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS chats (
-            chat_id INTEGER PRIMARY KEY,
-            chat_type TEXT,
-            title TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
 
 active_games: Dict[int, dict] = {}
 chat_history: Dict[int, List[dict]] = {}
@@ -83,8 +253,8 @@ quiz_history: Dict[int, List[str]] = {}
 word_game_sessions: Dict[int, dict] = {}
 word_history: Dict[int, List[str]] = {}
 goodnight_task = None
+save_task = None
 
-# ====== Tài Xỉu Helpers ======
 def _fmt_money(x: int) -> str:
     return f"{x:,}".replace(",", ".")
 
@@ -92,6 +262,11 @@ def _get_cs(chat_id: int) -> ChatState:
     cs = CHAT_STATES.get(chat_id)
     if not cs:
         cs = ChatState()
+        try:
+            balances = storage.get_balances(chat_id)
+            cs.balances = {int(k): v for k, v in balances.items()}
+        except:
+            pass
         CHAT_STATES[chat_id] = cs
     return cs
 
@@ -135,20 +310,17 @@ def _round_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def save_chat_info(chat_id: int, chat_type: str, title: str = None):
-    conn = sqlite3.connect('bot_scores.db')
-    c = conn.cursor()
-    c.execute('INSERT OR REPLACE INTO chats (chat_id, chat_type, title) VALUES (?, ?, ?)',
-              (chat_id, chat_type, title))
-    conn.commit()
-    conn.close()
+    try:
+        storage.save_chat_info(chat_id, chat_type, title)
+    except Exception as e:
+        logger.error(f"Save chat info error: {e}")
 
 def get_all_chats():
-    conn = sqlite3.connect('bot_scores.db')
-    c = conn.cursor()
-    c.execute('SELECT chat_id, chat_type FROM chats')
-    results = c.fetchall()
-    conn.close()
-    return results
+    try:
+        return storage.get_chat_list()
+    except Exception as e:
+        logger.error(f"Get chats error: {e}")
+        return []
 
 def cleanup_memory():
     global chat_history, quiz_history, word_history
@@ -168,69 +340,79 @@ def cleanup_memory():
 
 def save_score(user_id: int, username: str, game_type: str, score: int):
     try:
-        conn = sqlite3.connect('bot_scores.db')
-        c = conn.cursor()
-        c.execute('INSERT INTO scores (user_id, username, game_type, score) VALUES (?, ?, ?, ?)',
-                  (user_id, username, game_type, score))
-        conn.commit()
-        conn.close()
+        storage.save_score(user_id, username, game_type, score)
     except Exception as e:
         logger.error(f"Save score error: {e}")
 
 def get_leaderboard_24h(limit: int = 10) -> List[tuple]:
     try:
-        conn = sqlite3.connect('bot_scores.db')
-        c = conn.cursor()
-        yesterday = datetime.now() - timedelta(days=1)
-        c.execute('''
-            SELECT username, SUM(score) as total_score, COUNT(DISTINCT game_type) as games_played
-            FROM scores
-            WHERE timestamp >= ?
-            GROUP BY user_id
-            ORDER BY total_score DESC
-            LIMIT ?
-        ''', (yesterday, limit))
-        results = c.fetchall()
-        conn.close()
-        return results
+        return storage.get_leaderboard_24h(limit)
     except Exception as e:
         logger.error(f"Get leaderboard error: {e}")
         return []
 
 def get_user_stats_24h(user_id: int) -> dict:
     try:
-        conn = sqlite3.connect('bot_scores.db')
-        c = conn.cursor()
-        yesterday = datetime.now() - timedelta(days=1)
-        
-        c.execute('''
-            SELECT game_type, COUNT(*) as games_played, SUM(score) as total_score, MAX(score) as best_score
-            FROM scores
-            WHERE user_id = ? AND timestamp >= ?
-            GROUP BY game_type
-        ''', (user_id, yesterday))
-        results = c.fetchall()
-        
-        stats = {'total': 0, 'games': {}}
-        
-        for game_type, games_played, total_score, best_score in results:
-            stats['games'][game_type] = {
-                'played': games_played,
-                'total': total_score,
-                'best': best_score
-            }
-            stats['total'] += total_score
-            
-        conn.close()
-        return stats
+        return storage.get_user_stats_24h(user_id)
     except Exception as e:
         logger.error(f"Get stats error: {e}")
         return {'total': 0, 'games': {}}
 
-# ====== Tài Xỉu Functions ======
+async def save_taixiu_balances(chat_id: int):
+    cs = CHAT_STATES.get(chat_id)
+    if cs and cs.balances:
+        try:
+            storage.save_balances(chat_id, cs.balances)
+        except Exception as e:
+            logger.error(f"Save balances error: {e}")
+
+async def _countdown_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    cs = _get_cs(chat_id)
+    if not cs.round or not cs.round.message_id:
+        return
+        
+    while cs.round and cs.round.is_open:
+        remaining = int(cs.round.end_ts - asyncio.get_event_loop().time())
+        if remaining <= 0:
+            break
+            
+        try:
+            bet_info = ""
+            if cs.round.bets:
+                tai_count = sum(1 for _, (side, _) in cs.round.bets.items() if side == "tai")
+                xiu_count = sum(1 for _, (side, _) in cs.round.bets.items() if side == "xiu")
+                tai_total = sum(amt for _, (side, amt) in cs.round.bets.items() if side == "tai")
+                xiu_total = sum(amt for _, (side, amt) in cs.round.bets.items() if side == "xiu")
+                
+                bet_info = f"\n\n📊 **Thống kê cược:**\n"
+                bet_info += f"🔴 TÀI: {tai_count} người - {_fmt_money(tai_total)}\n"
+                bet_info += f"🔵 XỈU: {xiu_count} người - {_fmt_money(xiu_total)}"
+            
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=cs.round.message_id,
+                text=(
+                    f"🎲 **TÀI XỈU** đang mở! ⏱️ Còn: **{remaining}s**\n"
+                    f"• Cược tối thiểu: {_fmt_money(MIN_BET)} | tối đa: {_fmt_money(MAX_BET)}\n"
+                    f"• Gõ: `/bet tai <tiền>` hoặc `/bet xiu <tiền>`\n"
+                    f"• Tam hoa (3 số giống nhau) ➜ **Nhà cái thắng**\n"
+                    f"• /bal xem số dư\n"
+                    f"• /stoptaixiu để đóng sớm (người mở ván hoặc admin)"
+                    f"{bet_info}"
+                ),
+                reply_markup=_round_keyboard(),
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+            
+        await asyncio.sleep(5)
+
 async def _announce_round(update: Update, context: ContextTypes.DEFAULT_TYPE, duration: int):
     chat = update.effective_chat
-    await context.bot.send_message(
+    cs = _get_cs(chat.id)
+    
+    message = await context.bot.send_message(
         chat_id=chat.id,
         text=(
             f"🎲 **TÀI XỈU** đã mở! Thời gian còn: {duration}s\n"
@@ -238,11 +420,14 @@ async def _announce_round(update: Update, context: ContextTypes.DEFAULT_TYPE, du
             f"• Gõ: `/bet tai <tiền>` hoặc `/bet xiu <tiền>`\n"
             f"• Tam hoa (3 số giống nhau) ➜ **Nhà cái thắng**\n"
             f"• /bal xem số dư\n"
-            f"• /stoptaixiu để đóng sớm (người mở ván hoặc admin)\n"
+            f"• /stoptaixiu để đóng sớm (người mở ván hoặc admin)"
         ),
         reply_markup=_round_keyboard(),
         parse_mode="Markdown"
     )
+    
+    cs.round.message_id = message.message_id
+    cs.round.countdown_task = asyncio.create_task(_countdown_timer(chat.id, context))
 
 async def _auto_close_round(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     cs = _get_cs(chat_id)
@@ -258,6 +443,9 @@ async def _resolve_and_report(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     rd = cs.round
     rd.is_open = False
 
+    if rd.countdown_task and not rd.countdown_task.cancelled():
+        rd.countdown_task.cancel()
+
     a, b, c = random.randint(1, 6), random.randint(1, 6), random.randint(1, 6)
     res_side, is_triple = _result_from_dice(a, b, c)
     total = a + b + c
@@ -266,7 +454,6 @@ async def _resolve_and_report(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     losers = []
     
     for uid, (side, amount) in rd.bets.items():
-        # Lấy username từ chat member
         try:
             member = await context.bot.get_chat_member(chat_id, uid)
             username = member.user.username or member.user.first_name
@@ -307,8 +494,16 @@ async def _resolve_and_report(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         text="\n".join(lines),
         parse_mode="Markdown"
     )
+    
+    for uid in rd.bet_notifications:
+        try:
+            notification = "🎊 Chúc mừng! Bạn đã thắng!" if uid in [w[0] for w in winners] else "😢 Rất tiếc! Chúc bạn may mắn lần sau!"
+            await context.bot.send_message(chat_id=uid, text=notification)
+        except:
+            pass
+    
+    await save_taixiu_balances(chat_id)
 
-# ====== Game Classes ======
 class GuessNumberGame:
     def __init__(self, chat_id: int):
         self.chat_id = chat_id
@@ -404,20 +599,23 @@ Gõ đáp án của bạn!"""
         if self.chat_id not in word_history:
             word_history[self.chat_id] = []
         
-        word_pool = [
-            "học sinh", "giáo viên", "bạn bè", "gia đình", "mùa xuân",
-            "mùa hạ", "mùa thu", "mùa đông", "trái tim", "nụ cười",
-            "ánh sáng", "bóng tối", "sức khỏe", "hạnh phúc", "tình yêu",
-            "thành công", "cố gắng", "kiên trì", "phấn đấu", "ước mơ",
-            "hoài bão", "tri thức", "văn hóa", "lịch sử", "truyền thống",
-            "phát triển", "công nghệ", "khoa học", "nghệ thuật", "sáng tạo",
-            "thời gian", "không gian", "vũ trụ", "thiên nhiên", "môi trường",
-            "biển cả", "núi non", "sông ngòi", "đồng bằng", "cao nguyên",
-            "thành phố", "nông thôn", "làng quê", "đô thị", "giao thông",
-            "âm nhạc", "hội họa", "điện ảnh", "văn học", "thơ ca",
-            "bánh mì", "phở bò", "bún chả", "cơm tấm", "chả giò",
-            "cà phê", "trà sữa", "nước mía", "sinh tố", "bia hơi"
-        ]
+        try:
+            word_pool = storage.get_word_pool()
+        except:
+            word_pool = [
+                "học sinh", "giáo viên", "bạn bè", "gia đình", "mùa xuân",
+                "mùa hạ", "mùa thu", "mùa đông", "trái tim", "nụ cười",
+                "ánh sáng", "bóng tối", "sức khỏe", "hạnh phúc", "tình yêu",
+                "thành công", "cố gắng", "kiên trì", "phấn đấu", "ước mơ",
+                "hoài bão", "tri thức", "văn hóa", "lịch sử", "truyền thống",
+                "phát triển", "công nghệ", "khoa học", "nghệ thuật", "sáng tạo",
+                "thời gian", "không gian", "vũ trụ", "thiên nhiên", "môi trường",
+                "biển cả", "núi non", "sông ngòi", "đồng bằng", "cao nguyên",
+                "thành phố", "nông thôn", "làng quê", "đô thị", "giao thông",
+                "âm nhạc", "hội họa", "điện ảnh", "văn học", "thơ ca",
+                "bánh mì", "phở bò", "bún chả", "cơm tấm", "chả giò",
+                "cà phê", "trà sữa", "nước mía", "sinh tố", "bia hơi"
+            ]
         
         available_words = [w for w in word_pool if w not in word_history[self.chat_id][-15:]]
         
@@ -483,7 +681,6 @@ Gõ 'tiếp' để chơi câu mới hoặc 'dừng' để kết thúc"""
         remaining = self.max_attempts - self.attempts
         return False, f"❌ Sai rồi! Còn {remaining} lần thử\n\n🔤 {self.scrambled}"
 
-# ====== API Functions ======
 async def call_api(messages: List[dict], model: str = None, max_tokens: int = 400, temperature: float = None) -> str:
     try:
         headers = {
@@ -580,6 +777,10 @@ Return ONLY valid JSON in Vietnamese:
         
         if quiz["question"] and len(quiz["options"]) == 4 and quiz["correct"] in ["A", "B", "C", "D"]:
             quiz_history[chat_id].append(quiz["question"][:100])
+            try:
+                storage.add_quiz(quiz)
+            except:
+                pass
             return quiz
             
     except Exception as e:
@@ -587,7 +788,15 @@ Return ONLY valid JSON in Vietnamese:
     
     return None
 
-# ====== Scheduler Functions ======
+async def periodic_save(app):
+    while True:
+        await asyncio.sleep(300)
+        try:
+            await storage.force_save_all()
+            logger.info("Periodic save completed")
+        except Exception as e:
+            logger.error(f"Periodic save error: {e}")
+
 async def goodnight_scheduler(app):
     while True:
         now = datetime.now()
@@ -618,14 +827,14 @@ async def send_goodnight_message(app):
     
     message = random.choice(messages)
     
-    for chat_id, chat_type in chats:
+    for chat in chats:
         try:
+            chat_id = chat[0] if isinstance(chat, tuple) else chat
             await app.bot.send_message(chat_id=chat_id, text=message)
             logger.info(f"Sent goodnight to {chat_id}")
         except Exception as e:
             logger.error(f"Failed to send to {chat_id}: {e}")
 
-# ====== Command Handlers ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     save_chat_info(chat.id, chat.type, chat.title)
@@ -723,6 +932,7 @@ async def bet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bal -= amount
         cs.balances[user.id] = bal
         cs.round.bets[user.id] = (side, amount)
+        cs.round.bet_notifications[user.id] = True
 
         await update.message.reply_text(f"✅ Đặt {side.upper()} {_fmt_money(amount)} thành công! Số dư còn: {_fmt_money(bal)}")
 
@@ -894,7 +1104,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     await update.message.reply_text(message)
 
-# ====== Callback Handler ======
 async def tx_cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -912,6 +1121,8 @@ async def tx_cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user.id in cs.round.bets:
                 side, amt = cs.round.bets.pop(user.id)
                 cs.balances[user.id] = cs.balances.get(user.id, START_BALANCE) + amt
+                if user.id in cs.round.bet_notifications:
+                    del cs.round.bet_notifications[user.id]
                 await q.answer(f"🗑️ Đã hủy cược {side.upper()} {_fmt_money(amt)}", show_alert=True)
             else:
                 await q.answer("Bạn chưa có cược để hủy.", show_alert=True)
@@ -958,12 +1169,12 @@ async def tx_cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bal -= amount
         cs.balances[user.id] = bal
         cs.round.bets[user.id] = (side, amount)
+        cs.round.bet_notifications[user.id] = True
         await q.answer(f"✅ Đặt {side.upper()} {_fmt_money(amount)} thành công!", show_alert=True)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     
-    # Xử lý tài xỉu
     if query.data.startswith("tx:"):
         await tx_cb_handler(update, context)
         return
@@ -975,7 +1186,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     username = user.username or user.first_name
     
-    # Xử lý quiz
     if data.startswith("quiz_"):
         if data == "quiz_stop":
             total_questions = quiz_count.get(chat_id, 1) - 1
@@ -1114,7 +1324,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await loading_msg.edit_text(msg)
         return
     
-    # Chat với GPT
     if chat_id not in chat_history:
         chat_history[chat_id] = []
         
@@ -1137,18 +1346,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("😅 Xin lỗi, mình đang gặp lỗi!")
 
 async def post_init(application: Application) -> None:
-    global goodnight_task
+    global goodnight_task, save_task
     goodnight_task = asyncio.create_task(goodnight_scheduler(application))
-    logger.info("Goodnight scheduler started!")
+    save_task = asyncio.create_task(periodic_save(application))
+    logger.info("Schedulers started!")
 
 async def post_shutdown(application: Application) -> None:
-    global goodnight_task
+    global goodnight_task, save_task
+    
     if goodnight_task:
         goodnight_task.cancel()
         try:
             await goodnight_task
         except asyncio.CancelledError:
             pass
+            
+    if save_task:
+        save_task.cancel()
+        try:
+            await save_task
+        except asyncio.CancelledError:
+            pass
+    
+    await storage.force_save_all()
 
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
@@ -1156,7 +1376,6 @@ def main():
     application.post_init = post_init
     application.post_shutdown = post_shutdown
     
-    # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("guessnumber", start_guess_number))
     application.add_handler(CommandHandler("vuatiengviet", start_vua_tieng_viet))
@@ -1165,14 +1384,12 @@ def main():
     application.add_handler(CommandHandler("hint", hint_command))
     application.add_handler(CommandHandler("stats", stats_command))
     
-    # Tài xỉu handlers
     application.add_handler(CommandHandler("taixiu", taixiu_cmd))
     application.add_handler(CommandHandler("bet", bet_cmd))
     application.add_handler(CommandHandler("stoptaixiu", stop_taixiu_cmd))
     application.add_handler(CommandHandler("bal", bal_cmd))
     application.add_handler(CommandHandler("leaderboard", leaderboard_taixiu_cmd))
     
-    # Callback & message handlers
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
