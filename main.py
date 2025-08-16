@@ -28,6 +28,7 @@ START_BALANCE = 1000
 MIN_BET = 10
 MAX_BET = 100000
 ALLOW_REBET = True
+CHAT_HISTORY_LIMIT = 20
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -85,76 +86,79 @@ class GitHubStorage:
         self._cache[path] = data
         self._last_save[path] = datetime.now().timestamp()
     
-    def save_score(self, user_id: int, username: str, game_type: str, score: int):
-        scores = self._get_file_content("data/scores.json") or {"scores": []}
+    def get_user_balance(self, user_id: int) -> int:
+        data = self._get_file_content("data/scores.json") or {"users": {}}
+        return data["users"].get(str(user_id), {}).get("balance", START_BALANCE)
+    
+    def update_user_balance(self, user_id: int, username: str, amount: int, game_type: str = None):
+        data = self._get_file_content("data/scores.json") or {"users": {}}
         
-        scores["scores"].append({
-            "user_id": user_id,
-            "username": username,
-            "game_type": game_type,
-            "score": score,
-            "timestamp": datetime.now().isoformat()
-        })
+        user_key = str(user_id)
+        if user_key not in data["users"]:
+            data["users"][user_key] = {
+                "user_id": user_id,
+                "username": username,
+                "balance": START_BALANCE,
+                "total_earned": 0,
+                "games_played": {},
+                "last_updated": datetime.now().isoformat()
+            }
         
-        if len(scores["scores"]) > 1000:
-            scores["scores"] = scores["scores"][-1000:]
+        user_data = data["users"][user_key]
+        user_data["balance"] += amount
+        user_data["username"] = username
+        user_data["last_updated"] = datetime.now().isoformat()
         
-        self._save_file("data/scores.json", scores, f"Update score: {username} - {game_type}")
+        if amount > 0:
+            user_data["total_earned"] += amount
+            if game_type:
+                if game_type not in user_data["games_played"]:
+                    user_data["games_played"][game_type] = 0
+                user_data["games_played"][game_type] += 1
+        
+        self._save_file("data/scores.json", data, f"Update balance: {username} ({amount:+d})")
+    
+    def get_all_balances(self) -> Dict[int, int]:
+        data = self._get_file_content("data/scores.json") or {"users": {}}
+        balances = {}
+        for user_id, user_data in data["users"].items():
+            balances[int(user_id)] = user_data.get("balance", START_BALANCE)
+        return balances
     
     def get_leaderboard_24h(self, limit: int = 10) -> List[tuple]:
-        scores = self._get_file_content("data/scores.json") or {"scores": []}
+        data = self._get_file_content("data/scores.json") or {"users": {}}
         
-        yesterday = datetime.now().timestamp() - 86400
-        recent_scores = [
-            s for s in scores["scores"] 
-            if datetime.fromisoformat(s["timestamp"]).timestamp() >= yesterday
-        ]
+        users_list = []
+        for user_data in data["users"].values():
+            users_list.append((
+                user_data["username"],
+                user_data["balance"],
+                len(user_data.get("games_played", {}))
+            ))
         
-        user_scores = {}
-        for s in recent_scores:
-            uid = s["user_id"]
-            if uid not in user_scores:
-                user_scores[uid] = {
-                    "username": s["username"],
-                    "total": 0,
-                    "games": set()
-                }
-            user_scores[uid]["total"] += s["score"]
-            user_scores[uid]["games"].add(s["game_type"])
-        
-        sorted_users = sorted(
-            [(v["username"], v["total"], len(v["games"])) for v in user_scores.values()],
-            key=lambda x: x[1],
-            reverse=True
-        )
-        
-        return sorted_users[:limit]
+        users_list.sort(key=lambda x: x[1], reverse=True)
+        return users_list[:limit]
     
     def get_user_stats_24h(self, user_id: int) -> dict:
-        scores = self._get_file_content("data/scores.json") or {"scores": []}
-        yesterday = datetime.now().timestamp() - 86400
+        data = self._get_file_content("data/scores.json") or {"users": {}}
+        user_data = data["users"].get(str(user_id), {})
         
-        user_scores = [
-            s for s in scores["scores"]
-            if s["user_id"] == user_id and 
-            datetime.fromisoformat(s["timestamp"]).timestamp() >= yesterday
-        ]
+        if not user_data:
+            return {'total': 0, 'balance': START_BALANCE, 'games': {}}
         
-        stats = {'total': 0, 'games': {}}
+        stats = {
+            'total': user_data.get("total_earned", 0),
+            'balance': user_data.get("balance", START_BALANCE),
+            'games': {}
+        }
         
-        for s in user_scores:
-            game = s["game_type"]
-            if game not in stats['games']:
-                stats['games'][game] = {
-                    'played': 0,
-                    'total': 0,
-                    'best': 0
-                }
-            stats['games'][game]['played'] += 1
-            stats['games'][game]['total'] += s['score']
-            stats['games'][game]['best'] = max(stats['games'][game]['best'], s['score'])
-            stats['total'] += s['score']
-            
+        for game, count in user_data.get("games_played", {}).items():
+            stats['games'][game] = {
+                'played': count,
+                'total': 0,
+                'best': 0
+            }
+        
         return stats
     
     def get_quiz_pool(self) -> List[dict]:
@@ -189,14 +193,6 @@ class GitHubStorage:
         self._save_file("data/word_pool.json", {"words": default_words}, "Initialize word pool")
         return default_words
     
-    def get_balances(self, chat_id: int) -> Dict[int, int]:
-        data = self._get_file_content(f"data/taixiu/{chat_id}.json")
-        return data.get("balances", {}) if data else {}
-    
-    def save_balances(self, chat_id: int, balances: Dict[int, int]):
-        data = {"balances": balances, "updated": datetime.now().isoformat()}
-        self._save_file(f"data/taixiu/{chat_id}.json", data, f"Update balances for chat {chat_id}")
-    
     def get_chat_list(self) -> List[tuple]:
         data = self._get_file_content("data/chats.json")
         return data.get("chats", []) if data else []
@@ -215,6 +211,14 @@ class GitHubStorage:
             data["chats"].append((chat_id, chat_type, title))
         
         self._save_file("data/chats.json", data, f"Update chat info: {chat_id}")
+    
+    def get_chat_history(self, chat_id: int) -> List[dict]:
+        data = self._get_file_content(f"data/chat_history/{chat_id}.json")
+        return data.get("messages", []) if data else []
+    
+    def save_chat_history(self, chat_id: int, messages: List[dict]):
+        data = {"messages": messages[-CHAT_HISTORY_LIMIT:], "updated": datetime.now().isoformat()}
+        self._save_file(f"data/chat_history/{chat_id}.json", data, f"Update chat history: {chat_id}")
     
     async def force_save_all(self):
         for path, data in self._cache.items():
@@ -263,8 +267,8 @@ def _get_cs(chat_id: int) -> ChatState:
     if not cs:
         cs = ChatState()
         try:
-            balances = storage.get_balances(chat_id)
-            cs.balances = {int(k): v for k, v in balances.items()}
+            all_balances = storage.get_all_balances()
+            cs.balances = all_balances
         except:
             pass
         CHAT_STATES[chat_id] = cs
@@ -272,7 +276,8 @@ def _get_cs(chat_id: int) -> ChatState:
 
 def _ensure_balance(cs: ChatState, user_id: int):
     if user_id not in cs.balances:
-        cs.balances[user_id] = START_BALANCE
+        balance = storage.get_user_balance(user_id)
+        cs.balances[user_id] = balance
 
 def _norm_side(s: str) -> Optional[str]:
     s = s.strip().lower()
@@ -325,8 +330,8 @@ def get_all_chats():
 def cleanup_memory():
     global chat_history, quiz_history, word_history
     for chat_id in list(chat_history.keys()):
-        if len(chat_history[chat_id]) > 4:
-            chat_history[chat_id] = chat_history[chat_id][-4:]
+        if len(chat_history[chat_id]) > CHAT_HISTORY_LIMIT:
+            chat_history[chat_id] = chat_history[chat_id][-CHAT_HISTORY_LIMIT:]
     
     for chat_id in list(quiz_history.keys()):
         if len(quiz_history[chat_id]) > 20:
@@ -340,7 +345,10 @@ def cleanup_memory():
 
 def save_score(user_id: int, username: str, game_type: str, score: int):
     try:
-        storage.save_score(user_id, username, game_type, score)
+        storage.update_user_balance(user_id, username, score, game_type)
+        for cs in CHAT_STATES.values():
+            if user_id in cs.balances:
+                cs.balances[user_id] += score
     except Exception as e:
         logger.error(f"Save score error: {e}")
 
@@ -357,14 +365,6 @@ def get_user_stats_24h(user_id: int) -> dict:
     except Exception as e:
         logger.error(f"Get stats error: {e}")
         return {'total': 0, 'games': {}}
-
-async def save_taixiu_balances(chat_id: int):
-    cs = CHAT_STATES.get(chat_id)
-    if cs and cs.balances:
-        try:
-            storage.save_balances(chat_id, cs.balances)
-        except Exception as e:
-            logger.error(f"Save balances error: {e}")
 
 async def _countdown_timer(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     cs = _get_cs(chat_id)
@@ -461,12 +461,17 @@ async def _resolve_and_report(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             username = f"User{uid}"
             
         if res_side == "house":
+            storage.update_user_balance(uid, username, -amount, "taixiu")
+            cs.balances[uid] -= amount
             losers.append((uid, username, side, amount))
         elif side == res_side:
-            cs.balances[uid] = cs.balances.get(uid, START_BALANCE) + amount * 2
+            win_amount = amount
+            storage.update_user_balance(uid, username, win_amount, "taixiu")
+            cs.balances[uid] += win_amount
             winners.append((uid, username, side, amount))
-            save_score(uid, username, "taixiu", amount)
         else:
+            storage.update_user_balance(uid, username, -amount, "taixiu")
+            cs.balances[uid] -= amount
             losers.append((uid, username, side, amount))
 
     lines = [
@@ -497,23 +502,25 @@ async def _resolve_and_report(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     
     for uid in rd.bet_notifications:
         try:
-            notification = "🎊 Chúc mừng! Bạn đã thắng!" if uid in [w[0] for w in winners] else "😢 Rất tiếc! Chúc bạn may mắn lần sau!"
+            if uid in [w[0] for w in winners]:
+                amount = next(amt for u, _, _, amt in winners if u == uid)
+                notification = f"🎊 Chúc mừng! Bạn đã thắng {_fmt_money(amount)}!"
+            else:
+                notification = "😢 Rất tiếc! Chúc bạn may mắn lần sau!"
             await context.bot.send_message(chat_id=uid, text=notification)
         except:
             pass
-    
-    await save_taixiu_balances(chat_id)
 
 class GuessNumberGame:
     def __init__(self, chat_id: int):
         self.chat_id = chat_id
         self.attempts = 0
-        self.max_attempts = 10
+        self.max_attempts = 15
         self.hints_used = 0
-        self.max_hints = 3
+        self.max_hints = 4
         self.start_time = datetime.now()
-        self.score = 1000
-        self.secret_number = random.randint(1, 100)
+        self.score = 5000
+        self.secret_number = random.randint(1, 999)
         self.riddle = self.generate_riddle()
             
     def generate_riddle(self) -> str:
@@ -522,10 +529,10 @@ class GuessNumberGame:
             riddles.append("số chẵn")
         else:
             riddles.append("số lẻ")
-        if self.secret_number < 50:
-            riddles.append("nhỏ hơn 50")
+        if self.secret_number < 500:
+            riddles.append("nhỏ hơn 500")
         else:
-            riddles.append("lớn hơn hoặc bằng 50")
+            riddles.append("lớn hơn hoặc bằng 500")
         return f"Số bí mật là {' và '.join(riddles)}"
         
     def get_hint(self) -> str:
@@ -533,23 +540,26 @@ class GuessNumberGame:
             return "❌ Hết gợi ý rồi!"
             
         self.hints_used += 1
-        self.score -= 100
+        self.score -= 500
         
         if self.hints_used == 1:
-            tens = self.secret_number // 10
-            hint = f"💡 Gợi ý 1: {'Số có 1 chữ số' if tens == 0 else f'Chữ số hàng chục là {tens}'}"
+            hundreds = self.secret_number // 100
+            hint = f"💡 Gợi ý 1: {'Số có 1-2 chữ số' if hundreds == 0 else f'Chữ số hàng trăm là {hundreds}'}"
         elif self.hints_used == 2:
+            tens = (self.secret_number % 100) // 10
+            hint = f"💡 Gợi ý 2: Chữ số hàng chục là {tens}"
+        elif self.hints_used == 3:
             digit_sum = sum(int(d) for d in str(self.secret_number))
-            hint = f"💡 Gợi ý 2: Tổng các chữ số là {digit_sum}"
+            hint = f"💡 Gợi ý 3: Tổng các chữ số là {digit_sum}"
         else:
             lower = (self.secret_number // 10) * 10
-            upper = lower + 9 if lower > 0 else 9
-            hint = f"💡 Gợi ý 3: Số từ {max(1, lower)} đến {upper}"
+            upper = lower + 9
+            hint = f"💡 Gợi ý 4: Số từ {max(1, lower)} đến {min(999, upper)}"
         return f"{hint}\n🎯 Còn {self.max_hints - self.hints_used} gợi ý"
         
     def make_guess(self, guess: int) -> Tuple[bool, str]:
         self.attempts += 1
-        self.score -= 50
+        self.score -= 200
         
         if guess == self.secret_number:
             time_taken = (datetime.now() - self.start_time).seconds
@@ -849,7 +859,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💰 Số dư của bạn: **{_fmt_money(balance)}**
 
 🎮 **Game:**
-/guessnumber - Đoán số
+/guessnumber - Đoán số 1-999
 /vuatiengviet - Sắp xếp chữ cái
 /quiz - Câu đố về Việt Nam (Claude AI)
 /stopquiz - Dừng câu đố
@@ -860,8 +870,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /bal - Xem số dư
 /stoptaixiu - Đóng ván sớm
 
-🏆 /leaderboard - BXH Tài xỉu
-📊 /stats - Thống kê 24h
+🏆 /leaderboard - BXH theo số dư
+📊 /stats - Thống kê của bạn
 
 💬 Chat với Linh (GPT)
 💕 Mỗi 23h Linh sẽ chúc ngủ ngon!
@@ -892,6 +902,7 @@ async def taixiu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
+    username = user.username or user.first_name
     cs = _get_cs(chat.id)
     
     async with cs.lock:
@@ -924,17 +935,17 @@ async def bet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user.id in cs.round.bets and ALLOW_REBET:
             old_side, old_amt = cs.round.bets[user.id]
             bal += old_amt
+            cs.balances[user.id] = bal
 
         if amount > bal:
             await update.message.reply_text(f"💸 Số dư không đủ. Số dư hiện tại: {_fmt_money(bal)}")
             return
 
-        bal -= amount
-        cs.balances[user.id] = bal
+        cs.balances[user.id] = bal - amount
         cs.round.bets[user.id] = (side, amount)
         cs.round.bet_notifications[user.id] = True
 
-        await update.message.reply_text(f"✅ Đặt {side.upper()} {_fmt_money(amount)} thành công! Số dư còn: {_fmt_money(bal)}")
+        await update.message.reply_text(f"✅ Đặt {side.upper()} {_fmt_money(amount)} thành công! Số dư còn: {_fmt_money(cs.balances[user.id])}")
 
 async def stop_taixiu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -967,25 +978,18 @@ async def bal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _ensure_balance(cs, user.id)
     await update.message.reply_text(f"👛 Số dư của bạn: {_fmt_money(cs.balances[user.id])}")
 
-async def leaderboard_taixiu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    cs = _get_cs(chat.id)
+async def leaderboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    leaderboard = get_leaderboard_24h()
     
-    if not cs.balances:
-        await update.message.reply_text("Chưa có ai chơi.")
+    if not leaderboard:
+        await update.message.reply_text("Chưa có dữ liệu bảng xếp hạng.")
         return
         
-    top = sorted(cs.balances.items(), key=lambda x: x[1], reverse=True)[:10]
-    lines = ["🏆 **BẢNG XẾP HẠNG TÀI XỈU**"]
+    lines = ["🏆 **BẢNG XẾP HẠNG THEO SỐ DƯ**\n"]
     
-    for i, (uid, bal) in enumerate(top, 1):
-        try:
-            member = await chat.get_member(uid)
-            name = member.user.username or member.user.first_name
-        except:
-            name = f"User{uid}"
+    for i, (username, balance, games) in enumerate(leaderboard, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        lines.append(f"{medal} {name} — {_fmt_money(bal)}")
+        lines.append(f"{medal} {username} — {_fmt_money(balance)} ({games} games)")
         
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -998,11 +1002,11 @@ async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
     game = GuessNumberGame(chat_id)
     active_games[chat_id] = {"type": "guessnumber", "game": game}
     
-    await update.message.reply_text(f"""🎮 **ĐOÁN SỐ 1-100**
+    await update.message.reply_text(f"""🎮 **ĐOÁN SỐ 1-999**
 
 💡 {game.riddle}
-📝 10 lần | 💰 1000đ
-/hint - Gợi ý (-100đ)
+📝 15 lần | 💰 5000đ
+/hint - Gợi ý (-500đ, tối đa 4 lần)
 
 Đoán đi!""")
 
@@ -1088,11 +1092,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     stats = get_user_stats_24h(user.id)
     
-    message = f"📊 **{user.first_name} (24H)**\n\n"
-    message += f"📈 Tổng điểm kiếm được: {stats['total']:,}đ\n"
+    message = f"📊 **{user.first_name}**\n\n"
+    message += f"💰 Số dư hiện tại: {_fmt_money(stats['balance'])}\n"
+    message += f"📈 Tổng điểm kiếm được: {_fmt_money(stats['total'])}\n"
     
     if stats['games']:
-        message += "\n**Chi tiết:**\n"
+        message += "\n**Thống kê game:**\n"
         for game_type, data in stats['games'].items():
             game_name = {
                 "guessnumber": "Đoán số",
@@ -1100,15 +1105,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "quiz": "Câu đố",
                 "taixiu": "Tài xỉu"
             }.get(game_type, game_type)
-            message += f"• {game_name}: {data['total']:,}đ ({data['played']} lần)\n"
+            message += f"• {game_name}: {data['played']} lần\n"
             
     await update.message.reply_text(message)
 
 async def tx_cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
     chat = update.effective_chat
     user = update.effective_user
+    username = user.username or user.first_name
     cs = _get_cs(chat.id)
     
     async with cs.lock:
@@ -1161,13 +1166,13 @@ async def tx_cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user.id in cs.round.bets and ALLOW_REBET:
             old_side, old_amt = cs.round.bets[user.id]
             bal += old_amt
+            cs.balances[user.id] = bal
 
         if amount > bal:
             await q.answer(f"💸 Không đủ số dư. Hiện có: {_fmt_money(bal)}", show_alert=True)
             return
 
-        bal -= amount
-        cs.balances[user.id] = bal
+        cs.balances[user.id] = bal - amount
         cs.round.bets[user.id] = (side, amount)
         cs.round.bet_notifications[user.id] = True
         await q.answer(f"✅ Đặt {side.upper()} {_fmt_money(amount)} thành công!", show_alert=True)
@@ -1211,9 +1216,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if answer == quiz["correct"]:
             save_score(user.id, username, "quiz", 200)
-            cs = _get_cs(chat_id)
-            _ensure_balance(cs, user.id)
-            cs.balances[user.id] += 200
             result = f"✅ Chính xác! (+200đ)\n\n{quiz['explanation']}"
         else:
             result = f"❌ Sai rồi! Đáp án: {quiz['correct']}\n\n{quiz['explanation']}"
@@ -1281,20 +1283,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if game_info["type"] == "guessnumber":
             try:
                 guess = int(message)
-                if 1 <= guess <= 100:
+                if 1 <= guess <= 999:
                     is_finished, response = game_info["game"].make_guess(guess)
                     await update.message.reply_text(response)
                     
                     if is_finished and "Đúng" in response:
                         save_score(user.id, username, "guessnumber", game_info["game"].score)
-                        cs = _get_cs(chat_id)
-                        _ensure_balance(cs, user.id)
-                        cs.balances[user.id] += game_info["game"].score
                     
                     if is_finished:
                         del active_games[chat_id]
                 else:
-                    await update.message.reply_text("❌ Từ 1-100 thôi!")
+                    await update.message.reply_text("❌ Từ 1-999 thôi!")
             except ValueError:
                 await update.message.reply_text("❌ Nhập số!")
                 
@@ -1308,9 +1307,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif message.lower() in ["dừng", "dung", "stop"]:
                 if game.score > 0:
                     save_score(user.id, username, "vuatiengviet", game.score)
-                    cs = _get_cs(chat_id)
-                    _ensure_balance(cs, user.id)
-                    cs.balances[user.id] += game.score
                 await update.message.reply_text(f"📊 Kết thúc!\nTổng điểm: {game.score}")
                 del active_games[chat_id]
             else:
@@ -1325,12 +1321,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if chat_id not in chat_history:
-        chat_history[chat_id] = []
+        history = storage.get_chat_history(chat_id)
+        chat_history[chat_id] = history if history else []
         
     chat_history[chat_id].append({"role": "user", "content": message})
     
-    if len(chat_history[chat_id]) > 4:
-        chat_history[chat_id] = chat_history[chat_id][-4:]
+    if len(chat_history[chat_id]) > CHAT_HISTORY_LIMIT:
+        chat_history[chat_id] = chat_history[chat_id][-CHAT_HISTORY_LIMIT:]
     
     messages = [
         {"role": "system", "content": "Bạn là Linh - cô gái Việt Nam vui vẻ, thân thiện. Trả lời ngắn gọn."}
@@ -1342,6 +1339,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if response:
         chat_history[chat_id].append({"role": "assistant", "content": response})
         await update.message.reply_text(response)
+        
+        try:
+            storage.save_chat_history(chat_id, chat_history[chat_id])
+        except:
+            pass
     else:
         await update.message.reply_text("😅 Xin lỗi, mình đang gặp lỗi!")
 
@@ -1388,7 +1390,7 @@ def main():
     application.add_handler(CommandHandler("bet", bet_cmd))
     application.add_handler(CommandHandler("stoptaixiu", stop_taixiu_cmd))
     application.add_handler(CommandHandler("bal", bal_cmd))
-    application.add_handler(CommandHandler("leaderboard", leaderboard_taixiu_cmd))
+    application.add_handler(CommandHandler("leaderboard", leaderboard_cmd))
     
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
