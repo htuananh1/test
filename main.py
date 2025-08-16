@@ -8,6 +8,7 @@ import sqlite3
 import gc
 from datetime import datetime, timedelta, time
 from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -19,11 +20,35 @@ CLAUDE_MODEL = "anthropic/claude-3.5-sonnet"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 CTX_TURNS = int(os.getenv("CTX_TURNS", "3"))
 
+# Cấu hình Tài Xỉu
+ROUND_DURATION_S = 45
+START_BALANCE = 1000
+MIN_BET = 10
+MAX_BET = 100000
+ALLOW_REBET = True
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ====== Tài Xỉu Classes ======
+@dataclass
+class RoundState:
+    is_open: bool = False
+    bets: Dict[int, Tuple[str, int]] = field(default_factory=dict)
+    starter_id: int = 0
+    end_ts: float = 0.0
+    task: Optional[asyncio.Task] = None
+
+@dataclass
+class ChatState:
+    balances: Dict[int, int] = field(default_factory=dict)
+    round: Optional[RoundState] = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+CHAT_STATES: Dict[int, ChatState] = {}
 
 def init_db():
     conn = sqlite3.connect('bot_scores.db')
@@ -44,13 +69,6 @@ def init_db():
             title TEXT
         )
     ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS user_points (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            points INTEGER DEFAULT 1000
-        )
-    ''')
     conn.commit()
     conn.close()
 
@@ -63,40 +81,58 @@ quiz_mode: Dict[int, bool] = {}
 quiz_count: Dict[int, int] = {}
 quiz_history: Dict[int, List[str]] = {}
 word_game_sessions: Dict[int, dict] = {}
-word_history: Dict[int, List[str]] = {}  # Lưu từ đã dùng
-taixiu_sessions: Dict[int, dict] = {}  # Phiên tài xỉu
-taixiu_bets: Dict[int, List[dict]] = {}  # Cược của người chơi
+word_history: Dict[int, List[str]] = {}
 goodnight_task = None
 
-def get_user_points(user_id: int, username: str) -> int:
-    conn = sqlite3.connect('bot_scores.db')
-    c = conn.cursor()
-    c.execute('SELECT points FROM user_points WHERE user_id = ?', (user_id,))
-    result = c.fetchone()
-    
-    if result is None:
-        c.execute('INSERT INTO user_points (user_id, username, points) VALUES (?, ?, ?)',
-                  (user_id, username, 1000))
-        conn.commit()
-        conn.close()
-        return 1000
-    
-    conn.close()
-    return result[0]
+# ====== Tài Xỉu Helpers ======
+def _fmt_money(x: int) -> str:
+    return f"{x:,}".replace(",", ".")
 
-def update_user_points(user_id: int, username: str, points_change: int):
-    conn = sqlite3.connect('bot_scores.db')
-    c = conn.cursor()
-    
-    current = get_user_points(user_id, username)
-    new_points = max(0, current + points_change)
-    
-    c.execute('UPDATE user_points SET points = ? WHERE user_id = ?',
-              (new_points, user_id))
-    conn.commit()
-    conn.close()
-    
-    return new_points
+def _get_cs(chat_id: int) -> ChatState:
+    cs = CHAT_STATES.get(chat_id)
+    if not cs:
+        cs = ChatState()
+        CHAT_STATES[chat_id] = cs
+    return cs
+
+def _ensure_balance(cs: ChatState, user_id: int):
+    if user_id not in cs.balances:
+        cs.balances[user_id] = START_BALANCE
+
+def _norm_side(s: str) -> Optional[str]:
+    s = s.strip().lower()
+    if s in ("tai", "tài", "t", "over", "o"):
+        return "tai"
+    if s in ("xiu", "xỉu", "x", "under", "u"):
+        return "xiu"
+    return None
+
+def _result_from_dice(a: int, b: int, c: int) -> Tuple[str, bool]:
+    is_triple = (a == b == c)
+    total = a + b + c
+    if is_triple:
+        return ("house", True)
+    if 4 <= total <= 10:
+        return ("xiu", False)
+    if 11 <= total <= 17:
+        return ("tai", False)
+    return ("house", is_triple)
+
+def _round_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Đặt TÀI (+100)", callback_data="tx:q:tai:100"),
+            InlineKeyboardButton("Đặt XỈU (+100)", callback_data="tx:q:xiu:100"),
+        ],
+        [
+            InlineKeyboardButton("Đặt +500", callback_data="tx:q:keep:500"),
+            InlineKeyboardButton("Đặt +1000", callback_data="tx:q:keep:1000"),
+        ],
+        [
+            InlineKeyboardButton("Hủy cược", callback_data="tx:cancel"),
+            InlineKeyboardButton("Số dư", callback_data="tx:bal"),
+        ]
+    ])
 
 def save_chat_info(chat_id: int, chat_type: str, title: str = None):
     conn = sqlite3.connect('bot_scores.db')
@@ -191,51 +227,88 @@ def get_user_stats_24h(user_id: int) -> dict:
         logger.error(f"Get stats error: {e}")
         return {'total': 0, 'games': {}}
 
-class TaiXiuGame:
-    def __init__(self, chat_id: int):
-        self.chat_id = chat_id
-        self.dice_values = []
-        self.total = 0
-        self.result = ""
-        self.start_time = datetime.now()
-        self.phase = "betting"  # betting or rolling
-        self.bets = []
-        
-    def roll_dice(self):
-        self.dice_values = [random.randint(1, 6) for _ in range(3)]
-        self.total = sum(self.dice_values)
-        self.result = "Tài" if self.total >= 11 else "Xỉu"
-        
-    def add_bet(self, user_id: int, username: str, choice: str, amount: int):
-        self.bets.append({
-            'user_id': user_id,
-            'username': username,
-            'choice': choice,
-            'amount': amount
-        })
-        
-    def calculate_winners(self):
-        winners = []
-        losers = []
-        
-        for bet in self.bets:
-            if bet['choice'] == self.result:
-                win_amount = int(bet['amount'] * 1.9)
-                winners.append({
-                    'username': bet['username'],
-                    'user_id': bet['user_id'],
-                    'amount': bet['amount'],
-                    'win': win_amount
-                })
-            else:
-                losers.append({
-                    'username': bet['username'],
-                    'user_id': bet['user_id'],
-                    'amount': bet['amount']
-                })
-                
-        return winners, losers
+# ====== Tài Xỉu Functions ======
+async def _announce_round(update: Update, context: ContextTypes.DEFAULT_TYPE, duration: int):
+    chat = update.effective_chat
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text=(
+            f"🎲 **TÀI XỈU** đã mở! Thời gian còn: {duration}s\n"
+            f"• Cược tối thiểu: {_fmt_money(MIN_BET)} | tối đa: {_fmt_money(MAX_BET)}\n"
+            f"• Gõ: `/bet tai <tiền>` hoặc `/bet xiu <tiền>`\n"
+            f"• Tam hoa (3 số giống nhau) ➜ **Nhà cái thắng**\n"
+            f"• /bal xem số dư\n"
+            f"• /stoptaixiu để đóng sớm (người mở ván hoặc admin)\n"
+        ),
+        reply_markup=_round_keyboard(),
+        parse_mode="Markdown"
+    )
 
+async def _auto_close_round(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    cs = _get_cs(chat_id)
+    await asyncio.sleep(max(0, int(cs.round.end_ts - asyncio.get_event_loop().time())))
+    async with cs.lock:
+        if cs.round and cs.round.is_open:
+            await _resolve_and_report(chat_id, context)
+
+async def _resolve_and_report(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    cs = _get_cs(chat_id)
+    if not cs.round:
+        return
+    rd = cs.round
+    rd.is_open = False
+
+    a, b, c = random.randint(1, 6), random.randint(1, 6), random.randint(1, 6)
+    res_side, is_triple = _result_from_dice(a, b, c)
+    total = a + b + c
+
+    winners = []
+    losers = []
+    
+    for uid, (side, amount) in rd.bets.items():
+        # Lấy username từ chat member
+        try:
+            member = await context.bot.get_chat_member(chat_id, uid)
+            username = member.user.username or member.user.first_name
+        except:
+            username = f"User{uid}"
+            
+        if res_side == "house":
+            losers.append((uid, username, side, amount))
+        elif side == res_side:
+            cs.balances[uid] = cs.balances.get(uid, START_BALANCE) + amount * 2
+            winners.append((uid, username, side, amount))
+            save_score(uid, username, "taixiu", amount)
+        else:
+            losers.append((uid, username, side, amount))
+
+    lines = [
+        f"🎲 **KẾT QUẢ**: 🎲 {a} + {b} + {c} = **{total}**",
+        f"➡️ Kết cục: {'TAM HOA – NHÀ CÁI THẮNG' if is_triple else ('TÀI' if res_side=='tai' else 'XỈU')}",
+        "",
+        f"👥 Tổng người cược: {len(rd.bets)}",
+    ]
+    
+    if winners:
+        wtxt = "\n".join([f"✅ {name} {side.upper()} +{_fmt_money(amount)}" for uid, name, side, amount in winners])
+        lines += ["**Thắng:**", wtxt]
+    if losers:
+        ltxt = "\n".join([f"❌ {name} {side.upper()} -{_fmt_money(amount)}" for uid, name, side, amount in losers])
+        lines += ["", "**Thua:**", ltxt]
+    if not winners and not losers:
+        lines += ["(Không có ai đặt cược)"]
+
+    if rd.task and not rd.task.cancelled():
+        rd.task.cancel()
+    cs.round = None
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="\n".join(lines),
+        parse_mode="Markdown"
+    )
+
+# ====== Game Classes ======
 class GuessNumberGame:
     def __init__(self, chat_id: int):
         self.chat_id = chat_id
@@ -331,7 +404,6 @@ Gõ đáp án của bạn!"""
         if self.chat_id not in word_history:
             word_history[self.chat_id] = []
         
-        # Danh sách từ vựng phong phú
         word_pool = [
             "học sinh", "giáo viên", "bạn bè", "gia đình", "mùa xuân",
             "mùa hạ", "mùa thu", "mùa đông", "trái tim", "nụ cười",
@@ -347,18 +419,15 @@ Gõ đáp án của bạn!"""
             "cà phê", "trà sữa", "nước mía", "sinh tố", "bia hơi"
         ]
         
-        # Lọc từ chưa dùng gần đây
         available_words = [w for w in word_pool if w not in word_history[self.chat_id][-15:]]
         
         if not available_words:
             word_history[self.chat_id] = []
             available_words = word_pool
         
-        # Chọn từ ngẫu nhiên
         word = random.choice(available_words)
         word_history[self.chat_id].append(word)
         
-        # Xáo trộn thông minh
         def smart_scramble(text):
             clusters = ['th', 'tr', 'ch', 'ph', 'nh', 'ng', 'gh', 'kh', 'gi', 'qu']
             result = []
@@ -414,6 +483,7 @@ Gõ 'tiếp' để chơi câu mới hoặc 'dừng' để kết thúc"""
         remaining = self.max_attempts - self.attempts
         return False, f"❌ Sai rồi! Còn {remaining} lần thử\n\n🔤 {self.scrambled}"
 
+# ====== API Functions ======
 async def call_api(messages: List[dict], model: str = None, max_tokens: int = 400, temperature: float = None) -> str:
     try:
         headers = {
@@ -459,38 +529,29 @@ async def generate_quiz(chat_id: int) -> dict:
     recent_questions = quiz_history[chat_id][-10:] if len(quiz_history[chat_id]) > 0 else []
     history_text = "\n".join(recent_questions) if recent_questions else "None"
     
-    topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam", "Khoa học Việt Nam", "Thể thao Việt Nam", "Kinh tế Việt Nam", "Giáo dục Việt Nam"]
+    topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam", "Khoa học Việt Nam", "Thể thao Việt Nam"]
     topic = random.choice(topics)
     
     prompt = f"""Create a quiz question about {topic} with MAXIMUM ACCURACY.
 
 CRITICAL REQUIREMENTS:
 1. MUST be 100% factually accurate and verifiable
-2. Use reliable, well-documented facts only
-3. Different from previously asked questions
-4. 4 options with ONLY 1 correct answer
-5. All wrong options must be clearly incorrect but plausible
-6. Provide educational explanation with source if possible
+2. Different from previously asked questions
+3. 4 options with ONLY 1 correct answer
 
-Previously asked questions:
-{history_text}
+Previously asked: {history_text}
 
 Return ONLY valid JSON in Vietnamese:
 {{
   "topic": "{topic}",
-  "question": "clear, accurate question in Vietnamese",
-  "options": ["A. option 1", "B. option 2", "C. option 3", "D. option 4"],
+  "question": "question in Vietnamese",
+  "options": ["A. option", "B. option", "C. option", "D. option"],
   "answer": "A or B or C or D",
-  "explain": "accurate explanation in Vietnamese with facts"
-}}
-
-CRITICAL: Double-check all facts before creating the question. Prioritize accuracy over difficulty."""
+  "explain": "explanation in Vietnamese"
+}}"""
 
     messages = [
-        {
-            "role": "system", 
-            "content": "You are a Vietnamese education expert with deep knowledge of verified facts about Vietnam. Create only 100% accurate quiz questions. If unsure about any fact, use a different question. Accuracy is paramount."
-        },
+        {"role": "system", "content": "You are a Vietnamese education expert. Create only 100% accurate quiz questions."},
         {"role": "user", "content": prompt}
     ]
     
@@ -504,125 +565,29 @@ CRITICAL: Double-check all facts before creating the question. Prioritize accura
         json_end = response.rfind('}') + 1
         
         if json_start == -1 or json_end <= json_start:
-            logger.error(f"No JSON found in response: {response}")
             return None
             
         json_str = response[json_start:json_end]
-        
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON parse error: {e}, Response: {json_str}")
-            return None
+        data = json.loads(json_str)
         
         quiz = {
             "topic": data.get("topic", topic),
             "question": data.get("question", ""),
             "options": data.get("options", []),
-            "correct": data.get("answer", ""),
+            "correct": data.get("answer", "")[0].upper() if data.get("answer") else "",
             "explanation": data.get("explain", "")
         }
         
-        if quiz["correct"] and len(quiz["correct"]) > 0:
-            quiz["correct"] = quiz["correct"][0].upper()
-        
-        if (quiz["question"] and 
-            len(quiz["options"]) == 4 and 
-            quiz["correct"] in ["A", "B", "C", "D"]):
-            
+        if quiz["question"] and len(quiz["options"]) == 4 and quiz["correct"] in ["A", "B", "C", "D"]:
             quiz_history[chat_id].append(quiz["question"][:100])
             return quiz
-        else:
-            logger.error(f"Invalid quiz data: {quiz}")
-            return None
             
     except Exception as e:
         logger.error(f"Generate quiz error: {e}")
-        return None
+    
+    return None
 
-async def start_taixiu_round(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Bắt đầu phiên tài xỉu mới"""
-    if chat_id not in taixiu_sessions:
-        return
-        
-    game = TaiXiuGame(chat_id)
-    taixiu_sessions[chat_id] = game
-    taixiu_bets[chat_id] = []
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("⬆️ TÀI", callback_data="tx_tai"),
-            InlineKeyboardButton("⬇️ XỈU", callback_data="tx_xiu")
-        ],
-        [InlineKeyboardButton("💰 Điểm của tôi", callback_data="tx_points")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    message = f"""🎲 **TÀI XỈU - PHIÊN MỚI** 🎲
-
-⏱️ Thời gian cược: **40 giây**
-💰 Tỷ lệ thắng: **1.9x**
-
-📌 **Luật chơi:**
-• 3 xúc xắc, tổng 11-18: **TÀI**
-• 3 xúc xắc, tổng 3-10: **XỈU**
-
-👉 Nhấn nút để cược!
-💬 Hoặc gõ: `tai 100` hoặc `xiu 100`
-"""
-    
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=message,
-        reply_markup=reply_markup
-    )
-    
-    # Đợi 40 giây
-    await asyncio.sleep(40)
-    
-    # Tung xúc xắc
-    game.roll_dice()
-    
-    dice_display = f"🎲 {game.dice_values[0]} | 🎲 {game.dice_values[1]} | 🎲 {game.dice_values[2]}"
-    
-    result_message = f"""🎲 **KẾT QUẢ** 🎲
-
-{dice_display}
-Tổng: **{game.total}**
-Kết quả: **{game.result.upper()}**
-"""
-    
-    # Tính toán người thắng
-    winners, losers = game.calculate_winners()
-    
-    if winners:
-        result_message += "\n🏆 **NGƯỜI THẮNG:**\n"
-        for winner in winners:
-            new_points = update_user_points(winner['user_id'], winner['username'], winner['win'] - winner['amount'])
-            result_message += f"• {winner['username']}: +{winner['win'] - winner['amount']}đ (Tổng: {new_points}đ)\n"
-            save_score(winner['user_id'], winner['username'], "taixiu", winner['win'] - winner['amount'])
-    
-    if losers:
-        result_message += "\n❌ **NGƯỜI THUA:**\n"
-        for loser in losers:
-            new_points = update_user_points(loser['user_id'], loser['username'], -loser['amount'])
-            result_message += f"• {loser['username']}: -{loser['amount']}đ (Còn: {new_points}đ)\n"
-    
-    if not winners and not losers:
-        result_message += "\n📢 Không có ai đặt cược!"
-    
-    await context.bot.send_message(chat_id=chat_id, text=result_message)
-    
-    # Xóa phiên
-    if chat_id in taixiu_sessions:
-        del taixiu_sessions[chat_id]
-    if chat_id in taixiu_bets:
-        del taixiu_bets[chat_id]
-    
-    # Đợi 20 giây rồi bắt đầu phiên mới
-    await asyncio.sleep(20)
-    await start_taixiu_round(context, chat_id)
-
+# ====== Scheduler Functions ======
 async def goodnight_scheduler(app):
     while True:
         now = datetime.now()
@@ -660,47 +625,159 @@ async def send_goodnight_message(app):
         except Exception as e:
             logger.error(f"Failed to send to {chat_id}: {e}")
 
+# ====== Command Handlers ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     save_chat_info(chat.id, chat.type, chat.title)
-    
     user = update.effective_user
-    points = get_user_points(user.id, user.username or user.first_name)
+    cs = _get_cs(chat.id)
+    _ensure_balance(cs, user.id)
+    balance = cs.balances[user.id]
     
     await update.message.reply_text(f"""
 👋 **Xin chào! Mình là Linh!**
 
-💰 Điểm của bạn: **{points:,}đ**
+💰 Số dư của bạn: **{_fmt_money(balance)}**
 
 🎮 **Game:**
 /guessnumber - Đoán số
 /vuatiengviet - Sắp xếp chữ cái
 /quiz - Câu đố về Việt Nam (Claude AI)
 /stopquiz - Dừng câu đố
-/taixiu - Chơi tài xỉu (1.9x)
 
-🏆 /leaderboard - BXH 24h
-📊 /stats - Điểm của bạn
-💰 /points - Xem điểm hiện tại
+🎲 **Tài Xỉu:**
+/taixiu - Mở ván tài xỉu (45s)
+/bet tai/xiu <số tiền> - Đặt cược
+/bal - Xem số dư
+/stoptaixiu - Đóng ván sớm
+
+🏆 /leaderboard - BXH Tài xỉu
+📊 /stats - Thống kê 24h
 
 💬 Chat với Linh (GPT)
 💕 Mỗi 23h Linh sẽ chúc ngủ ngon!
 """)
 
-async def points_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def taixiu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
     user = update.effective_user
-    points = get_user_points(user.id, user.username or user.first_name)
-    await update.message.reply_text(f"💰 Điểm của {user.first_name}: **{points:,}đ**")
+    cs = _get_cs(chat.id)
 
-async def taixiu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    try:
+        duration = int(context.args[0]) if context.args else ROUND_DURATION_S
+        duration = max(10, min(300, duration))
+    except:
+        duration = ROUND_DURATION_S
+
+    async with cs.lock:
+        if cs.round and cs.round.is_open:
+            await update.message.reply_text("⚠️ Đang có ván mở. Hãy cược bằng /bet hoặc chờ ván kết thúc.")
+            return
+
+        rd = RoundState(is_open=True, bets={}, starter_id=user.id, end_ts=asyncio.get_event_loop().time() + duration)
+        cs.round = rd
+        rd.task = asyncio.create_task(_auto_close_round(chat.id, context))
+
+        await _announce_round(update, context, duration)
+
+async def bet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    cs = _get_cs(chat.id)
     
-    if chat_id in taixiu_sessions:
-        await update.message.reply_text("⏳ Phiên tài xỉu đang diễn ra! Hãy đặt cược.")
+    async with cs.lock:
+        if not cs.round or not cs.round.is_open:
+            await update.message.reply_text("⛔ Chưa có ván nào đang mở. Dùng /taixiu để mở ván mới.")
+            return
+
+        if len(context.args) < 2:
+            await update.message.reply_text("Cách dùng: /bet tai|xiu <số tiền>\nVí dụ: /bet tai 1000")
+            return
+
+        side = _norm_side(context.args[0])
+        if side is None:
+            await update.message.reply_text("❓ Vui lòng chọn 'tai' hoặc 'xiu'.")
+            return
+
+        try:
+            amount = int(context.args[1])
+        except:
+            await update.message.reply_text("❓ Số tiền không hợp lệ.")
+            return
+
+        if amount < MIN_BET or amount > MAX_BET:
+            await update.message.reply_text(f"⚠️ Cược tối thiểu {_fmt_money(MIN_BET)} và tối đa {_fmt_money(MAX_BET)}.")
+            return
+
+        _ensure_balance(cs, user.id)
+        bal = cs.balances[user.id]
+        
+        if user.id in cs.round.bets and ALLOW_REBET:
+            old_side, old_amt = cs.round.bets[user.id]
+            bal += old_amt
+
+        if amount > bal:
+            await update.message.reply_text(f"💸 Số dư không đủ. Số dư hiện tại: {_fmt_money(bal)}")
+            return
+
+        bal -= amount
+        cs.balances[user.id] = bal
+        cs.round.bets[user.id] = (side, amount)
+
+        await update.message.reply_text(f"✅ Đặt {side.upper()} {_fmt_money(amount)} thành công! Số dư còn: {_fmt_money(bal)}")
+
+async def stop_taixiu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    cs = _get_cs(chat.id)
+    
+    async with cs.lock:
+        if not cs.round or not cs.round.is_open:
+            await update.message.reply_text("ℹ️ Không có ván đang mở.")
+            return
+
+        can_stop = (user.id == cs.round.starter_id)
+        if not can_stop:
+            try:
+                member = await chat.get_member(user.id)
+                can_stop = member.status in ("administrator", "creator")
+            except:
+                can_stop = False
+
+        if not can_stop:
+            await update.message.reply_text("⛔ Chỉ người mở ván hoặc admin mới được đóng sớm.")
+            return
+
+        await _resolve_and_report(chat.id, context)
+
+async def bal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    cs = _get_cs(chat.id)
+    _ensure_balance(cs, user.id)
+    await update.message.reply_text(f"👛 Số dư của bạn: {_fmt_money(cs.balances[user.id])}")
+
+async def leaderboard_taixiu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    cs = _get_cs(chat.id)
+    
+    if not cs.balances:
+        await update.message.reply_text("Chưa có ai chơi.")
         return
+        
+    top = sorted(cs.balances.items(), key=lambda x: x[1], reverse=True)[:10]
+    lines = ["🏆 **BẢNG XẾP HẠNG TÀI XỈU**"]
     
-    # Bắt đầu phiên mới
-    asyncio.create_task(start_taixiu_round(context, chat_id))
+    for i, (uid, bal) in enumerate(top, 1):
+        try:
+            member = await chat.get_member(uid)
+            name = member.user.username or member.user.first_name
+        except:
+            name = f"User{uid}"
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+        lines.append(f"{medal} {name} — {_fmt_money(bal)}")
+        
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -748,7 +825,7 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiz_mode[chat_id] = True
     quiz_count[chat_id] = 1
     
-    loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo câu hỏi (độ chính xác cao)...")
+    loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo câu hỏi...")
     
     quiz = await generate_quiz(chat_id)
     
@@ -773,9 +850,7 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Ẩm thực Việt Nam": "🍜",
         "Văn hóa Việt Nam": "🎭",
         "Khoa học Việt Nam": "🔬",
-        "Thể thao Việt Nam": "⚽",
-        "Kinh tế Việt Nam": "💰",
-        "Giáo dục Việt Nam": "📚"
+        "Thể thao Việt Nam": "⚽"
     }
     
     emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
@@ -799,27 +874,11 @@ async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text(f"✅ Đã dừng câu đố!\n📊 Bạn đã trả lời {total_questions} câu")
 
-async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    scores = get_leaderboard_24h()
-    
-    message = "🏆 **BXH 24H**\n\n"
-    
-    if scores:
-        for i, (username, total_score, games_played) in enumerate(scores, 1):
-            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-            message += f"{medal} {username}: {total_score:,}đ\n"
-    else:
-        message += "Chưa có ai chơi!"
-        
-    await update.message.reply_text(message)
-
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     stats = get_user_stats_24h(user.id)
-    points = get_user_points(user.id, user.username or user.first_name)
     
     message = f"📊 **{user.first_name} (24H)**\n\n"
-    message += f"💰 Điểm hiện tại: {points:,}đ\n"
     message += f"📈 Tổng điểm kiếm được: {stats['total']:,}đ\n"
     
     if stats['games']:
@@ -835,53 +894,86 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     await update.message.reply_text(message)
 
+# ====== Callback Handler ======
+async def tx_cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    chat = update.effective_chat
+    user = update.effective_user
+    cs = _get_cs(chat.id)
+    
+    async with cs.lock:
+        if not cs.round or not cs.round.is_open:
+            await q.answer("⛔ Ván đã đóng hoặc chưa mở.", show_alert=True)
+            return
+
+        data = q.data
+        if data == "tx:cancel":
+            if user.id in cs.round.bets:
+                side, amt = cs.round.bets.pop(user.id)
+                cs.balances[user.id] = cs.balances.get(user.id, START_BALANCE) + amt
+                await q.answer(f"🗑️ Đã hủy cược {side.upper()} {_fmt_money(amt)}", show_alert=True)
+            else:
+                await q.answer("Bạn chưa có cược để hủy.", show_alert=True)
+            return
+
+        if data == "tx:bal":
+            _ensure_balance(cs, user.id)
+            await q.answer(f"👛 Số dư: {_fmt_money(cs.balances[user.id])}", show_alert=True)
+            return
+
+        try:
+            _, action, side_raw, amt_raw = data.split(":")
+            if action != "q":
+                raise ValueError
+            if side_raw == "keep":
+                if user.id not in cs.round.bets:
+                    await q.answer("Bạn chưa chọn TÀI/XỈU.", show_alert=True)
+                    return
+                side = cs.round.bets[user.id][0]
+            else:
+                side = _norm_side(side_raw)
+            amount = int(amt_raw)
+        except:
+            await q.answer("Dữ liệu không hợp lệ.", show_alert=True)
+            return
+
+        if side is None:
+            await q.answer("❓ Vui lòng chọn 'tai' hoặc 'xiu'.", show_alert=True)
+            return
+        if amount < MIN_BET or amount > MAX_BET:
+            await q.answer(f"⚠️ Cược tối thiểu {_fmt_money(MIN_BET)} và tối đa {_fmt_money(MAX_BET)}.", show_alert=True)
+            return
+
+        _ensure_balance(cs, user.id)
+        bal = cs.balances[user.id]
+        if user.id in cs.round.bets and ALLOW_REBET:
+            old_side, old_amt = cs.round.bets[user.id]
+            bal += old_amt
+
+        if amount > bal:
+            await q.answer(f"💸 Không đủ số dư. Hiện có: {_fmt_money(bal)}", show_alert=True)
+            return
+
+        bal -= amount
+        cs.balances[user.id] = bal
+        cs.round.bets[user.id] = (side, amount)
+        await q.answer(f"✅ Đặt {side.upper()} {_fmt_money(amount)} thành công!", show_alert=True)
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    
+    # Xử lý tài xỉu
+    if query.data.startswith("tx:"):
+        await tx_cb_handler(update, context)
+        return
+    
     await query.answer()
     
     data = query.data
     chat_id = update.effective_chat.id
     user = update.effective_user
     username = user.username or user.first_name
-    
-    # Xử lý tài xỉu
-    if data.startswith("tx_"):
-        if data == "tx_points":
-            points = get_user_points(user.id, username)
-            await query.answer(f"💰 Điểm của bạn: {points:,}đ", show_alert=True)
-            return
-            
-        if chat_id not in taixiu_sessions:
-            await query.answer("❌ Phiên đã kết thúc!", show_alert=True)
-            return
-            
-        game = taixiu_sessions[chat_id]
-        
-        if game.phase != "betting":
-            await query.answer("⏳ Đang tung xúc xắc...", show_alert=True)
-            return
-        
-        # Kiểm tra đã cược chưa
-        if chat_id not in taixiu_bets:
-            taixiu_bets[chat_id] = []
-            
-        for bet in game.bets:
-            if bet['user_id'] == user.id:
-                await query.answer("❌ Bạn đã cược rồi!", show_alert=True)
-                return
-        
-        points = get_user_points(user.id, username)
-        bet_amount = min(100, points)  # Cược mặc định 100 hoặc tất cả nếu ít hơn
-        
-        if points < 50:
-            await query.answer("❌ Bạn cần ít nhất 50đ để chơi!", show_alert=True)
-            return
-        
-        choice = "Tài" if data == "tx_tai" else "Xỉu"
-        game.add_bet(user.id, username, choice, bet_amount)
-        
-        await query.answer(f"✅ Đã cược {bet_amount}đ vào {choice}", show_alert=True)
-        return
     
     # Xử lý quiz
     if data.startswith("quiz_"):
@@ -909,7 +1001,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if answer == quiz["correct"]:
             save_score(user.id, username, "quiz", 200)
-            update_user_points(user.id, username, 200)
+            cs = _get_cs(chat_id)
+            _ensure_balance(cs, user.id)
+            cs.balances[user.id] += 200
             result = f"✅ Chính xác! (+200đ)\n\n{quiz['explanation']}"
         else:
             result = f"❌ Sai rồi! Đáp án: {quiz['correct']}\n\n{quiz['explanation']}"
@@ -954,9 +1048,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Ẩm thực Việt Nam": "🍜",
                 "Văn hóa Việt Nam": "🎭",
                 "Khoa học Việt Nam": "🔬",
-                "Thể thao Việt Nam": "⚽",
-                "Kinh tế Việt Nam": "💰",
-                "Giáo dục Việt Nam": "📚"
+                "Thể thao Việt Nam": "⚽"
             }
             
             emoji = topic_emojis.get(quiz.get("topic", ""), "❓")
@@ -973,38 +1065,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     save_chat_info(chat.id, chat.type, chat.title)
     
-    # Xử lý cược tài xỉu bằng text
-    if chat_id in taixiu_sessions:
-        game = taixiu_sessions[chat_id]
-        if game.phase == "betting":
-            parts = message.lower().split()
-            if len(parts) == 2 and parts[0] in ["tai", "tài", "xiu", "xỉu"]:
-                try:
-                    bet_amount = int(parts[1])
-                    points = get_user_points(user.id, username)
-                    
-                    if bet_amount < 50:
-                        await update.message.reply_text("❌ Cược tối thiểu 50đ!")
-                        return
-                    
-                    if bet_amount > points:
-                        await update.message.reply_text(f"❌ Bạn chỉ có {points}đ!")
-                        return
-                    
-                    # Kiểm tra đã cược chưa
-                    for bet in game.bets:
-                        if bet['user_id'] == user.id:
-                            await update.message.reply_text("❌ Bạn đã cược rồi!")
-                            return
-                    
-                    choice = "Tài" if parts[0] in ["tai", "tài"] else "Xỉu"
-                    game.add_bet(user.id, username, choice, bet_amount)
-                    
-                    await update.message.reply_text(f"✅ Đã cược {bet_amount}đ vào {choice}")
-                    return
-                except ValueError:
-                    pass
-    
     if chat_id in active_games:
         game_info = active_games[chat_id]
         
@@ -1017,7 +1077,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     if is_finished and "Đúng" in response:
                         save_score(user.id, username, "guessnumber", game_info["game"].score)
-                        update_user_points(user.id, username, game_info["game"].score)
+                        cs = _get_cs(chat_id)
+                        _ensure_balance(cs, user.id)
+                        cs.balances[user.id] += game_info["game"].score
                     
                     if is_finished:
                         del active_games[chat_id]
@@ -1036,7 +1098,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif message.lower() in ["dừng", "dung", "stop"]:
                 if game.score > 0:
                     save_score(user.id, username, "vuatiengviet", game.score)
-                    update_user_points(user.id, username, game.score)
+                    cs = _get_cs(chat_id)
+                    _ensure_balance(cs, user.id)
+                    cs.balances[user.id] += game.score
                 await update.message.reply_text(f"📊 Kết thúc!\nTổng điểm: {game.score}")
                 del active_games[chat_id]
             else:
@@ -1092,17 +1156,23 @@ def main():
     application.post_init = post_init
     application.post_shutdown = post_shutdown
     
+    # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("guessnumber", start_guess_number))
     application.add_handler(CommandHandler("vuatiengviet", start_vua_tieng_viet))
     application.add_handler(CommandHandler("quiz", quiz_command))
     application.add_handler(CommandHandler("stopquiz", stop_quiz))
     application.add_handler(CommandHandler("hint", hint_command))
-    application.add_handler(CommandHandler("leaderboard", leaderboard_command))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("points", points_command))
-    application.add_handler(CommandHandler("taixiu", taixiu_command))
     
+    # Tài xỉu handlers
+    application.add_handler(CommandHandler("taixiu", taixiu_cmd))
+    application.add_handler(CommandHandler("bet", bet_cmd))
+    application.add_handler(CommandHandler("stoptaixiu", stop_taixiu_cmd))
+    application.add_handler(CommandHandler("bal", bal_cmd))
+    application.add_handler(CommandHandler("leaderboard", leaderboard_taixiu_cmd))
+    
+    # Callback & message handlers
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
