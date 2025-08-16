@@ -1,4 +1,3 @@
-# main.py
 import os, json, time, zipfile, subprocess, atexit, sys, re, hashlib, base64
 from typing import Optional
 from datetime import datetime
@@ -10,7 +9,7 @@ from urllib.parse import urljoin
 VMESS = {
     "host": "idcecopro.yunagrp.pro",
     "obfsParam": "m.youtube.com",
-    "uuid": "205144a4-65f-b4e-0a2-1d2ae88afa1",
+    "uuid": "c4178b6b-14e6-488b-8bd3-73f2d2d0d830",
     "path": "/yunagrp.com",
     "port": 443
 }
