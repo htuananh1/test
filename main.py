@@ -157,14 +157,32 @@ class GitHubStorage:
         
         return stats
     
-    def get_quiz_pool(self) -> List[dict]:
-        data = self._get_file_content("data/quiz_pool.json")
+    def get_quiz1_pool(self) -> List[dict]:
+        data = self._get_file_content("data/quiz1_pool.json")
         return data.get("questions", []) if data else []
     
-    def add_quiz(self, quiz: dict):
-        data = self._get_file_content("data/quiz_pool.json") or {"questions": []}
+    def add_quiz1(self, quiz: dict):
+        data = self._get_file_content("data/quiz1_pool.json") or {"questions": []}
         data["questions"].append(quiz)
-        self._save_file("data/quiz_pool.json", data, "Add new quiz")
+        self._save_file("data/quiz1_pool.json", data, "Add new quiz1")
+    
+    def get_quiz2_pool(self) -> List[dict]:
+        data = self._get_file_content("data/quiz2_pool.json")
+        return data.get("questions", []) if data else []
+    
+    def add_quiz2(self, quiz: dict):
+        data = self._get_file_content("data/quiz2_pool.json") or {"questions": []}
+        data["questions"].append(quiz)
+        self._save_file("data/quiz2_pool.json", data, "Add new quiz2")
+    
+    def get_math_pool(self) -> List[dict]:
+        data = self._get_file_content("data/math_pool.json")
+        return data.get("questions", []) if data else []
+    
+    def add_math(self, math: dict):
+        data = self._get_file_content("data/math_pool.json") or {"questions": []}
+        data["questions"].append(math)
+        self._save_file("data/math_pool.json", data, "Add new math")
     
     def get_chat_list(self) -> List[tuple]:
         data = self._get_file_content("data/chats.json")
@@ -207,9 +225,12 @@ chat_history: Dict[int, List[dict]] = {}
 minigame_sessions: Dict[int, dict] = {}
 user_balances: Dict[int, int] = {}
 quiz_sessions: Dict[int, dict] = {}
-quiz_history: Dict[int, List[str]] = {}
+quiz1_history: Dict[int, List[str]] = {}
+quiz2_history: Dict[int, List[str]] = {}
+math_history: Dict[int, List[str]] = {}
 goodnight_task = None
 save_task = None
+cleanup_task = None
 
 def _fmt_money(x: int) -> str:
     return f"{x:,}".replace(",", ".")
@@ -243,16 +264,41 @@ def get_all_chats():
         return []
 
 def cleanup_memory():
-    global chat_history, quiz_history
+    global chat_history, quiz1_history, quiz2_history, math_history, active_games, minigame_sessions
+    
+    # Clean chat history
     for chat_id in list(chat_history.keys()):
         if len(chat_history[chat_id]) > CHAT_HISTORY_LIMIT:
             chat_history[chat_id] = chat_history[chat_id][-CHAT_HISTORY_LIMIT:]
     
-    for chat_id in list(quiz_history.keys()):
-        if len(quiz_history[chat_id]) > 20:
-            quiz_history[chat_id] = quiz_history[chat_id][-20:]
+    # Clean quiz history
+    for chat_id in list(quiz1_history.keys()):
+        if len(quiz1_history[chat_id]) > 20:
+            quiz1_history[chat_id] = quiz1_history[chat_id][-20:]
     
+    for chat_id in list(quiz2_history.keys()):
+        if len(quiz2_history[chat_id]) > 20:
+            quiz2_history[chat_id] = quiz2_history[chat_id][-20:]
+    
+    for chat_id in list(math_history.keys()):
+        if len(math_history[chat_id]) > 20:
+            math_history[chat_id] = math_history[chat_id][-20:]
+    
+    # Clean inactive game sessions
+    current_time = datetime.now()
+    for chat_id in list(minigame_sessions.keys()):
+        if (current_time - minigame_sessions[chat_id]["start_time"]).seconds > 3600:
+            del minigame_sessions[chat_id]
+            if chat_id in active_games:
+                del active_games[chat_id]
+    
+    # Clear user balances cache if too large
+    if len(user_balances) > 100:
+        user_balances.clear()
+    
+    # Force garbage collection
     gc.collect()
+    logger.info(f"Memory cleanup completed. Active games: {len(active_games)}, Minigame sessions: {len(minigame_sessions)}")
 
 class GuessNumberGame:
     def __init__(self, chat_id: int):
@@ -326,54 +372,92 @@ class MathQuizGame:
         self.current_question = None
         self.current_answer = None
         
-    def generate_question(self) -> str:
-        difficulty = min(5, self.score // 500 + 1)
+    async def generate_question(self) -> str:
+        difficulty = random.choice(["easy", "medium", "hard"])
         
-        if difficulty <= 2:
-            a = random.randint(10, 99)
-            b = random.randint(10, 99)
-            op = random.choice(['+', '-'])
-            if op == '+':
-                self.current_answer = a + b
-                self.current_question = f"{a} + {b}"
-            else:
-                if a < b:
-                    a, b = b, a
-                self.current_answer = a - b
-                self.current_question = f"{a} - {b}"
-        elif difficulty <= 4:
-            a = random.randint(10, 50)
-            b = random.randint(2, 9)
-            op = random.choice(['×', '+', '-'])
-            if op == '×':
-                self.current_answer = a * b
-                self.current_question = f"{a} × {b}"
-            elif op == '+':
-                c = random.randint(10, 99)
-                self.current_answer = a + b * 10 + c
-                self.current_question = f"{a} + {b * 10} + {c}"
-            else:
-                c = random.randint(100, 500)
-                d = random.randint(10, 99)
-                self.current_answer = c - d
-                self.current_question = f"{c} - {d}"
-        else:
-            a = random.randint(10, 30)
-            b = random.randint(11, 30)
-            c = random.randint(2, 9)
-            self.current_answer = a * b + c
-            self.current_question = f"{a} × {b} + {c}"
+        prompt = f"""Create a math problem with difficulty: {difficulty}
+
+Requirements:
+- Easy: basic addition/subtraction (2 numbers, result < 200)
+- Medium: multiplication or multi-step addition/subtraction
+- Hard: complex calculations with multiple operations
+
+Return ONLY valid JSON:
+{{
+  "question": "math expression (e.g., 45 + 67)",
+  "answer": numeric_answer
+}}"""
+
+        messages = [
+            {"role": "system", "content": "You are a math teacher. Create clear math problems."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            response = await call_api(messages, model=CLAUDE_MODEL, max_tokens=150, temperature=0.3)
             
-        self.attempts = 0
-        return self.current_question
+            if not response:
+                # Use saved pool
+                pool = storage.get_math_pool()
+                if pool:
+                    math_q = random.choice(pool)
+                    self.current_question = math_q.get("question", "")
+                    self.current_answer = int(math_q.get("answer", 0))
+                    self.attempts = 0
+                    return self.current_question
+                return None
+            
+            json_start = response.find('{')
+            json_end = response.rfind('}') + 1
+            
+            if json_start == -1 or json_end <= json_start:
+                # Use saved pool
+                pool = storage.get_math_pool()
+                if pool:
+                    math_q = random.choice(pool)
+                    self.current_question = math_q.get("question", "")
+                    self.current_answer = int(math_q.get("answer", 0))
+                    self.attempts = 0
+                    return self.current_question
+                return None
+                
+            json_str = response[json_start:json_end]
+            data = json.loads(json_str)
+            
+            self.current_question = data.get("question", "")
+            self.current_answer = int(data.get("answer", 0))
+            self.attempts = 0
+            
+            # Save to pool
+            try:
+                storage.add_math({
+                    "question": self.current_question,
+                    "answer": self.current_answer
+                })
+            except:
+                pass
+            
+            return self.current_question
+            
+        except Exception as e:
+            logger.error(f"Generate math error: {e}")
+            # Use saved pool
+            pool = storage.get_math_pool()
+            if pool:
+                math_q = random.choice(pool)
+                self.current_question = math_q.get("question", "")
+                self.current_answer = int(math_q.get("answer", 0))
+                self.attempts = 0
+                return self.current_question
+            return None
         
     def check_answer(self, answer: int) -> Tuple[bool, str]:
         self.attempts += 1
         
         if answer == self.current_answer:
             points = (self.max_attempts - self.attempts + 1) * 100
-            self.score += points
-            return True, f"✅ Đúng! +{points} điểm (Tổng: {self.score})"
+            self.score = points
+            return True, f"✅ Đúng! +{points} điểm"
         
         if self.attempts >= self.max_attempts:
             return False, f"❌ Hết lượt! Đáp án: {self.current_answer}"
@@ -389,12 +473,12 @@ class VietnameseQuiz1Game:
         self.start_time = datetime.now()
         
     async def generate_quiz(self) -> dict:
-        global quiz_history
+        global quiz1_history
         
-        if self.chat_id not in quiz_history:
-            quiz_history[self.chat_id] = []
+        if self.chat_id not in quiz1_history:
+            quiz1_history[self.chat_id] = []
         
-        recent_questions = quiz_history[self.chat_id][-10:] if len(quiz_history[self.chat_id]) > 0 else []
+        recent_questions = quiz1_history[self.chat_id][-10:] if len(quiz1_history[self.chat_id]) > 0 else []
         history_text = "\n".join(recent_questions) if recent_questions else "None"
         
         topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam", "Khoa học Việt Nam", "Thể thao Việt Nam"]
@@ -427,12 +511,28 @@ Return ONLY valid JSON in Vietnamese:
             response = await call_api(messages, model=CLAUDE_MODEL, max_tokens=500, temperature=0.2)
             
             if not response:
+                # Use saved pool
+                pool = storage.get_quiz1_pool()
+                if pool:
+                    available_quiz = [q for q in pool if q.get("question", "")[:100] not in recent_questions]
+                    if available_quiz:
+                        quiz = random.choice(available_quiz)
+                        quiz1_history[self.chat_id].append(quiz["question"][:100])
+                        return quiz
                 return None
             
             json_start = response.find('{')
             json_end = response.rfind('}') + 1
             
             if json_start == -1 or json_end <= json_start:
+                # Use saved pool
+                pool = storage.get_quiz1_pool()
+                if pool:
+                    available_quiz = [q for q in pool if q.get("question", "")[:100] not in recent_questions]
+                    if available_quiz:
+                        quiz = random.choice(available_quiz)
+                        quiz1_history[self.chat_id].append(quiz["question"][:100])
+                        return quiz
                 return None
                 
             json_str = response[json_start:json_end]
@@ -447,15 +547,23 @@ Return ONLY valid JSON in Vietnamese:
             }
             
             if quiz["question"] and len(quiz["options"]) == 4 and quiz["correct"] in ["A", "B", "C", "D"]:
-                quiz_history[self.chat_id].append(quiz["question"][:100])
+                quiz1_history[self.chat_id].append(quiz["question"][:100])
                 try:
-                    storage.add_quiz(quiz)
+                    storage.add_quiz1(quiz)
                 except:
                     pass
                 return quiz
                 
         except Exception as e:
             logger.error(f"Generate quiz error: {e}")
+            # Use saved pool
+            pool = storage.get_quiz1_pool()
+            if pool:
+                available_quiz = [q for q in pool if q.get("question", "")[:100] not in recent_questions]
+                if available_quiz:
+                    quiz = random.choice(available_quiz)
+                    quiz1_history[self.chat_id].append(quiz["question"][:100])
+                    return quiz
         
         return None
 
@@ -469,12 +577,12 @@ class VietnameseQuiz2Game:
         self.start_time = datetime.now()
         
     async def generate_quiz(self) -> dict:
-        global quiz_history
+        global quiz2_history
         
-        if self.chat_id not in quiz_history:
-            quiz_history[self.chat_id] = []
+        if self.chat_id not in quiz2_history:
+            quiz2_history[self.chat_id] = []
         
-        recent_questions = quiz_history[self.chat_id][-10:] if len(quiz_history[self.chat_id]) > 0 else []
+        recent_questions = quiz2_history[self.chat_id][-10:] if len(quiz2_history[self.chat_id]) > 0 else []
         history_text = "\n".join(recent_questions) if recent_questions else "None"
         
         topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam", "Khoa học Việt Nam", "Thể thao Việt Nam"]
@@ -507,12 +615,28 @@ Return ONLY valid JSON in Vietnamese:
             response = await call_api(messages, model=CLAUDE_MODEL, max_tokens=300, temperature=0.2)
             
             if not response:
+                # Use saved pool
+                pool = storage.get_quiz2_pool()
+                if pool:
+                    available_quiz = [q for q in pool if q.get("question", "")[:100] not in recent_questions]
+                    if available_quiz:
+                        quiz = random.choice(available_quiz)
+                        quiz2_history[self.chat_id].append(quiz["question"][:100])
+                        return quiz
                 return None
             
             json_start = response.find('{')
             json_end = response.rfind('}') + 1
             
             if json_start == -1 or json_end <= json_start:
+                # Use saved pool
+                pool = storage.get_quiz2_pool()
+                if pool:
+                    available_quiz = [q for q in pool if q.get("question", "")[:100] not in recent_questions]
+                    if available_quiz:
+                        quiz = random.choice(available_quiz)
+                        quiz2_history[self.chat_id].append(quiz["question"][:100])
+                        return quiz
                 return None
                 
             json_str = response[json_start:json_end]
@@ -526,15 +650,23 @@ Return ONLY valid JSON in Vietnamese:
             }
             
             if quiz["question"] and quiz["answer"]:
-                quiz_history[self.chat_id].append(quiz["question"][:100])
+                quiz2_history[self.chat_id].append(quiz["question"][:100])
                 try:
-                    storage.add_quiz(quiz)
+                    storage.add_quiz2(quiz)
                 except:
                     pass
                 return quiz
                 
         except Exception as e:
             logger.error(f"Generate quiz error: {e}")
+            # Use saved pool
+            pool = storage.get_quiz2_pool()
+            if pool:
+                available_quiz = [q for q in pool if q.get("question", "")[:100] not in recent_questions]
+                if available_quiz:
+                    quiz = random.choice(available_quiz)
+                    quiz2_history[self.chat_id].append(quiz["question"][:100])
+                    return quiz
         
         return None
     
@@ -611,6 +743,14 @@ async def periodic_save(app):
             logger.info("Periodic save completed")
         except Exception as e:
             logger.error(f"Periodic save error: {e}")
+
+async def periodic_cleanup(app):
+    while True:
+        await asyncio.sleep(1800)  # Clean every 30 minutes
+        try:
+            cleanup_memory()
+        except Exception as e:
+            logger.error(f"Periodic cleanup error: {e}")
 
 async def goodnight_scheduler(app):
     while True:
@@ -807,7 +947,14 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
     
     elif game_type == "math":
         game = MathQuizGame(chat_id)
-        question = game.generate_question()
+        question = await game.generate_question()
+        
+        if not question:
+            await context.bot.send_message(chat_id, "❌ Lỗi tạo câu hỏi! Chuyển game khác...")
+            await asyncio.sleep(2)
+            await start_random_minigame(chat_id, context)
+            return
+        
         active_games[chat_id] = {"type": "math", "game": game, "minigame": True}
         
         await context.bot.send_message(
@@ -968,11 +1115,18 @@ async def math_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id in active_games:
         del active_games[chat_id]
     
+    loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo bài toán...")
+    
     game = MathQuizGame(chat_id)
-    question = game.generate_question()
+    question = await game.generate_question()
+    
+    if not question:
+        await loading_msg.edit_text("❌ Lỗi tạo câu hỏi! Thử lại /math")
+        return
+    
     active_games[chat_id] = {"type": "math", "game": game}
     
-    await update.message.reply_text(
+    await loading_msg.edit_text(
         f"""🧮 **TOÁN HỌC**
 
 Tính: **{question} = ?**
@@ -1102,49 +1256,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_finished, response = game.check_answer(message)
             await update.message.reply_text(response)
             
-            if is_finished:
-                if "Chính xác" in response:
-                    if is_minigame and chat_id in minigame_sessions:
-                        minigame_sessions[chat_id]["total_score"] += 300
-                    else:
-                        update_user_balance(user.id, username, 300, "quiz2")
-                
-                del active_games[chat_id]
-                
+            del active_games[chat_id]
+            
+            if "Chính xác" in response:
                 if is_minigame and chat_id in minigame_sessions:
-                    await asyncio.sleep(3)
-                    await start_random_minigame(chat_id, context)
+                    minigame_sessions[chat_id]["total_score"] += 300
+                else:
+                    update_user_balance(user.id, username, 300, "quiz2")
+            
+            if is_minigame and chat_id in minigame_sessions:
+                await asyncio.sleep(3)
+                await start_random_minigame(chat_id, context)
                     
         elif game_info["type"] == "math":
+            if message.lower() == "/stopmini" and is_minigame:
+                return
+            
             try:
                 answer = int(message)
                 is_correct, response = game.check_answer(answer)
                 await update.message.reply_text(response)
                 
-                if is_correct or game.attempts >= game.max_attempts:
-                    question = game.generate_question()
-                    await asyncio.sleep(1)
-                    
-                    if game.score >= 1500 or (not is_correct and game.attempts >= game.max_attempts):
-                        final_score = game.score
-                        await update.message.reply_text(
-                            f"🏁 Kết thúc! Tổng điểm: {final_score}"
-                        )
-                        
-                        if is_minigame and chat_id in minigame_sessions:
-                            minigame_sessions[chat_id]["total_score"] += final_score
-                        else:
-                            update_user_balance(user.id, username, final_score, "math")
-                        
-                        del active_games[chat_id]
-                        
-                        if is_minigame and chat_id in minigame_sessions:
-                            await asyncio.sleep(3)
-                            await start_random_minigame(chat_id, context)
+                if is_correct:
+                    if is_minigame and chat_id in minigame_sessions:
+                        minigame_sessions[chat_id]["total_score"] += game.score
                     else:
-                        await update.message.reply_text(
-                            f"📝 Câu tiếp theo:\n\n**{question} = ?**"
-                        )
+                        update_user_balance(user.id, username, game.score, "math")
+                
+                if is_correct or game.attempts >= game.max_attempts:
+                    del active_games[chat_id]
+                    
+                    if is_minigame and chat_id in minigame_sessions:
+                        await asyncio.sleep(3)
+                        await start_random_minigame(chat_id, context)
+                        
             except ValueError:
                 pass
         return
@@ -1177,27 +1322,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("😅 Xin lỗi, mình đang gặp lỗi!")
 
 async def post_init(application: Application) -> None:
-    global goodnight_task, save_task
+    global goodnight_task, save_task, cleanup_task
     goodnight_task = asyncio.create_task(goodnight_scheduler(application))
     save_task = asyncio.create_task(periodic_save(application))
+    cleanup_task = asyncio.create_task(periodic_cleanup(application))
     logger.info("Schedulers started!")
 
 async def post_shutdown(application: Application) -> None:
-    global goodnight_task, save_task
+    global goodnight_task, save_task, cleanup_task
     
-    if goodnight_task:
-        goodnight_task.cancel()
-        try:
-            await goodnight_task
-        except asyncio.CancelledError:
-            pass
-            
-    if save_task:
-        save_task.cancel()
-        try:
-            await save_task
-        except asyncio.CancelledError:
-            pass
+    for task in [goodnight_task, save_task, cleanup_task]:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     
     await storage.force_save_all()
 
