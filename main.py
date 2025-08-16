@@ -50,7 +50,8 @@ class GitHubStorage:
             data = json.loads(content)
             self._cache[path] = data
             return data
-        except:
+        except Exception as e:
+            logger.error(f"Error reading {path}: {e}")
             return None
     
     def _save_file(self, path: str, data: dict, message: str, force: bool = False):
@@ -782,23 +783,26 @@ async def send_goodnight_message(app):
             logger.error(f"Failed to send to {chat_id}: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    save_chat_info(chat.id, chat.type, chat.title)
-    user = update.effective_user
-    balance = get_user_balance(user.id)
-    
-    chat_settings[chat.id] = {
-        "goodnight_enabled": True,
-        "chat_type": chat.type,
-        "title": chat.title
-    }
-    
-    if chat.type == "private":
-        greeting = f"👋 **Xin chào {user.first_name}! Mình là Linh!**"
-    else:
-        greeting = f"👋 **Xin chào! Mình là Linh!**\n🏠 Nhóm: {chat.title or 'Không tên'}"
-    
-    await update.message.reply_text(f"""
+    try:
+        logger.info(f"Start command from user {update.effective_user.id}")
+        
+        chat = update.effective_chat
+        save_chat_info(chat.id, chat.type, chat.title)
+        user = update.effective_user
+        balance = get_user_balance(user.id)
+        
+        chat_settings[chat.id] = {
+            "goodnight_enabled": True,
+            "chat_type": chat.type,
+            "title": chat.title
+        }
+        
+        if chat.type == "private":
+            greeting = f"👋 **Xin chào {user.first_name}! Mình là Linh!**"
+        else:
+            greeting = f"👋 **Xin chào! Mình là Linh!**\n🏠 Nhóm: {chat.title or 'Không tên'}"
+        
+        await update.message.reply_text(f"""
 {greeting}
 
 💰 Số dư của bạn: **{_fmt_money(balance)}**
@@ -819,38 +823,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 💬 Chat với Linh (GPT)
 💕 Mỗi 23h Linh sẽ chúc ngủ ngon!
-""")
+""", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in start command: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
 async def toggle_goodnight(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    
-    if chat_id not in chat_settings:
-        chat_settings[chat_id] = {"goodnight_enabled": True}
-    
-    chat_settings[chat_id]["goodnight_enabled"] = not chat_settings[chat_id]["goodnight_enabled"]
-    
-    status = "BẬT" if chat_settings[chat_id]["goodnight_enabled"] else "TẮT"
-    await update.message.reply_text(f"🌙 Chức năng chúc ngủ ngon đã được **{status}**")
+    try:
+        chat_id = update.effective_chat.id
+        
+        if chat_id not in chat_settings:
+            chat_settings[chat_id] = {"goodnight_enabled": True}
+        
+        chat_settings[chat_id]["goodnight_enabled"] = not chat_settings[chat_id]["goodnight_enabled"]
+        
+        status = "BẬT" if chat_settings[chat_id]["goodnight_enabled"] else "TẮT"
+        await update.message.reply_text(f"🌙 Chức năng chúc ngủ ngon đã được **{status}**", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in toggle_goodnight: {e}")
 
 async def minigame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    
-    if chat_id in minigame_sessions:
-        await update.message.reply_text("⚠️ Đang có minigame chạy! Dùng /stopmini để dừng.")
-        return
-    
-    minigame_sessions[chat_id] = {
-        "active": True,
-        "current_game": None,
-        "total_score": 0,
-        "games_played": 0,
-        "start_time": datetime.now(),
-        "username": user.username or user.first_name,
-        "user_id": user.id
-    }
-    
-    await start_random_minigame(chat_id, context)
+    try:
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+        
+        if chat_id in minigame_sessions:
+            await update.message.reply_text("⚠️ Đang có minigame chạy! Dùng /stopmini để dừng.")
+            return
+        
+        minigame_sessions[chat_id] = {
+            "active": True,
+            "current_game": None,
+            "total_score": 0,
+            "games_played": 0,
+            "start_time": datetime.now(),
+            "username": user.username or user.first_name,
+            "user_id": user.id
+        }
+        
+        await start_random_minigame(chat_id, context)
+    except Exception as e:
+        logger.error(f"Error in minigame_cmd: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
 async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in minigame_sessions or not minigame_sessions[chat_id]["active"]:
@@ -868,38 +882,218 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
     
     await context.bot.send_message(
         chat_id, 
-        f"🎲 **Minigame #{session['games_played']}**\nTổng điểm: {session['total_score']}\n\n⏳ Đang tải..."
+        f"🎲 **Minigame #{session['games_played']}**\nTổng điểm: {session['total_score']}\n\n⏳ Đang tải...",
+        parse_mode="Markdown"
     )
     
     await asyncio.sleep(1)
     
-    if game_type == "guessnumber":
-        game = GuessNumberGame(chat_id)
-        active_games[chat_id] = {"type": "guessnumber", "game": game, "minigame": True}
-        
-        await context.bot.send_message(
-            chat_id,
-            f"""🎮 **ĐOÁN SỐ 1-999**
+    try:
+        if game_type == "guessnumber":
+            game = GuessNumberGame(chat_id)
+            active_games[chat_id] = {"type": "guessnumber", "game": game, "minigame": True}
+            
+            await context.bot.send_message(
+                chat_id,
+                f"""🎮 **ĐOÁN SỐ 1-999**
 
 💡 {game.riddle}
 📝 15 lần | 💰 5000đ
 /hint - Gợi ý (-500đ, tối đa 4 lần)
 
-Đoán đi!"""
+Đoán đi!""",
+                parse_mode="Markdown"
+            )
+        
+        elif game_type == "quiz1":
+            game = VietnameseQuiz1Game(chat_id)
+            quiz = await game.generate_quiz()
+            
+            if not quiz:
+                await context.bot.send_message(chat_id, "❌ Lỗi tạo câu hỏi! Chuyển game khác...")
+                await asyncio.sleep(2)
+                await start_random_minigame(chat_id, context)
+                return
+            
+            game.current_quiz = quiz
+            active_games[chat_id] = {"type": "quiz1", "game": game, "minigame": True}
+            
+            keyboard = []
+            for option in quiz["options"]:
+                keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            topic_emojis = {
+                "Lịch sử Việt Nam": "📜",
+                "Địa lý Việt Nam": "🗺️",
+                "Ẩm thực Việt Nam": "🍜",
+                "Văn hóa Việt Nam": "🎭",
+                "Khoa học Việt Nam": "🔬",
+                "Thể thao Việt Nam": "⚽"
+            }
+            
+            emoji = topic_emojis.get(quiz["topic"], "❓")
+            
+            await context.bot.send_message(
+                chat_id,
+                f"{emoji} **QUIZ 1.0 - {quiz['topic'].upper()}**\n\n{quiz['question']}",
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+        
+        elif game_type == "quiz2":
+            game = VietnameseQuiz2Game(chat_id)
+            quiz = await game.generate_quiz()
+            
+            if not quiz:
+                await context.bot.send_message(chat_id, "❌ Lỗi tạo câu hỏi! Chuyển game khác...")
+                await asyncio.sleep(2)
+                await start_random_minigame(chat_id, context)
+                return
+            
+            game.current_quiz = quiz
+            active_games[chat_id] = {"type": "quiz2", "game": game, "minigame": True}
+            
+            topic_emojis = {
+                "Lịch sử Việt Nam": "📜",
+                "Địa lý Việt Nam": "🗺️",
+                "Ẩm thực Việt Nam": "🍜",
+                "Văn hóa Việt Nam": "🎭",
+                "Khoa học Việt Nam": "🔬",
+                "Thể thao Việt Nam": "⚽"
+            }
+            
+            emoji = topic_emojis.get(quiz["topic"], "❓")
+            
+            await context.bot.send_message(
+                chat_id,
+                f"""{emoji} **QUIZ 2.0 - {quiz["topic"].upper()}**
+
+{quiz["question"]}
+
+💡 Trả lời ngắn gọn (1-3 từ)
+✍️ Gõ câu trả lời của bạn!""",
+                parse_mode="Markdown"
+            )
+        
+        elif game_type == "math":
+            game = MathQuizGame(chat_id)
+            question = await game.generate_question()
+            
+            if not question:
+                await context.bot.send_message(chat_id, "❌ Lỗi tạo câu hỏi! Chuyển game khác...")
+                await asyncio.sleep(2)
+                await start_random_minigame(chat_id, context)
+                return
+            
+            active_games[chat_id] = {"type": "math", "game": game, "minigame": True}
+            
+            await context.bot.send_message(
+                chat_id,
+                f"""🧮 **TOÁN HỌC**
+
+Tính: **{question} = ?**
+
+📝 Bạn có {game.max_attempts} lần thử
+✍️ Gõ đáp án!""",
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        logger.error(f"Error in start_random_minigame: {e}")
+
+async def stop_minigame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = update.effective_chat.id
+        
+        if chat_id not in minigame_sessions:
+            await update.message.reply_text("❌ Không có minigame nào đang chạy!")
+            return
+        
+        session = minigame_sessions[chat_id]
+        total_time = (datetime.now() - session["start_time"]).seconds
+        
+        if session["total_score"] > 0:
+            update_user_balance(
+                session["user_id"], 
+                session["username"], 
+                session["total_score"], 
+                "minigame"
+            )
+        
+        await update.message.reply_text(
+            f"""🏁 **KẾT THÚC MINIGAME!**
+
+👤 Người chơi: {session['username']}
+🎮 Số game đã chơi: {session['games_played']}
+💰 Tổng điểm kiếm được: {session['total_score']}
+⏱️ Thời gian: {total_time}s
+
+Cảm ơn bạn đã chơi! 💕""",
+            parse_mode="Markdown"
         )
-    
-    elif game_type == "quiz1":
+        
+        if chat_id in quiz_sessions:
+            del quiz_sessions[chat_id]
+        
+        del minigame_sessions[chat_id]
+        if chat_id in active_games:
+            del active_games[chat_id]
+    except Exception as e:
+        logger.error(f"Error in stop_minigame_cmd: {e}")
+
+async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = update.effective_chat.id
+        
+        if chat_id in active_games:
+            del active_games[chat_id]
+            
+        game = GuessNumberGame(chat_id)
+        active_games[chat_id] = {"type": "guessnumber", "game": game}
+        
+        await update.message.reply_text(f"""🎮 **ĐOÁN SỐ 1-999**
+
+💡 {game.riddle}
+📝 15 lần | 💰 5000đ
+/hint - Gợi ý (-500đ, tối đa 4 lần)
+
+Đoán đi!""", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in start_guess_number: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
+
+async def hint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = update.effective_chat.id
+        
+        if chat_id not in active_games or active_games[chat_id]["type"] != "guessnumber":
+            await update.message.reply_text("❌ Không trong game đoán số!")
+            return
+            
+        game = active_games[chat_id]["game"]
+        await update.message.reply_text(game.get_hint())
+    except Exception as e:
+        logger.error(f"Error in hint_command: {e}")
+
+async def quiz1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = update.effective_chat.id
+        
+        if chat_id in active_games:
+            del active_games[chat_id]
+        
+        loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo câu hỏi...")
+        
         game = VietnameseQuiz1Game(chat_id)
         quiz = await game.generate_quiz()
         
         if not quiz:
-            await context.bot.send_message(chat_id, "❌ Lỗi tạo câu hỏi! Chuyển game khác...")
-            await asyncio.sleep(2)
-            await start_random_minigame(chat_id, context)
+            await loading_msg.edit_text("❌ Lỗi tạo câu hỏi! Thử lại /quiz1")
             return
         
         game.current_quiz = quiz
-        active_games[chat_id] = {"type": "quiz1", "game": game, "minigame": True}
+        active_games[chat_id] = {"type": "quiz1", "game": game}
         
         keyboard = []
         for option in quiz["options"]:
@@ -918,24 +1112,33 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
         
         emoji = topic_emojis.get(quiz["topic"], "❓")
         
-        await context.bot.send_message(
-            chat_id,
+        await loading_msg.edit_text(
             f"{emoji} **QUIZ 1.0 - {quiz['topic'].upper()}**\n\n{quiz['question']}",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
         )
-    
-    elif game_type == "quiz2":
+    except Exception as e:
+        logger.error(f"Error in quiz1_command: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
+
+async def quiz2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = update.effective_chat.id
+        
+        if chat_id in active_games:
+            del active_games[chat_id]
+        
+        loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo câu hỏi...")
+        
         game = VietnameseQuiz2Game(chat_id)
         quiz = await game.generate_quiz()
         
         if not quiz:
-            await context.bot.send_message(chat_id, "❌ Lỗi tạo câu hỏi! Chuyển game khác...")
-            await asyncio.sleep(2)
-            await start_random_minigame(chat_id, context)
+            await loading_msg.edit_text("❌ Lỗi tạo câu hỏi! Thử lại /quiz2")
             return
         
         game.current_quiz = quiz
-        active_games[chat_id] = {"type": "quiz2", "game": game, "minigame": True}
+        active_games[chat_id] = {"type": "quiz2", "game": game}
         
         topic_emojis = {
             "Lịch sử Việt Nam": "📜",
@@ -948,393 +1151,260 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
         
         emoji = topic_emojis.get(quiz["topic"], "❓")
         
-        await context.bot.send_message(
-            chat_id,
+        await loading_msg.edit_text(
             f"""{emoji} **QUIZ 2.0 - {quiz["topic"].upper()}**
 
 {quiz["question"]}
 
 💡 Trả lời ngắn gọn (1-3 từ)
-✍️ Gõ câu trả lời của bạn!"""
+✍️ Gõ câu trả lời của bạn!""",
+            parse_mode="Markdown"
         )
-    
-    elif game_type == "math":
+    except Exception as e:
+        logger.error(f"Error in quiz2_command: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
+
+async def math_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = update.effective_chat.id
+        
+        if chat_id in active_games:
+            del active_games[chat_id]
+        
+        loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo bài toán...")
+        
         game = MathQuizGame(chat_id)
         question = await game.generate_question()
         
         if not question:
-            await context.bot.send_message(chat_id, "❌ Lỗi tạo câu hỏi! Chuyển game khác...")
-            await asyncio.sleep(2)
-            await start_random_minigame(chat_id, context)
+            await loading_msg.edit_text("❌ Lỗi tạo câu hỏi! Thử lại /math")
             return
         
-        active_games[chat_id] = {"type": "math", "game": game, "minigame": True}
+        active_games[chat_id] = {"type": "math", "game": game}
         
-        await context.bot.send_message(
-            chat_id,
+        await loading_msg.edit_text(
             f"""🧮 **TOÁN HỌC**
 
 Tính: **{question} = ?**
 
 📝 Bạn có {game.max_attempts} lần thử
-✍️ Gõ đáp án!"""
+✍️ Gõ đáp án!""",
+            parse_mode="Markdown"
         )
-
-async def stop_minigame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    
-    if chat_id not in minigame_sessions:
-        await update.message.reply_text("❌ Không có minigame nào đang chạy!")
-        return
-    
-    session = minigame_sessions[chat_id]
-    total_time = (datetime.now() - session["start_time"]).seconds
-    
-    if session["total_score"] > 0:
-        update_user_balance(
-            session["user_id"], 
-            session["username"], 
-            session["total_score"], 
-            "minigame"
-        )
-    
-    await update.message.reply_text(
-        f"""🏁 **KẾT THÚC MINIGAME!**
-
-👤 Người chơi: {session['username']}
-🎮 Số game đã chơi: {session['games_played']}
-💰 Tổng điểm kiếm được: {session['total_score']}
-⏱️ Thời gian: {total_time}s
-
-Cảm ơn bạn đã chơi! 💕"""
-    )
-    
-    if chat_id in quiz_sessions:
-        del quiz_sessions[chat_id]
-    
-    del minigame_sessions[chat_id]
-    if chat_id in active_games:
-        del active_games[chat_id]
-
-async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    
-    if chat_id in active_games:
-        del active_games[chat_id]
-        
-    game = GuessNumberGame(chat_id)
-    active_games[chat_id] = {"type": "guessnumber", "game": game}
-    
-    await update.message.reply_text(f"""🎮 **ĐOÁN SỐ 1-999**
-
-💡 {game.riddle}
-📝 15 lần | 💰 5000đ
-/hint - Gợi ý (-500đ, tối đa 4 lần)
-
-Đoán đi!""")
-
-async def hint_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    
-    if chat_id not in active_games or active_games[chat_id]["type"] != "guessnumber":
-        await update.message.reply_text("❌ Không trong game đoán số!")
-        return
-        
-    game = active_games[chat_id]["game"]
-    await update.message.reply_text(game.get_hint())
-
-async def quiz1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    
-    if chat_id in active_games:
-        del active_games[chat_id]
-    
-    loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo câu hỏi...")
-    
-    game = VietnameseQuiz1Game(chat_id)
-    quiz = await game.generate_quiz()
-    
-    if not quiz:
-        await loading_msg.edit_text("❌ Lỗi tạo câu hỏi! Thử lại /quiz1")
-        return
-    
-    game.current_quiz = quiz
-    quiz_sessions[chat_id] = quiz
-    active_games[chat_id] = {"type": "quiz1", "game": game}
-    
-    keyboard = []
-    for option in quiz["options"]:
-        keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    topic_emojis = {
-        "Lịch sử Việt Nam": "📜",
-        "Địa lý Việt Nam": "🗺️",
-        "Ẩm thực Việt Nam": "🍜",
-        "Văn hóa Việt Nam": "🎭",
-        "Khoa học Việt Nam": "🔬",
-        "Thể thao Việt Nam": "⚽"
-    }
-    
-    emoji = topic_emojis.get(quiz["topic"], "❓")
-    
-    await loading_msg.edit_text(
-        f"{emoji} **QUIZ 1.0 - {quiz['topic'].upper()}**\n\n{quiz['question']}",
-        reply_markup=reply_markup
-    )
-
-async def quiz2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    
-    if chat_id in active_games:
-        del active_games[chat_id]
-    
-    loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo câu hỏi...")
-    
-    game = VietnameseQuiz2Game(chat_id)
-    quiz = await game.generate_quiz()
-    
-    if not quiz:
-        await loading_msg.edit_text("❌ Lỗi tạo câu hỏi! Thử lại /quiz2")
-        return
-    
-    game.current_quiz = quiz
-    active_games[chat_id] = {"type": "quiz2", "game": game}
-    
-    topic_emojis = {
-        "Lịch sử Việt Nam": "📜",
-        "Địa lý Việt Nam": "🗺️",
-        "Ẩm thực Việt Nam": "🍜",
-        "Văn hóa Việt Nam": "🎭",
-        "Khoa học Việt Nam": "🔬",
-        "Thể thao Việt Nam": "⚽"
-    }
-    
-    emoji = topic_emojis.get(quiz["topic"], "❓")
-    
-    await loading_msg.edit_text(
-        f"""{emoji} **QUIZ 2.0 - {quiz["topic"].upper()}**
-
-{quiz["question"]}
-
-💡 Trả lời ngắn gọn (1-3 từ)
-✍️ Gõ câu trả lời của bạn!"""
-    )
-
-async def math_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    
-    if chat_id in active_games:
-        del active_games[chat_id]
-    
-    loading_msg = await update.message.reply_text("⏳ Claude AI đang tạo bài toán...")
-    
-    game = MathQuizGame(chat_id)
-    question = await game.generate_question()
-    
-    if not question:
-        await loading_msg.edit_text("❌ Lỗi tạo câu hỏi! Thử lại /math")
-        return
-    
-    active_games[chat_id] = {"type": "math", "game": game}
-    
-    await loading_msg.edit_text(
-        f"""🧮 **TOÁN HỌC**
-
-Tính: **{question} = ?**
-
-📝 Bạn có {game.max_attempts} lần thử
-✍️ Gõ đáp án!"""
-    )
+    except Exception as e:
+        logger.error(f"Error in math_command: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
 async def bal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    balance = get_user_balance(user.id)
-    await update.message.reply_text(f"👛 Số dư của bạn: {_fmt_money(balance)}")
+    try:
+        user = update.effective_user
+        balance = get_user_balance(user.id)
+        await update.message.reply_text(f"👛 Số dư của bạn: {_fmt_money(balance)}")
+    except Exception as e:
+        logger.error(f"Error in bal_cmd: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
 async def leaderboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    leaderboard = storage.get_leaderboard()
-    
-    if not leaderboard:
-        await update.message.reply_text("Chưa có dữ liệu bảng xếp hạng.")
-        return
+    try:
+        leaderboard = storage.get_leaderboard()
         
-    lines = ["🏆 **BẢNG XẾP HẠNG THEO SỐ DƯ**\n"]
-    
-    for i, (username, balance, games) in enumerate(leaderboard, 1):
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        lines.append(f"{medal} {username} — {_fmt_money(balance)} ({games} games)")
+        if not leaderboard:
+            await update.message.reply_text("Chưa có dữ liệu bảng xếp hạng.")
+            return
+            
+        lines = ["🏆 **BẢNG XẾP HẠNG THEO SỐ DƯ**\n"]
         
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        for i, (username, balance, games) in enumerate(leaderboard, 1):
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            lines.append(f"{medal} {username} — {_fmt_money(balance)} ({games} games)")
+            
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in leaderboard_cmd: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    stats = storage.get_user_stats(user.id)
-    
-    message = f"📊 **{user.first_name}**\n\n"
-    message += f"💰 Số dư hiện tại: {_fmt_money(stats['balance'])}\n"
-    message += f"📈 Tổng điểm kiếm được: {_fmt_money(stats['total'])}\n"
-    
-    if stats['games']:
-        message += "\n**Thống kê game:**\n"
-        for game_type, data in stats['games'].items():
-            game_name = {
-                "guessnumber": "Đoán số",
-                "quiz1": "Quiz 1.0",
-                "quiz2": "Quiz 2.0",
-                "math": "Toán học",
-                "minigame": "Minigame tổng hợp"
-            }.get(game_type, game_type)
-            message += f"• {game_name}: {data['played']} lần\n"
-            
-    await update.message.reply_text(message)
+    try:
+        user = update.effective_user
+        stats = storage.get_user_stats(user.id)
+        
+        message = f"📊 **{user.first_name}**\n\n"
+        message += f"💰 Số dư hiện tại: {_fmt_money(stats['balance'])}\n"
+        message += f"📈 Tổng điểm kiếm được: {_fmt_money(stats['total'])}\n"
+        
+        if stats['games']:
+            message += "\n**Thống kê game:**\n"
+            for game_type, data in stats['games'].items():
+                game_name = {
+                    "guessnumber": "Đoán số",
+                    "quiz1": "Quiz 1.0",
+                    "quiz2": "Quiz 2.0",
+                    "math": "Toán học",
+                    "minigame": "Minigame tổng hợp"
+                }.get(game_type, game_type)
+                message += f"• {game_name}: {data['played']} lần\n"
+                
+        await update.message.reply_text(message, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in stats_command: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    username = user.username or user.first_name
-    
-    if data.startswith("quiz_") and chat_id in active_games:
-        game_info = active_games[chat_id]
+    try:
+        query = update.callback_query
+        await query.answer()
         
-        if game_info["type"] == "quiz1":
-            game = game_info["game"]
-            quiz = game.current_quiz
-            answer = data.split("_")[1]
+        data = query.data
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+        username = user.username or user.first_name
+        
+        logger.info(f"Button callback: {data} from {user.id} in chat {chat_id}")
+        
+        if data.startswith("quiz_") and chat_id in active_games:
+            game_info = active_games[chat_id]
             
-            if answer == quiz["correct"]:
-                points = 300
-                result = f"✅ Chính xác! (+{points}đ)\n\n{quiz['explanation']}"
+            if game_info["type"] == "quiz1":
+                game = game_info["game"]
+                quiz = game.current_quiz
+                answer = data.split("_")[1]
+                
+                if answer == quiz["correct"]:
+                    points = 300
+                    result = f"✅ Chính xác! (+{points}đ)\n\n{quiz['explanation']}"
+                    
+                    if game_info.get("minigame") and chat_id in minigame_sessions:
+                        minigame_sessions[chat_id]["total_score"] += points
+                    else:
+                        update_user_balance(user.id, username, points, "quiz1")
+                else:
+                    result = f"❌ Sai rồi! Đáp án: {quiz['correct']}\n\n{quiz['explanation']}"
+                
+                if chat_id in quiz_sessions:
+                    del quiz_sessions[chat_id]
+                    
+                await query.message.edit_text(result)
+                
+                del active_games[chat_id]
                 
                 if game_info.get("minigame") and chat_id in minigame_sessions:
-                    minigame_sessions[chat_id]["total_score"] += points
-                else:
-                    update_user_balance(user.id, username, points, "quiz1")
-            else:
-                result = f"❌ Sai rồi! Đáp án: {quiz['correct']}\n\n{quiz['explanation']}"
-            
-            if chat_id in quiz_sessions:
-                del quiz_sessions[chat_id]
-                
-            await query.message.edit_text(result)
-            
-            del active_games[chat_id]
-            
-            if game_info.get("minigame") and chat_id in minigame_sessions:
-                await asyncio.sleep(3)
-                await start_random_minigame(chat_id, context)
+                    await asyncio.sleep(3)
+                    await start_random_minigame(chat_id, context)
+    except Exception as e:
+        logger.error(f"Error in button_callback: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message.text
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    username = user.username or user.first_name
-    
-    chat = update.effective_chat
-    save_chat_info(chat.id, chat.type, chat.title)
-    
-    if chat_id in active_games:
-        game_info = active_games[chat_id]
-        game = game_info["game"]
-        is_minigame = game_info.get("minigame", False)
+    try:
+        message = update.message.text
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+        username = user.username or user.first_name
         
-        if game_info["type"] == "guessnumber":
-            try:
-                guess = int(message)
-                if 1 <= guess <= 999:
-                    is_finished, response = game.make_guess(guess)
+        logger.info(f"Message from {user.id} in chat {chat_id}: {message[:50]}...")
+        
+        chat = update.effective_chat
+        save_chat_info(chat.id, chat.type, chat.title)
+        
+        if chat_id in active_games:
+            game_info = active_games[chat_id]
+            game = game_info["game"]
+            is_minigame = game_info.get("minigame", False)
+            
+            if game_info["type"] == "guessnumber":
+                try:
+                    guess = int(message)
+                    if 1 <= guess <= 999:
+                        is_finished, response = game.make_guess(guess)
+                        await update.message.reply_text(response)
+                        
+                        if is_finished:
+                            if "Đúng" in response:
+                                if is_minigame and chat_id in minigame_sessions:
+                                    minigame_sessions[chat_id]["total_score"] += game.score
+                                else:
+                                    update_user_balance(user.id, username, game.score, "guessnumber")
+                            
+                            del active_games[chat_id]
+                            
+                            if is_minigame and chat_id in minigame_sessions:
+                                await asyncio.sleep(3)
+                                await start_random_minigame(chat_id, context)
+                    else:
+                        await update.message.reply_text("❌ Từ 1-999 thôi!")
+                except ValueError:
+                    pass
+                    
+            elif game_info["type"] == "quiz2":
+                is_finished, response = game.check_answer(message)
+                await update.message.reply_text(response)
+                
+                del active_games[chat_id]
+                
+                if "Chính xác" in response:
+                    if is_minigame and chat_id in minigame_sessions:
+                        minigame_sessions[chat_id]["total_score"] += 300
+                    else:
+                        update_user_balance(user.id, username, 300, "quiz2")
+                
+                if is_minigame and chat_id in minigame_sessions:
+                    await asyncio.sleep(3)
+                    await start_random_minigame(chat_id, context)
+                        
+            elif game_info["type"] == "math":
+                if message.lower() == "/stopmini" and is_minigame:
+                    return
+                
+                try:
+                    answer = int(message)
+                    is_correct, response = game.check_answer(answer)
                     await update.message.reply_text(response)
                     
-                    if is_finished:
-                        if "Đúng" in response:
-                            if is_minigame and chat_id in minigame_sessions:
-                                minigame_sessions[chat_id]["total_score"] += game.score
-                            else:
-                                update_user_balance(user.id, username, game.score, "guessnumber")
-                        
+                    if is_correct:
+                        if is_minigame and chat_id in minigame_sessions:
+                            minigame_sessions[chat_id]["total_score"] += game.score
+                        else:
+                            update_user_balance(user.id, username, game.score, "math")
+                    
+                    if is_correct or game.attempts >= game.max_attempts:
                         del active_games[chat_id]
                         
                         if is_minigame and chat_id in minigame_sessions:
                             await asyncio.sleep(3)
                             await start_random_minigame(chat_id, context)
-                else:
-                    await update.message.reply_text("❌ Từ 1-999 thôi!")
-            except ValueError:
-                pass
-                
-        elif game_info["type"] == "quiz2":
-            is_finished, response = game.check_answer(message)
+                            
+                except ValueError:
+                    pass
+            return
+        
+        if chat_id not in chat_history:
+            history = storage.get_chat_history(chat_id)
+            chat_history[chat_id] = history if history else []
+            
+        chat_history[chat_id].append({"role": "user", "content": message})
+        
+        if len(chat_history[chat_id]) > CHAT_HISTORY_LIMIT:
+            chat_history[chat_id] = chat_history[chat_id][-CHAT_HISTORY_LIMIT:]
+        
+        messages = [
+            {"role": "system", "content": "Bạn là Linh - cô gái Việt Nam vui vẻ, thân thiện. Trả lời ngắn gọn."}
+        ]
+        messages.extend(chat_history[chat_id])
+        
+        response = await call_api(messages, max_tokens=300)
+        
+        if response:
+            chat_history[chat_id].append({"role": "assistant", "content": response})
             await update.message.reply_text(response)
             
-            del active_games[chat_id]
-            
-            if "Chính xác" in response:
-                if is_minigame and chat_id in minigame_sessions:
-                    minigame_sessions[chat_id]["total_score"] += 300
-                else:
-                    update_user_balance(user.id, username, 300, "quiz2")
-            
-            if is_minigame and chat_id in minigame_sessions:
-                await asyncio.sleep(3)
-                await start_random_minigame(chat_id, context)
-                    
-        elif game_info["type"] == "math":
-            if message.lower() == "/stopmini" and is_minigame:
-                return
-            
             try:
-                answer = int(message)
-                is_correct, response = game.check_answer(answer)
-                await update.message.reply_text(response)
-                
-                if is_correct:
-                    if is_minigame and chat_id in minigame_sessions:
-                        minigame_sessions[chat_id]["total_score"] += game.score
-                    else:
-                        update_user_balance(user.id, username, game.score, "math")
-                
-                if is_correct or game.attempts >= game.max_attempts:
-                    del active_games[chat_id]
-                    
-                    if is_minigame and chat_id in minigame_sessions:
-                        await asyncio.sleep(3)
-                        await start_random_minigame(chat_id, context)
-                        
-            except ValueError:
+                storage.save_chat_history(chat_id, chat_history[chat_id])
+            except:
                 pass
-        return
-    
-    if chat_id not in chat_history:
-        history = storage.get_chat_history(chat_id)
-        chat_history[chat_id] = history if history else []
-        
-    chat_history[chat_id].append({"role": "user", "content": message})
-    
-    if len(chat_history[chat_id]) > CHAT_HISTORY_LIMIT:
-        chat_history[chat_id] = chat_history[chat_id][-CHAT_HISTORY_LIMIT:]
-    
-    messages = [
-        {"role": "system", "content": "Bạn là Linh - cô gái Việt Nam vui vẻ, thân thiện. Trả lời ngắn gọn."}
-    ]
-    messages.extend(chat_history[chat_id])
-    
-    response = await call_api(messages, max_tokens=300)
-    
-    if response:
-        chat_history[chat_id].append({"role": "assistant", "content": response})
-        await update.message.reply_text(response)
-        
-        try:
-            storage.save_chat_history(chat_id, chat_history[chat_id])
-        except:
-            pass
-    else:
-        await update.message.reply_text("😅 Xin lỗi, mình đang gặp lỗi!")
+        else:
+            await update.message.reply_text("😅 Xin lỗi, mình đang gặp lỗi!")
+    except Exception as e:
+        logger.error(f"Error in handle_message: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
 async def post_init(application: Application) -> None:
     global goodnight_task, save_task, cleanup_task
