@@ -34,7 +34,7 @@ class GitHubStorage:
             self.g = Github(token)
             self.repo = self.g.get_repo(repo_name)
             self.branch = "main"
-            self._cache = {}
+            self._score_cache = {}  # Chỉ cache score để update nhanh
             self._last_save = {}
             logger.info("GitHub storage initialized successfully")
         except Exception as e:
@@ -42,26 +42,34 @@ class GitHubStorage:
             raise
         
     def _get_file_content(self, path: str) -> Optional[dict]:
-        if path in self._cache:
-            return self._cache[path]
-            
+        """Lấy nội dung file từ GitHub, không cache quiz/math"""
         try:
             file = self.repo.get_contents(path, ref=self.branch)
             content = base64.b64decode(file.content).decode('utf-8')
             data = json.loads(content)
-            self._cache[path] = data
+            
+            # Chỉ cache scores
+            if path == "data/scores.json":
+                self._score_cache = data
+                
             return data
         except Exception as e:
             logger.warning(f"File {path} not found or error: {e}")
             return None
     
     def _save_file(self, path: str, data: dict, message: str, force: bool = False):
+        """Lưu file lên GitHub"""
         try:
-            # Rate limiting
+            # Rate limiting cho quiz/math files
             if not force and path in self._last_save:
-                if datetime.now().timestamp() - self._last_save[path] < 300:
-                    self._cache[path] = data
-                    return
+                if "quiz" in path or "math" in path:
+                    # Quiz/math files: 1 phút
+                    if datetime.now().timestamp() - self._last_save[path] < 60:
+                        return
+                else:
+                    # Score file: 5 phút hoặc force save
+                    if datetime.now().timestamp() - self._last_save[path] < 300:
+                        return
                     
             content = json.dumps(data, ensure_ascii=False, indent=2)
             
@@ -73,13 +81,24 @@ class GitHubStorage:
                 self.repo.create_file(path, message, content, self.branch)
                 logger.info(f"Created file: {path}")
             
-            self._cache[path] = data
             self._last_save[path] = datetime.now().timestamp()
+            
+            # Update cache nếu là scores
+            if path == "data/scores.json":
+                self._score_cache = data
+                
         except Exception as e:
             logger.error(f"Failed to save {path}: {e}")
     
     def get_user_balance(self, user_id: int) -> int:
+        """Lấy số dư user từ cache hoặc GitHub"""
         try:
+            # Kiểm tra cache trước
+            if self._score_cache and "users" in self._score_cache:
+                user_data = self._score_cache["users"].get(str(user_id), {})
+                return user_data.get("balance", START_BALANCE)
+            
+            # Nếu không có cache, lấy từ GitHub
             data = self._get_file_content("data/scores.json") or {"users": {}}
             user_data = data.get("users", {}).get(str(user_id), {})
             return user_data.get("balance", START_BALANCE)
@@ -87,14 +106,19 @@ class GitHubStorage:
             return START_BALANCE
     
     def update_user_balance(self, user_id: int, username: str, amount: int, game_type: str = None):
+        """Cập nhật số dư và điểm người chơi"""
         try:
-            data = self._get_file_content("data/scores.json") or {"users": {}}
+            # Lấy data hiện tại
+            data = self._score_cache if self._score_cache else self._get_file_content("data/scores.json")
+            if not data:
+                data = {"users": {}}
             
             if "users" not in data:
                 data["users"] = {}
                 
             user_key = str(user_id)
             
+            # Tạo user mới nếu chưa có
             if user_key not in data["users"]:
                 data["users"][user_key] = {
                     "user_id": user_id,
@@ -102,14 +126,19 @@ class GitHubStorage:
                     "balance": START_BALANCE,
                     "total_earned": 0,
                     "games_played": {},
+                    "created_at": datetime.now().isoformat(),
                     "last_updated": datetime.now().isoformat()
                 }
             
             user = data["users"][user_key]
-            user["balance"] = user.get("balance", START_BALANCE) + amount
+            
+            # Cập nhật balance (cộng dồn)
+            old_balance = user.get("balance", START_BALANCE)
+            user["balance"] = old_balance + amount
             user["username"] = username
             user["last_updated"] = datetime.now().isoformat()
             
+            # Cập nhật total earned và games played
             if amount > 0:
                 user["total_earned"] = user.get("total_earned", 0) + amount
                 if game_type:
@@ -117,19 +146,34 @@ class GitHubStorage:
                         user["games_played"] = {}
                     user["games_played"][game_type] = user["games_played"].get(game_type, 0) + 1
             
+            # Lưu vào cache
+            self._score_cache = data
+            
+            # Lưu lên GitHub (có rate limit)
             self._save_file("data/scores.json", data, f"Update: {username} ({amount:+d})")
+            
+            logger.info(f"Updated balance for {username}: {old_balance} -> {user['balance']} ({amount:+d})")
+            
         except Exception as e:
             logger.error(f"Failed to update balance: {e}")
     
+    def force_save_scores(self):
+        """Force save scores to GitHub"""
+        if self._score_cache:
+            self._save_file("data/scores.json", self._score_cache, "Force save scores", force=True)
+    
     def get_leaderboard(self, limit: int = 10) -> List[tuple]:
+        """Lấy bảng xếp hạng"""
         try:
-            data = self._get_file_content("data/scores.json") or {"users": {}}
+            data = self._score_cache if self._score_cache else self._get_file_content("data/scores.json")
+            if not data or "users" not in data:
+                return []
+                
             users = []
-            
-            for user_data in data.get("users", {}).values():
+            for user_data in data["users"].values():
                 username = user_data.get("username", "Unknown")
                 total_earned = user_data.get("total_earned", 0)
-                if total_earned > 0:  # Chỉ hiện người có điểm
+                if total_earned > 0:
                     users.append((username, total_earned))
                     
             users.sort(key=lambda x: x[1], reverse=True)
@@ -139,9 +183,17 @@ class GitHubStorage:
             return []
     
     def get_user_stats(self, user_id: int) -> dict:
+        """Lấy thống kê của user"""
         try:
-            data = self._get_file_content("data/scores.json") or {"users": {}}
-            user_data = data.get("users", {}).get(str(user_id), {})
+            data = self._score_cache if self._score_cache else self._get_file_content("data/scores.json")
+            if not data or "users" not in data:
+                return {
+                    'balance': START_BALANCE,
+                    'total_earned': 0,
+                    'games_played': {}
+                }
+                
+            user_data = data["users"].get(str(user_id), {})
             
             return {
                 'balance': user_data.get("balance", START_BALANCE),
@@ -157,10 +209,10 @@ class GitHubStorage:
             }
     
     def get_quiz1_pool(self) -> List[dict]:
+        """Lấy pool quiz1 từ GitHub (không cache)"""
         data = self._get_file_content("data/quiz1_pool.json")
         if data and "questions" in data:
             return data["questions"]
-        # Return default questions
         return [
             {
                 "topic": "Lịch sử Việt Nam",
@@ -172,22 +224,32 @@ class GitHubStorage:
         ]
     
     def add_quiz1(self, quiz: dict):
+        """Thêm quiz1 vào pool (không giới hạn số lượng)"""
         try:
             data = self._get_file_content("data/quiz1_pool.json") or {"questions": []}
             if "questions" not in data:
                 data["questions"] = []
+                
+            # Kiểm tra trùng lặp
+            for existing in data["questions"]:
+                if existing.get("question") == quiz.get("question"):
+                    return
+                    
             data["questions"].append(quiz)
-            if len(data["questions"]) > 100:
-                data["questions"] = data["questions"][-100:]
-            self._save_file("data/quiz1_pool.json", data, "Add quiz1")
-        except:
-            pass
+            
+            # Thêm metadata
+            data["total"] = len(data["questions"])
+            data["last_updated"] = datetime.now().isoformat()
+            
+            self._save_file("data/quiz1_pool.json", data, f"Add quiz1 (Total: {data['total']})")
+        except Exception as e:
+            logger.error(f"Failed to add quiz1: {e}")
     
     def get_quiz2_pool(self) -> List[dict]:
+        """Lấy pool quiz2 từ GitHub (không cache)"""
         data = self._get_file_content("data/quiz2_pool.json")
         if data and "questions" in data:
             return data["questions"]
-        # Return default questions
         return [
             {
                 "topic": "Địa lý Việt Nam",
@@ -198,22 +260,32 @@ class GitHubStorage:
         ]
     
     def add_quiz2(self, quiz: dict):
+        """Thêm quiz2 vào pool (không giới hạn số lượng)"""
         try:
             data = self._get_file_content("data/quiz2_pool.json") or {"questions": []}
             if "questions" not in data:
                 data["questions"] = []
+                
+            # Kiểm tra trùng lặp
+            for existing in data["questions"]:
+                if existing.get("question") == quiz.get("question"):
+                    return
+                    
             data["questions"].append(quiz)
-            if len(data["questions"]) > 100:
-                data["questions"] = data["questions"][-100:]
-            self._save_file("data/quiz2_pool.json", data, "Add quiz2")
-        except:
-            pass
+            
+            # Thêm metadata
+            data["total"] = len(data["questions"])
+            data["last_updated"] = datetime.now().isoformat()
+            
+            self._save_file("data/quiz2_pool.json", data, f"Add quiz2 (Total: {data['total']})")
+        except Exception as e:
+            logger.error(f"Failed to add quiz2: {e}")
     
     def get_math_pool(self) -> List[dict]:
+        """Lấy pool math từ GitHub (không cache)"""
         data = self._get_file_content("data/math_pool.json")
         if data and "questions" in data:
             return data["questions"]
-        # Return default questions
         return [
             {"question": "25 + 37", "answer": 62},
             {"question": "84 - 29", "answer": 55},
@@ -221,16 +293,26 @@ class GitHubStorage:
         ]
     
     def add_math(self, math: dict):
+        """Thêm math vào pool (không giới hạn số lượng)"""
         try:
             data = self._get_file_content("data/math_pool.json") or {"questions": []}
             if "questions" not in data:
                 data["questions"] = []
+                
+            # Kiểm tra trùng lặp
+            for existing in data["questions"]:
+                if existing.get("question") == math.get("question"):
+                    return
+                    
             data["questions"].append(math)
-            if len(data["questions"]) > 100:
-                data["questions"] = data["questions"][-100:]
-            self._save_file("data/math_pool.json", data, "Add math")
-        except:
-            pass
+            
+            # Thêm metadata
+            data["total"] = len(data["questions"])
+            data["last_updated"] = datetime.now().isoformat()
+            
+            self._save_file("data/math_pool.json", data, f"Add math (Total: {data['total']})")
+        except Exception as e:
+            logger.error(f"Failed to add math: {e}")
 
 # Initialize storage
 try:
@@ -239,32 +321,27 @@ except Exception as e:
     logger.error(f"Critical error initializing storage: {e}")
     storage = None
 
-# Global variables
+# Global variables (giảm thiểu cache)
 active_games: Dict[int, dict] = {}
 chat_history: Dict[int, List[dict]] = {}
 minigame_sessions: Dict[int, dict] = {}
-user_balances: Dict[int, int] = {}
+quiz_history: Dict[int, List[str]] = {}  # Chỉ lưu ID câu hỏi gần đây
 
 def _fmt_money(x: int) -> str:
     return f"{x:,}".replace(",", ".")
 
 def get_user_balance(user_id: int) -> int:
-    if user_id not in user_balances:
-        if storage:
-            user_balances[user_id] = storage.get_user_balance(user_id)
-        else:
-            user_balances[user_id] = START_BALANCE
-    return user_balances[user_id]
+    """Lấy balance từ GitHub"""
+    if storage:
+        return storage.get_user_balance(user_id)
+    return START_BALANCE
 
 def update_user_balance(user_id: int, username: str, amount: int, game_type: str = None):
+    """Cập nhật balance lên GitHub"""
     try:
         if storage:
             storage.update_user_balance(user_id, username, amount, game_type)
-        
-        if user_id in user_balances:
-            user_balances[user_id] += amount
-        else:
-            user_balances[user_id] = get_user_balance(user_id)
+            logger.info(f"Balance updated for {username}: {amount:+d} from {game_type}")
     except Exception as e:
         logger.error(f"Update balance error: {e}")
 
@@ -369,9 +446,64 @@ class MathQuizGame:
         self.current_answer = None
         
     async def generate_question(self) -> str:
-        # Simple math generation
+        # Thử API trước
         difficulty = random.choice(["easy", "medium", "hard"])
         
+        prompt = f"""Tạo một bài toán với độ khó: {difficulty}
+
+Yêu cầu:
+- Easy: phép cộng/trừ đơn giản (2 số, kết quả < 200)
+- Medium: phép nhân hoặc cộng/trừ nhiều bước
+- Hard: tính toán phức tạp với nhiều phép tính
+
+Trả về JSON bằng tiếng Việt:
+{{
+  "question": "biểu thức toán học (VD: 45 + 67)",
+  "answer": đáp_án_số
+}}"""
+
+        messages = [
+            {"role": "system", "content": "Bạn là giáo viên toán. Tạo bài toán rõ ràng bằng tiếng Việt."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            response = await call_api(messages, model=CLAUDE_MODEL, max_tokens=150)
+            
+            if response:
+                json_start = response.find('{')
+                json_end = response.rfind('}') + 1
+                
+                if json_start != -1:
+                    json_str = response[json_start:json_end]
+                    data = json.loads(json_str)
+                    
+                    self.current_question = data.get("question", "")
+                    self.current_answer = int(data.get("answer", 0))
+                    
+                    # Lưu câu hỏi mới vào pool
+                    if storage:
+                        storage.add_math({
+                            "question": self.current_question,
+                            "answer": self.current_answer,
+                            "difficulty": difficulty,
+                            "created_at": datetime.now().isoformat()
+                        })
+                    
+                    return self.current_question
+        except:
+            pass
+        
+        # Nếu API lỗi, lấy từ pool
+        if storage:
+            pool = storage.get_math_pool()
+            if pool:
+                math_q = random.choice(pool)
+                self.current_question = math_q.get("question", "")
+                self.current_answer = int(math_q.get("answer", 0))
+                return self.current_question
+        
+        # Tạo câu hỏi mặc định
         if difficulty == "easy":
             a = random.randint(10, 50)
             b = random.randint(10, 50)
@@ -412,23 +544,85 @@ class VietnameseQuiz1Game:
         self.current_quiz = None
         
     async def generate_quiz(self) -> dict:
+        global quiz_history
+        
+        if self.chat_id not in quiz_history:
+            quiz_history[self.chat_id] = []
+            
+        recent_questions = quiz_history[self.chat_id][-20:] if len(quiz_history[self.chat_id]) > 0 else []
+        
+        # Thử API trước
+        topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam", "Khoa học Việt Nam", "Thể thao Việt Nam"]
+        topic = random.choice(topics)
+        
+        prompt = f"""Create a quiz question about {topic} with MAXIMUM ACCURACY.
+
+CRITICAL REQUIREMENTS:
+1. MUST be 100% factually accurate and verifiable
+2. 4 options with ONLY 1 correct answer
+3. Different from recent questions
+
+Return ONLY valid JSON in Vietnamese:
+{{
+  "topic": "{topic}",
+  "question": "question in Vietnamese",
+  "options": ["A. option", "B. option", "C. option", "D. option"],
+  "answer": "A or B or C or D",
+  "explain": "explanation in Vietnamese"
+}}"""
+
+        messages = [
+            {"role": "system", "content": "You are a Vietnamese education expert. Create only 100% accurate quiz questions."},
+            {"role": "user", "content": prompt}
+        ]
+        
         try:
-            # Get from pool
-            if storage:
-                pool = storage.get_quiz1_pool()
-                if pool:
-                    return random.choice(pool)
+            response = await call_api(messages, model=CLAUDE_MODEL, max_tokens=500)
+            
+            if response:
+                json_start = response.find('{')
+                json_end = response.rfind('}') + 1
+                
+                if json_start != -1:
+                    json_str = response[json_start:json_end]
+                    data = json.loads(json_str)
+                    
+                    quiz = {
+                        "topic": data.get("topic", topic),
+                        "question": data.get("question", ""),
+                        "options": data.get("options", []),
+                        "correct": data.get("answer", "")[0].upper() if data.get("answer") else "",
+                        "explanation": data.get("explain", ""),
+                        "created_at": datetime.now().isoformat()
+                    }
+                    
+                    if quiz["question"] and len(quiz["options"]) == 4:
+                        quiz_id = f"{self.chat_id}_{datetime.now().timestamp()}"
+                        quiz_history[self.chat_id].append(quiz_id)
+                        
+                        if storage:
+                            storage.add_quiz1(quiz)
+                        
+                        return quiz
         except:
             pass
-            
-        # Default quiz
-        return {
-            "topic": "Lịch sử Việt Nam",
-            "question": "Thủ đô đầu tiên của Việt Nam là gì?",
-            "options": ["A. Hoa Lư", "B. Thăng Long", "C. Huế", "D. Sài Gòn"],
-            "correct": "A",
-            "explanation": "Hoa Lư là thủ đô đầu tiên của Việt Nam thời Đinh - Tiền Lê."
-        }
+        
+        # Nếu API lỗi, lấy từ pool
+        if storage:
+            pool = storage.get_quiz1_pool()
+            if pool:
+                # Lấy ngẫu nhiên từ pool
+                available_quiz = [q for q in pool if f"{q.get('question', '')[:30]}" not in recent_questions]
+                if available_quiz:
+                    quiz = random.choice(available_quiz)
+                else:
+                    quiz = random.choice(pool)
+                    
+                quiz_id = f"{self.chat_id}_{datetime.now().timestamp()}"
+                quiz_history[self.chat_id].append(quiz_id)
+                return quiz
+        
+        return None
 
 class VietnameseQuiz2Game:
     def __init__(self, chat_id: int):
@@ -437,22 +631,84 @@ class VietnameseQuiz2Game:
         self.current_quiz = None
         
     async def generate_quiz(self) -> dict:
+        global quiz_history
+        
+        if self.chat_id not in quiz_history:
+            quiz_history[self.chat_id] = []
+            
+        recent_questions = quiz_history[self.chat_id][-20:] if len(quiz_history[self.chat_id]) > 0 else []
+        
+        # Thử API trước
+        topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam", "Khoa học Việt Nam", "Thể thao Việt Nam"]
+        topic = random.choice(topics)
+        
+        prompt = f"""Create a quiz question about {topic} with MAXIMUM ACCURACY.
+
+CRITICAL REQUIREMENTS:
+1. MUST be 100% factually accurate and verifiable
+2. Question should have a SHORT answer (1-3 words maximum)
+3. Answer should be simple and clear
+4. Different from recent questions
+
+Return ONLY valid JSON in Vietnamese:
+{{
+  "topic": "{topic}",
+  "question": "question in Vietnamese (requiring short answer)",
+  "answer": "short answer in Vietnamese (1-3 words)",
+  "explanation": "brief explanation in Vietnamese"
+}}"""
+
+        messages = [
+            {"role": "system", "content": "You are a Vietnamese education expert. Create quiz questions with SHORT, SIMPLE answers."},
+            {"role": "user", "content": prompt}
+        ]
+        
         try:
-            # Get from pool
-            if storage:
-                pool = storage.get_quiz2_pool()
-                if pool:
-                    return random.choice(pool)
+            response = await call_api(messages, model=CLAUDE_MODEL, max_tokens=300)
+            
+            if response:
+                json_start = response.find('{')
+                json_end = response.rfind('}') + 1
+                
+                if json_start != -1:
+                    json_str = response[json_start:json_end]
+                    data = json.loads(json_str)
+                    
+                    quiz = {
+                        "topic": data.get("topic", topic),
+                        "question": data.get("question", ""),
+                        "answer": data.get("answer", ""),
+                        "explanation": data.get("explanation", ""),
+                        "created_at": datetime.now().isoformat()
+                    }
+                    
+                    if quiz["question"] and quiz["answer"]:
+                        quiz_id = f"{self.chat_id}_{datetime.now().timestamp()}"
+                        quiz_history[self.chat_id].append(quiz_id)
+                        
+                        if storage:
+                            storage.add_quiz2(quiz)
+                        
+                        return quiz
         except:
             pass
-            
-        # Default quiz
-        return {
-            "topic": "Địa lý Việt Nam",
-            "question": "Sông dài nhất Việt Nam?",
-            "answer": "Sông Mekong",
-            "explanation": "Sông Mekong (Cửu Long) là sông dài nhất chảy qua Việt Nam."
-        }
+        
+        # Nếu API lỗi, lấy từ pool
+        if storage:
+            pool = storage.get_quiz2_pool()
+            if pool:
+                # Lấy ngẫu nhiên từ pool
+                available_quiz = [q for q in pool if f"{q.get('question', '')[:30]}" not in recent_questions]
+                if available_quiz:
+                    quiz = random.choice(available_quiz)
+                else:
+                    quiz = random.choice(pool)
+                    
+                quiz_id = f"{self.chat_id}_{datetime.now().timestamp()}"
+                quiz_history[self.chat_id].append(quiz_id)
+                return quiz
+        
+        return None
     
     def normalize_answer(self, text: str) -> str:
         text = text.lower().strip()
@@ -858,7 +1114,7 @@ async def stop_minigame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 👤 Người chơi: {session['starter_name']}
 🎮 Đã chơi: {session['games_played']} game
-💰 Tổng điểm: {session['total_score']}"""
+💰 Tổng điểm: +{session['total_score']}"""
         
         await update.message.reply_text(msg)
         
@@ -1024,10 +1280,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application: Application) -> None:
     logger.info("Bot started successfully!")
 
+async def post_shutdown(application: Application) -> None:
+    if storage:
+        storage.force_save_scores()
+    logger.info("Bot shutdown - scores saved!")
+
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
     application.post_init = post_init
+    application.post_shutdown = post_shutdown
     
     # Commands
     application.add_handler(CommandHandler("start", start))
