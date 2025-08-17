@@ -16,7 +16,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
-CLAUDE_MODEL = "anthropic/claude-3.7-sonnet"
+CLAUDE_MODEL = "anthropic/claude-3.5-sonnet"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 GITHUB_REPO = "htuananh1/Data-manager"
@@ -179,7 +179,7 @@ class GitHubStorage:
             "game_type": game_type
         })
     
-    def get_leaderboard(self, limit: int = 10) -> List[tuple]:
+    def get_leaderboard_direct(self, limit: int = 10) -> List[tuple]:
         try:
             data = self._get_file_content("data/scores.json")
             if not data or "users" not in data:
@@ -198,7 +198,7 @@ class GitHubStorage:
             logger.error(f"Failed to get leaderboard: {e}")
             return []
     
-    def get_user_stats(self, user_id: int) -> dict:
+    def get_user_stats_direct(self, user_id: int) -> dict:
         try:
             data = self._get_file_content("data/scores.json")
             if not data or "users" not in data:
@@ -398,74 +398,62 @@ class MathQuizGame:
     async def generate_question(self) -> str:
         difficulty = random.choice(["easy", "medium", "hard"])
         
-        prompt = f"""Tạo một bài toán với độ khó: {difficulty}
-
-Yêu cầu:
-- Easy: phép cộng/trừ đơn giản (2 số, kết quả < 200)
-- Medium: phép nhân hoặc cộng/trừ nhiều bước
-- Hard: tính toán phức tạp với nhiều phép tính
-
-Trả về JSON bằng tiếng Việt:
-{{
-  "question": "biểu thức toán học (VD: 45 + 67)",
-  "answer": đáp_án_số
-}}"""
-
-        messages = [
-            {"role": "system", "content": "Bạn là giáo viên toán. Tạo bài toán rõ ràng bằng tiếng Việt."},
-            {"role": "user", "content": prompt}
-        ]
-        
-        try:
-            response = await call_api(messages, model=CLAUDE_MODEL, max_tokens=150)
-            
-            if response:
-                json_start = response.find('{')
-                json_end = response.rfind('}') + 1
-                
-                if json_start != -1:
-                    json_str = response[json_start:json_end]
-                    data = json.loads(json_str)
-                    
-                    self.current_question = data.get("question", "")
-                    self.current_answer = int(data.get("answer", 0))
-                    
-                    if storage:
-                        storage.add_math({
-                            "question": self.current_question,
-                            "answer": self.current_answer,
-                            "difficulty": difficulty,
-                            "created_at": datetime.now().isoformat()
-                        })
-                    
-                    return self.current_question
-        except:
-            pass
-        
-        if storage:
-            pool = storage.get_math_pool()
-            if pool:
-                math_q = random.choice(pool)
-                self.current_question = math_q.get("question", "")
-                self.current_answer = int(math_q.get("answer", 0))
-                return self.current_question
-        
         if difficulty == "easy":
             a = random.randint(10, 50)
             b = random.randint(10, 50)
-            self.current_question = f"{a} + {b}"
-            self.current_answer = a + b
+            op = random.choice(["+", "-"])
+            if op == "+":
+                self.current_question = f"{a} + {b}"
+                self.current_answer = a + b
+            else:
+                if a < b:
+                    a, b = b, a
+                self.current_question = f"{a} - {b}"
+                self.current_answer = a - b
+                
         elif difficulty == "medium":
-            a = random.randint(5, 20)
-            b = random.randint(5, 20)
-            self.current_question = f"{a} × {b}"
-            self.current_answer = a * b
+            choice = random.choice(["multiply", "multi_add"])
+            if choice == "multiply":
+                a = random.randint(5, 20)
+                b = random.randint(5, 20)
+                self.current_question = f"{a} × {b}"
+                self.current_answer = a * b
+            else:
+                a = random.randint(20, 50)
+                b = random.randint(10, 30)
+                c = random.randint(10, 30)
+                self.current_question = f"{a} + {b} + {c}"
+                self.current_answer = a + b + c
+                
         else:
-            a = random.randint(20, 50)
-            b = random.randint(10, 30)
-            c = random.randint(5, 15)
-            self.current_question = f"{a} + {b} - {c}"
-            self.current_answer = a + b - c
+            choice = random.choice(["multi_op", "parentheses", "division"])
+            if choice == "multi_op":
+                a = random.randint(20, 50)
+                b = random.randint(10, 30)
+                c = random.randint(5, 15)
+                self.current_question = f"{a} + {b} - {c}"
+                self.current_answer = a + b - c
+            elif choice == "parentheses":
+                a = random.randint(5, 15)
+                b = random.randint(5, 15)
+                c = random.randint(2, 10)
+                self.current_question = f"({a} + {b}) × {c}"
+                self.current_answer = (a + b) * c
+            else:
+                divisor = random.randint(2, 10)
+                quotient = random.randint(5, 20)
+                dividend = divisor * quotient
+                extra = random.randint(10, 50)
+                self.current_question = f"{dividend} ÷ {divisor} + {extra}"
+                self.current_answer = quotient + extra
+        
+        if storage:
+            storage.add_math({
+                "question": self.current_question,
+                "answer": self.current_answer,
+                "difficulty": difficulty,
+                "created_at": datetime.now().isoformat()
+            })
         
         return self.current_question
         
@@ -735,7 +723,7 @@ async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("📊 Hệ thống đang bảo trì")
             return
             
-        leaderboard = storage.get_leaderboard()
+        leaderboard = storage.get_leaderboard_direct()
         
         if not leaderboard:
             await update.message.reply_text("📊 Chưa có dữ liệu bảng xếp hạng\n\nHãy chơi game để lên bảng!")
@@ -766,7 +754,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg, parse_mode="Markdown")
             return
             
-        data = storage.get_user_stats(user.id)
+        data = storage.get_user_stats_direct(user.id)
         
         msg = f"📊 **Thống kê của {username}**\n"
         msg += "────────────────\n"
