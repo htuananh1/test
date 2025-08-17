@@ -129,7 +129,7 @@ class GitHubStorage:
         for user_data in data["users"].values():
             users_list.append((
                 user_data["username"],
-                user_data["balance"],
+                user_data.get("total_earned", 0),
                 len(user_data.get("games_played", {}))
             ))
         
@@ -798,32 +798,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         
         if chat.type == "private":
-            greeting = f"👋 **Xin chào {user.first_name}! Mình là Linh!**"
+            greeting = f"👋 Xin chào {user.first_name}! Mình là Linh!"
         else:
-            greeting = f"👋 **Xin chào! Mình là Linh!**\n🏠 Nhóm: {chat.title or 'Không tên'}"
+            greeting = f"👋 Xin chào! Mình là Linh!\n🏠 Nhóm: {chat.title or 'Không tên'}"
         
-        await update.message.reply_text(f"""
-{greeting}
+        message = f"""{greeting}
 
-💰 Số dư của bạn: **{_fmt_money(balance)}**
+💰 Số dư của bạn: {_fmt_money(balance)}
 
-🎮 **Minigame:**
+🎮 Minigame:
 /minigame - Chơi ngẫu nhiên các minigame
 /stopmini - Dừng minigame
 
-📝 **Chơi riêng:**
+📝 Chơi riêng:
 /guessnumber - Đoán số 1-999
 /quiz1 - Câu đố chọn đáp án
 /quiz2 - Câu đố trả lời ngắn
 /math - Toán học
 
-📊 /leaderboard - BXH theo số dư
+📊 /leaderboard - BXH theo điểm
 📈 /stats - Thống kê của bạn
 💰 /bal - Xem số dư
 
 💬 Chat với Linh (GPT)
-💕 Mỗi 23h Linh sẽ chúc ngủ ngon!
-""", parse_mode="Markdown")
+💕 Mỗi 23h Linh sẽ chúc ngủ ngon!"""
+        
+        await update.message.reply_text(message)
     except Exception as e:
         logger.error(f"Error in start command: {e}")
         await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
@@ -838,7 +838,7 @@ async def toggle_goodnight(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_settings[chat_id]["goodnight_enabled"] = not chat_settings[chat_id]["goodnight_enabled"]
         
         status = "BẬT" if chat_settings[chat_id]["goodnight_enabled"] else "TẮT"
-        await update.message.reply_text(f"🌙 Chức năng chúc ngủ ngon đã được **{status}**", parse_mode="Markdown")
+        await update.message.reply_text(f"🌙 Chức năng chúc ngủ ngon đã được {status}")
     except Exception as e:
         logger.error(f"Error in toggle_goodnight: {e}")
 
@@ -858,7 +858,9 @@ async def minigame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "games_played": 0,
             "start_time": datetime.now(),
             "username": user.username or user.first_name,
-            "user_id": user.id
+            "user_id": user.id,
+            "starter_id": user.id,
+            "starter_name": user.username or user.first_name
         }
         
         await start_random_minigame(chat_id, context)
@@ -882,8 +884,7 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
     
     await context.bot.send_message(
         chat_id, 
-        f"🎲 **Minigame #{session['games_played']}**\nTổng điểm: {session['total_score']}\n\n⏳ Đang tải...",
-        parse_mode="Markdown"
+        f"🎲 Minigame #{session['games_played']}\nTổng điểm: {session['total_score']}\n\n⏳ Đang tải..."
     )
     
     await asyncio.sleep(1)
@@ -895,14 +896,13 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             
             await context.bot.send_message(
                 chat_id,
-                f"""🎮 **ĐOÁN SỐ 1-999**
+                f"""🎮 ĐOÁN SỐ 1-999
 
 💡 {game.riddle}
 📝 15 lần | 💰 5000đ
 /hint - Gợi ý (-500đ, tối đa 4 lần)
 
-Đoán đi!""",
-                parse_mode="Markdown"
+Đoán đi!"""
             )
         
         elif game_type == "quiz1":
@@ -937,9 +937,8 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             
             await context.bot.send_message(
                 chat_id,
-                f"{emoji} **QUIZ 1.0 - {quiz['topic'].upper()}**\n\n{quiz['question']}",
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
+                f"{emoji} QUIZ 1.0 - {quiz['topic'].upper()}\n\n{quiz['question']}",
+                reply_markup=reply_markup
             )
         
         elif game_type == "quiz2":
@@ -968,13 +967,12 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             
             await context.bot.send_message(
                 chat_id,
-                f"""{emoji} **QUIZ 2.0 - {quiz["topic"].upper()}**
+                f"""{emoji} QUIZ 2.0 - {quiz["topic"].upper()}
 
 {quiz["question"]}
 
 💡 Trả lời ngắn gọn (1-3 từ)
-✍️ Gõ câu trả lời của bạn!""",
-                parse_mode="Markdown"
+✍️ Gõ câu trả lời của bạn!"""
             )
         
         elif game_type == "math":
@@ -991,13 +989,12 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             
             await context.bot.send_message(
                 chat_id,
-                f"""🧮 **TOÁN HỌC**
+                f"""🧮 TOÁN HỌC
 
-Tính: **{question} = ?**
+Tính: {question} = ?
 
 📝 Bạn có {game.max_attempts} lần thử
-✍️ Gõ đáp án!""",
-                parse_mode="Markdown"
+✍️ Gõ đáp án!"""
             )
     except Exception as e:
         logger.error(f"Error in start_random_minigame: {e}")
@@ -1015,22 +1012,21 @@ async def stop_minigame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if session["total_score"] > 0:
             update_user_balance(
-                session["user_id"], 
-                session["username"], 
+                session["starter_id"], 
+                session["starter_name"], 
                 session["total_score"], 
                 "minigame"
             )
         
         await update.message.reply_text(
-            f"""🏁 **KẾT THÚC MINIGAME!**
+            f"""🏁 KẾT THÚC MINIGAME!
 
-👤 Người chơi: {session['username']}
+👤 Người chơi: {session['starter_name']}
 🎮 Số game đã chơi: {session['games_played']}
 💰 Tổng điểm kiếm được: {session['total_score']}
 ⏱️ Thời gian: {total_time}s
 
-Cảm ơn bạn đã chơi! 💕""",
-            parse_mode="Markdown"
+Cảm ơn bạn đã chơi! 💕"""
         )
         
         if chat_id in quiz_sessions:
@@ -1052,13 +1048,13 @@ async def start_guess_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
         game = GuessNumberGame(chat_id)
         active_games[chat_id] = {"type": "guessnumber", "game": game}
         
-        await update.message.reply_text(f"""🎮 **ĐOÁN SỐ 1-999**
+        await update.message.reply_text(f"""🎮 ĐOÁN SỐ 1-999
 
 💡 {game.riddle}
 📝 15 lần | 💰 5000đ
 /hint - Gợi ý (-500đ, tối đa 4 lần)
 
-Đoán đi!""", parse_mode="Markdown")
+Đoán đi!""")
     except Exception as e:
         logger.error(f"Error in start_guess_number: {e}")
         await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
@@ -1113,9 +1109,8 @@ async def quiz1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         emoji = topic_emojis.get(quiz["topic"], "❓")
         
         await loading_msg.edit_text(
-            f"{emoji} **QUIZ 1.0 - {quiz['topic'].upper()}**\n\n{quiz['question']}",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
+            f"{emoji} QUIZ 1.0 - {quiz['topic'].upper()}\n\n{quiz['question']}",
+            reply_markup=reply_markup
         )
     except Exception as e:
         logger.error(f"Error in quiz1_command: {e}")
@@ -1152,13 +1147,12 @@ async def quiz2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         emoji = topic_emojis.get(quiz["topic"], "❓")
         
         await loading_msg.edit_text(
-            f"""{emoji} **QUIZ 2.0 - {quiz["topic"].upper()}**
+            f"""{emoji} QUIZ 2.0 - {quiz["topic"].upper()}
 
 {quiz["question"]}
 
 💡 Trả lời ngắn gọn (1-3 từ)
-✍️ Gõ câu trả lời của bạn!""",
-            parse_mode="Markdown"
+✍️ Gõ câu trả lời của bạn!"""
         )
     except Exception as e:
         logger.error(f"Error in quiz2_command: {e}")
@@ -1183,13 +1177,12 @@ async def math_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_games[chat_id] = {"type": "math", "game": game}
         
         await loading_msg.edit_text(
-            f"""🧮 **TOÁN HỌC**
+            f"""🧮 TOÁN HỌC
 
-Tính: **{question} = ?**
+Tính: {question} = ?
 
 📝 Bạn có {game.max_attempts} lần thử
-✍️ Gõ đáp án!""",
-            parse_mode="Markdown"
+✍️ Gõ đáp án!"""
         )
     except Exception as e:
         logger.error(f"Error in math_command: {e}")
@@ -1212,13 +1205,13 @@ async def leaderboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Chưa có dữ liệu bảng xếp hạng.")
             return
             
-        lines = ["🏆 **BẢNG XẾP HẠNG THEO SỐ DƯ**\n"]
+        lines = ["🏆 BẢNG XẾP HẠNG THEO ĐIỂM\n"]
         
-        for i, (username, balance, games) in enumerate(leaderboard, 1):
+        for i, (username, score, games) in enumerate(leaderboard, 1):
             medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-            lines.append(f"{medal} {username} — {_fmt_money(balance)} ({games} games)")
+            lines.append(f"{medal} {username} — {_fmt_money(score)} điểm ({games} games)")
             
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(lines))
     except Exception as e:
         logger.error(f"Error in leaderboard_cmd: {e}")
         await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
@@ -1228,12 +1221,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         stats = storage.get_user_stats(user.id)
         
-        message = f"📊 **{user.first_name}**\n\n"
+        message = f"📊 {user.first_name}\n\n"
         message += f"💰 Số dư hiện tại: {_fmt_money(stats['balance'])}\n"
         message += f"📈 Tổng điểm kiếm được: {_fmt_money(stats['total'])}\n"
         
         if stats['games']:
-            message += "\n**Thống kê game:**\n"
+            message += "\nThống kê game:\n"
             for game_type, data in stats['games'].items():
                 game_name = {
                     "guessnumber": "Đoán số",
@@ -1244,7 +1237,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }.get(game_type, game_type)
                 message += f"• {game_name}: {data['played']} lần\n"
                 
-        await update.message.reply_text(message, parse_mode="Markdown")
+        await update.message.reply_text(message)
     except Exception as e:
         logger.error(f"Error in stats_command: {e}")
         await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
