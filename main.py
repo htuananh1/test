@@ -12,12 +12,11 @@ from github import Github
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
-# Config
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
-CLAUDE_MODEL = "anthropic/claude-3.5-sonnet"
+CLAUDE_MODEL = "anthropic/claude-3.7-sonnet"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 GITHUB_REPO = "htuananh1/Data-manager"
@@ -34,43 +33,25 @@ class GitHubStorage:
             self.g = Github(token)
             self.repo = self.g.get_repo(repo_name)
             self.branch = "main"
-            self._score_cache = {}  # Chỉ cache score để update nhanh
-            self._last_save = {}
+            self._pending_updates = {}
+            self._last_batch_save = datetime.now()
             logger.info("GitHub storage initialized successfully")
         except Exception as e:
             logger.error(f"Failed to init GitHub storage: {e}")
             raise
         
     def _get_file_content(self, path: str) -> Optional[dict]:
-        """Lấy nội dung file từ GitHub, không cache quiz/math"""
         try:
             file = self.repo.get_contents(path, ref=self.branch)
             content = base64.b64decode(file.content).decode('utf-8')
             data = json.loads(content)
-            
-            # Chỉ cache scores
-            if path == "data/scores.json":
-                self._score_cache = data
-                
             return data
         except Exception as e:
             logger.warning(f"File {path} not found or error: {e}")
             return None
     
-    def _save_file(self, path: str, data: dict, message: str, force: bool = False):
-        """Lưu file lên GitHub"""
+    def _save_file(self, path: str, data: dict, message: str):
         try:
-            # Rate limiting cho quiz/math files
-            if not force and path in self._last_save:
-                if "quiz" in path or "math" in path:
-                    # Quiz/math files: 1 phút
-                    if datetime.now().timestamp() - self._last_save[path] < 60:
-                        return
-                else:
-                    # Score file: 5 phút hoặc force save
-                    if datetime.now().timestamp() - self._last_save[path] < 300:
-                        return
-                    
             content = json.dumps(data, ensure_ascii=False, indent=2)
             
             try:
@@ -80,25 +61,110 @@ class GitHubStorage:
             except:
                 self.repo.create_file(path, message, content, self.branch)
                 logger.info(f"Created file: {path}")
-            
-            self._last_save[path] = datetime.now().timestamp()
-            
-            # Update cache nếu là scores
-            if path == "data/scores.json":
-                self._score_cache = data
                 
         except Exception as e:
             logger.error(f"Failed to save {path}: {e}")
     
-    def get_user_balance(self, user_id: int) -> int:
-        """Lấy số dư user từ cache hoặc GitHub"""
-        try:
-            # Kiểm tra cache trước
-            if self._score_cache and "users" in self._score_cache:
-                user_data = self._score_cache["users"].get(str(user_id), {})
-                return user_data.get("balance", START_BALANCE)
+    def queue_update(self, update_type: str, data: dict):
+        if update_type not in self._pending_updates:
+            self._pending_updates[update_type] = []
+        self._pending_updates[update_type].append(data)
+    
+    async def batch_save(self):
+        if not self._pending_updates:
+            return
             
-            # Nếu không có cache, lấy từ GitHub
+        timestamp = datetime.now().isoformat()
+        
+        if "scores" in self._pending_updates:
+            scores_data = self._get_file_content("data/scores.json") or {"users": {}}
+            
+            for update in self._pending_updates["scores"]:
+                user_key = str(update["user_id"])
+                
+                if user_key not in scores_data["users"]:
+                    scores_data["users"][user_key] = {
+                        "user_id": update["user_id"],
+                        "username": update["username"],
+                        "balance": START_BALANCE,
+                        "total_earned": 0,
+                        "games_played": {},
+                        "created_at": timestamp,
+                        "last_updated": timestamp
+                    }
+                
+                user = scores_data["users"][user_key]
+                user["balance"] += update["amount"]
+                user["username"] = update["username"]
+                user["last_updated"] = timestamp
+                
+                if update["amount"] > 0:
+                    user["total_earned"] = user.get("total_earned", 0) + update["amount"]
+                    if update.get("game_type"):
+                        if "games_played" not in user:
+                            user["games_played"] = {}
+                        game_type = update["game_type"]
+                        user["games_played"][game_type] = user["games_played"].get(game_type, 0) + 1
+            
+            self._save_file("data/scores.json", scores_data, f"Batch update scores at {timestamp}")
+        
+        if "quiz1" in self._pending_updates:
+            quiz1_data = self._get_file_content("data/quiz1_pool.json") or {"questions": []}
+            
+            for quiz in self._pending_updates["quiz1"]:
+                duplicate = False
+                for existing in quiz1_data["questions"]:
+                    if existing.get("question") == quiz.get("question"):
+                        duplicate = True
+                        break
+                if not duplicate:
+                    quiz1_data["questions"].append(quiz)
+            
+            quiz1_data["total"] = len(quiz1_data["questions"])
+            quiz1_data["last_updated"] = timestamp
+            
+            self._save_file("data/quiz1_pool.json", quiz1_data, f"Batch update quiz1 at {timestamp}")
+        
+        if "quiz2" in self._pending_updates:
+            quiz2_data = self._get_file_content("data/quiz2_pool.json") or {"questions": []}
+            
+            for quiz in self._pending_updates["quiz2"]:
+                duplicate = False
+                for existing in quiz2_data["questions"]:
+                    if existing.get("question") == quiz.get("question"):
+                        duplicate = True
+                        break
+                if not duplicate:
+                    quiz2_data["questions"].append(quiz)
+            
+            quiz2_data["total"] = len(quiz2_data["questions"])
+            quiz2_data["last_updated"] = timestamp
+            
+            self._save_file("data/quiz2_pool.json", quiz2_data, f"Batch update quiz2 at {timestamp}")
+        
+        if "math" in self._pending_updates:
+            math_data = self._get_file_content("data/math_pool.json") or {"questions": []}
+            
+            for math in self._pending_updates["math"]:
+                duplicate = False
+                for existing in math_data["questions"]:
+                    if existing.get("question") == math.get("question"):
+                        duplicate = True
+                        break
+                if not duplicate:
+                    math_data["questions"].append(math)
+            
+            math_data["total"] = len(math_data["questions"])
+            math_data["last_updated"] = timestamp
+            
+            self._save_file("data/math_pool.json", math_data, f"Batch update math at {timestamp}")
+        
+        self._pending_updates = {}
+        self._last_batch_save = datetime.now()
+        logger.info(f"Batch save completed at {timestamp}")
+    
+    def get_user_balance(self, user_id: int) -> int:
+        try:
             data = self._get_file_content("data/scores.json") or {"users": {}}
             user_data = data.get("users", {}).get(str(user_id), {})
             return user_data.get("balance", START_BALANCE)
@@ -106,66 +172,16 @@ class GitHubStorage:
             return START_BALANCE
     
     def update_user_balance(self, user_id: int, username: str, amount: int, game_type: str = None):
-        """Cập nhật số dư và điểm người chơi"""
-        try:
-            # Lấy data hiện tại
-            data = self._score_cache if self._score_cache else self._get_file_content("data/scores.json")
-            if not data:
-                data = {"users": {}}
-            
-            if "users" not in data:
-                data["users"] = {}
-                
-            user_key = str(user_id)
-            
-            # Tạo user mới nếu chưa có
-            if user_key not in data["users"]:
-                data["users"][user_key] = {
-                    "user_id": user_id,
-                    "username": username,
-                    "balance": START_BALANCE,
-                    "total_earned": 0,
-                    "games_played": {},
-                    "created_at": datetime.now().isoformat(),
-                    "last_updated": datetime.now().isoformat()
-                }
-            
-            user = data["users"][user_key]
-            
-            # Cập nhật balance (cộng dồn)
-            old_balance = user.get("balance", START_BALANCE)
-            user["balance"] = old_balance + amount
-            user["username"] = username
-            user["last_updated"] = datetime.now().isoformat()
-            
-            # Cập nhật total earned và games played
-            if amount > 0:
-                user["total_earned"] = user.get("total_earned", 0) + amount
-                if game_type:
-                    if "games_played" not in user:
-                        user["games_played"] = {}
-                    user["games_played"][game_type] = user["games_played"].get(game_type, 0) + 1
-            
-            # Lưu vào cache
-            self._score_cache = data
-            
-            # Lưu lên GitHub (có rate limit)
-            self._save_file("data/scores.json", data, f"Update: {username} ({amount:+d})")
-            
-            logger.info(f"Updated balance for {username}: {old_balance} -> {user['balance']} ({amount:+d})")
-            
-        except Exception as e:
-            logger.error(f"Failed to update balance: {e}")
-    
-    def force_save_scores(self):
-        """Force save scores to GitHub"""
-        if self._score_cache:
-            self._save_file("data/scores.json", self._score_cache, "Force save scores", force=True)
+        self.queue_update("scores", {
+            "user_id": user_id,
+            "username": username,
+            "amount": amount,
+            "game_type": game_type
+        })
     
     def get_leaderboard(self, limit: int = 10) -> List[tuple]:
-        """Lấy bảng xếp hạng"""
         try:
-            data = self._score_cache if self._score_cache else self._get_file_content("data/scores.json")
+            data = self._get_file_content("data/scores.json")
             if not data or "users" not in data:
                 return []
                 
@@ -183,9 +199,8 @@ class GitHubStorage:
             return []
     
     def get_user_stats(self, user_id: int) -> dict:
-        """Lấy thống kê của user"""
         try:
-            data = self._score_cache if self._score_cache else self._get_file_content("data/scores.json")
+            data = self._get_file_content("data/scores.json")
             if not data or "users" not in data:
                 return {
                     'balance': START_BALANCE,
@@ -209,7 +224,6 @@ class GitHubStorage:
             }
     
     def get_quiz1_pool(self) -> List[dict]:
-        """Lấy pool quiz1 từ GitHub (không cache)"""
         data = self._get_file_content("data/quiz1_pool.json")
         if data and "questions" in data:
             return data["questions"]
@@ -224,29 +238,9 @@ class GitHubStorage:
         ]
     
     def add_quiz1(self, quiz: dict):
-        """Thêm quiz1 vào pool (không giới hạn số lượng)"""
-        try:
-            data = self._get_file_content("data/quiz1_pool.json") or {"questions": []}
-            if "questions" not in data:
-                data["questions"] = []
-                
-            # Kiểm tra trùng lặp
-            for existing in data["questions"]:
-                if existing.get("question") == quiz.get("question"):
-                    return
-                    
-            data["questions"].append(quiz)
-            
-            # Thêm metadata
-            data["total"] = len(data["questions"])
-            data["last_updated"] = datetime.now().isoformat()
-            
-            self._save_file("data/quiz1_pool.json", data, f"Add quiz1 (Total: {data['total']})")
-        except Exception as e:
-            logger.error(f"Failed to add quiz1: {e}")
+        self.queue_update("quiz1", quiz)
     
     def get_quiz2_pool(self) -> List[dict]:
-        """Lấy pool quiz2 từ GitHub (không cache)"""
         data = self._get_file_content("data/quiz2_pool.json")
         if data and "questions" in data:
             return data["questions"]
@@ -260,29 +254,9 @@ class GitHubStorage:
         ]
     
     def add_quiz2(self, quiz: dict):
-        """Thêm quiz2 vào pool (không giới hạn số lượng)"""
-        try:
-            data = self._get_file_content("data/quiz2_pool.json") or {"questions": []}
-            if "questions" not in data:
-                data["questions"] = []
-                
-            # Kiểm tra trùng lặp
-            for existing in data["questions"]:
-                if existing.get("question") == quiz.get("question"):
-                    return
-                    
-            data["questions"].append(quiz)
-            
-            # Thêm metadata
-            data["total"] = len(data["questions"])
-            data["last_updated"] = datetime.now().isoformat()
-            
-            self._save_file("data/quiz2_pool.json", data, f"Add quiz2 (Total: {data['total']})")
-        except Exception as e:
-            logger.error(f"Failed to add quiz2: {e}")
+        self.queue_update("quiz2", quiz)
     
     def get_math_pool(self) -> List[dict]:
-        """Lấy pool math từ GitHub (không cache)"""
         data = self._get_file_content("data/math_pool.json")
         if data and "questions" in data:
             return data["questions"]
@@ -293,55 +267,32 @@ class GitHubStorage:
         ]
     
     def add_math(self, math: dict):
-        """Thêm math vào pool (không giới hạn số lượng)"""
-        try:
-            data = self._get_file_content("data/math_pool.json") or {"questions": []}
-            if "questions" not in data:
-                data["questions"] = []
-                
-            # Kiểm tra trùng lặp
-            for existing in data["questions"]:
-                if existing.get("question") == math.get("question"):
-                    return
-                    
-            data["questions"].append(math)
-            
-            # Thêm metadata
-            data["total"] = len(data["questions"])
-            data["last_updated"] = datetime.now().isoformat()
-            
-            self._save_file("data/math_pool.json", data, f"Add math (Total: {data['total']})")
-        except Exception as e:
-            logger.error(f"Failed to add math: {e}")
+        self.queue_update("math", math)
 
-# Initialize storage
 try:
     storage = GitHubStorage(GITHUB_TOKEN, GITHUB_REPO)
 except Exception as e:
     logger.error(f"Critical error initializing storage: {e}")
     storage = None
 
-# Global variables (giảm thiểu cache)
 active_games: Dict[int, dict] = {}
 chat_history: Dict[int, List[dict]] = {}
 minigame_sessions: Dict[int, dict] = {}
-quiz_history: Dict[int, List[str]] = {}  # Chỉ lưu ID câu hỏi gần đây
+quiz_history: Dict[int, List[str]] = {}
 
 def _fmt_money(x: int) -> str:
     return f"{x:,}".replace(",", ".")
 
 def get_user_balance(user_id: int) -> int:
-    """Lấy balance từ GitHub"""
     if storage:
         return storage.get_user_balance(user_id)
     return START_BALANCE
 
 def update_user_balance(user_id: int, username: str, amount: int, game_type: str = None):
-    """Cập nhật balance lên GitHub"""
     try:
         if storage:
             storage.update_user_balance(user_id, username, amount, game_type)
-            logger.info(f"Balance updated for {username}: {amount:+d} from {game_type}")
+            logger.info(f"Balance queued for {username}: {amount:+d} from {game_type}")
     except Exception as e:
         logger.error(f"Update balance error: {e}")
 
@@ -373,7 +324,6 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
         logger.error(f"API call error: {e}")
         return None
 
-# Game classes (giữ nguyên)
 class GuessNumberGame:
     def __init__(self, chat_id: int):
         self.chat_id = chat_id
@@ -446,7 +396,6 @@ class MathQuizGame:
         self.current_answer = None
         
     async def generate_question(self) -> str:
-        # Thử API trước
         difficulty = random.choice(["easy", "medium", "hard"])
         
         prompt = f"""Tạo một bài toán với độ khó: {difficulty}
@@ -481,7 +430,6 @@ Trả về JSON bằng tiếng Việt:
                     self.current_question = data.get("question", "")
                     self.current_answer = int(data.get("answer", 0))
                     
-                    # Lưu câu hỏi mới vào pool
                     if storage:
                         storage.add_math({
                             "question": self.current_question,
@@ -494,7 +442,6 @@ Trả về JSON bằng tiếng Việt:
         except:
             pass
         
-        # Nếu API lỗi, lấy từ pool
         if storage:
             pool = storage.get_math_pool()
             if pool:
@@ -503,7 +450,6 @@ Trả về JSON bằng tiếng Việt:
                 self.current_answer = int(math_q.get("answer", 0))
                 return self.current_question
         
-        # Tạo câu hỏi mặc định
         if difficulty == "easy":
             a = random.randint(10, 50)
             b = random.randint(10, 50)
@@ -551,7 +497,6 @@ class VietnameseQuiz1Game:
             
         recent_questions = quiz_history[self.chat_id][-20:] if len(quiz_history[self.chat_id]) > 0 else []
         
-        # Thử API trước
         topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam", "Khoa học Việt Nam", "Thể thao Việt Nam"]
         topic = random.choice(topics)
         
@@ -607,11 +552,9 @@ Return ONLY valid JSON in Vietnamese:
         except:
             pass
         
-        # Nếu API lỗi, lấy từ pool
         if storage:
             pool = storage.get_quiz1_pool()
             if pool:
-                # Lấy ngẫu nhiên từ pool
                 available_quiz = [q for q in pool if f"{q.get('question', '')[:30]}" not in recent_questions]
                 if available_quiz:
                     quiz = random.choice(available_quiz)
@@ -638,7 +581,6 @@ class VietnameseQuiz2Game:
             
         recent_questions = quiz_history[self.chat_id][-20:] if len(quiz_history[self.chat_id]) > 0 else []
         
-        # Thử API trước
         topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam", "Khoa học Việt Nam", "Thể thao Việt Nam"]
         topic = random.choice(topics)
         
@@ -693,11 +635,9 @@ Return ONLY valid JSON in Vietnamese:
         except:
             pass
         
-        # Nếu API lỗi, lấy từ pool
         if storage:
             pool = storage.get_quiz2_pool()
             if pool:
-                # Lấy ngẫu nhiên từ pool
                 available_quiz = [q for q in pool if f"{q.get('question', '')[:30]}" not in recent_questions]
                 if available_quiz:
                     quiz = random.choice(available_quiz)
@@ -739,7 +679,6 @@ Return ONLY valid JSON in Vietnamese:
         else:
             return False, f"❌ Sai! Đáp án: {self.current_quiz['answer']}\n\n{self.current_quiz['explanation']}"
 
-# Commands
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = update.effective_user
@@ -858,7 +797,6 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = f"📊 **{username}**\n\n💰 Số dư: {_fmt_money(balance)}"
         await update.message.reply_text(msg, parse_mode="Markdown")
 
-# Các command game (giữ nguyên code cũ)
 async def guessnumber_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
@@ -976,7 +914,6 @@ async def minigame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Đang có minigame! Dùng /stopmini để dừng.")
             return
         
-        # Minigame session chỉ lưu thông tin cơ bản
         minigame_sessions[chat_id] = {
             "active": True,
             "current_game": None,
@@ -997,7 +934,6 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
     if chat_id in active_games:
         del active_games[chat_id]
     
-    # Random game thay vì theo thứ tự
     games = ["guessnumber", "quiz1", "quiz2", "math"]
     game_type = random.choice(games)
     
@@ -1005,7 +941,6 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
     session["current_game"] = game_type
     session["games_played"] += 1
     
-    # Hiển thị thông tin minigame
     game_names = {
         "guessnumber": "🎯 Đoán Số",
         "quiz1": "📝 Quiz Trắc Nghiệm",
@@ -1116,7 +1051,6 @@ async def stop_minigame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         session = minigame_sessions[chat_id]
         
-        # Chỉ hiển thị thông tin kết thúc
         msg = f"""🏁 **KẾT THÚC MINIGAME!**
 
 👤 Người khởi động: {session['starter_name']}
@@ -1169,7 +1103,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     points = 300
                     result = f"✅ **{username}** trả lời chính xác! (+{points}đ)\n\n{quiz['explanation']}"
                     
-                    # Cập nhật điểm cho người trả lời
                     update_user_balance(user.id, username, points, "quiz1")
                 else:
                     result = f"❌ Sai rồi! Đáp án: {quiz['correct']}\n\n{quiz['explanation']}"
@@ -1178,7 +1111,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 del active_games[chat_id]
                 
-                # Nếu trong minigame, chờ và chuyển game tiếp
                 if game_info.get("minigame") and chat_id in minigame_sessions:
                     await asyncio.sleep(3)
                     await start_random_minigame(chat_id, context)
@@ -1192,7 +1124,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         username = user.username or user.first_name
         
-        # Handle active games
         if chat_id in active_games:
             game_info = active_games[chat_id]
             game = game_info["game"]
@@ -1204,10 +1135,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if 1 <= guess <= 999:
                         is_finished, response = game.make_guess(guess)
                         
-                        # Thêm tên người chơi vào response nếu đúng
                         if is_finished and "Đúng" in response:
                             response = f"🎉 **{username}** {response}"
-                            # Cập nhật điểm cho người đoán đúng
                             update_user_balance(user.id, username, game.score, "guessnumber")
                         
                         await update.message.reply_text(response, parse_mode="Markdown")
@@ -1215,7 +1144,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if is_finished:
                             del active_games[chat_id]
                             
-                            # Nếu trong minigame, chờ và chuyển game tiếp
                             if is_minigame and chat_id in minigame_sessions:
                                 await asyncio.sleep(3)
                                 await start_random_minigame(chat_id, context)
@@ -1227,17 +1155,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif game_info["type"] == "quiz2":
                 is_finished, response = game.check_answer(message)
                 
-                # Thêm tên người chơi vào response nếu đúng
                 if "Chính xác" in response:
                     response = f"✅ **{username}** trả lời chính xác! +300 điểm\n\n{game.current_quiz['explanation']}"
-                    # Cập nhật điểm cho người trả lời đúng
                     update_user_balance(user.id, username, 300, "quiz2")
                 
                 await update.message.reply_text(response, parse_mode="Markdown")
                 
                 del active_games[chat_id]
                 
-                # Nếu trong minigame, chờ và chuyển game tiếp
                 if is_minigame and chat_id in minigame_sessions:
                     await asyncio.sleep(3)
                     await start_random_minigame(chat_id, context)
@@ -1249,7 +1174,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     if is_correct:
                         response = f"✅ **{username}** {response}"
-                        # Cập nhật điểm cho người trả lời đúng
                         update_user_balance(user.id, username, game.score, "math")
                     
                     await update.message.reply_text(response, parse_mode="Markdown")
@@ -1257,7 +1181,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if is_correct or game.attempts >= game.max_attempts:
                         del active_games[chat_id]
                         
-                        # Nếu trong minigame, chờ và chuyển game tiếp
                         if is_minigame and chat_id in minigame_sessions:
                             await asyncio.sleep(3)
                             await start_random_minigame(chat_id, context)
@@ -1266,7 +1189,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             return
         
-        # Chat AI
         if chat_id not in chat_history:
             chat_history[chat_id] = []
             
@@ -1290,13 +1212,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in handle_message: {e}")
 
+async def periodic_batch_save(application: Application):
+    while True:
+        await asyncio.sleep(60)
+        try:
+            if storage:
+                await storage.batch_save()
+        except Exception as e:
+            logger.error(f"Batch save error: {e}")
+
 async def post_init(application: Application) -> None:
+    asyncio.create_task(periodic_batch_save(application))
     logger.info("Bot started successfully!")
 
 async def post_shutdown(application: Application) -> None:
     if storage:
-        storage.force_save_scores()
-    logger.info("Bot shutdown - scores saved!")
+        await storage.batch_save()
+    logger.info("Bot shutdown - data saved!")
 
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
@@ -1304,7 +1236,6 @@ def main():
     application.post_init = post_init
     application.post_shutdown = post_shutdown
     
-    # Commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("minigame", minigame_cmd))
     application.add_handler(CommandHandler("stopmini", stop_minigame_cmd))
@@ -1317,10 +1248,8 @@ def main():
     application.add_handler(CommandHandler("top", top_cmd))
     application.add_handler(CommandHandler("stats", stats_cmd))
     
-    # Callbacks
     application.add_handler(CallbackQueryHandler(button_callback))
     
-    # Messages
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Linh Bot is running! 💕")
