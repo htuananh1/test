@@ -5,8 +5,7 @@ import logging
 import requests
 import json
 import base64
-import gc
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from github import Github
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,7 +21,6 @@ GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 GITHUB_REPO = "htuananh1/Data-manager"
 
 START_BALANCE = 1000
-CHAT_HISTORY_LIMIT = 20
 AUTO_MINIGAME_INTERVAL = 3600
 GAME_TIMEOUT = 300
 
@@ -66,14 +64,6 @@ class GitHubStorage:
                 
         except Exception as e:
             logger.error(f"Failed to save {path}: {e}")
-    
-    def _delete_file(self, path: str):
-        try:
-            file = self.repo.get_contents(path, ref=self.branch)
-            self.repo.delete_file(path, f"Delete old file: {path}", file.sha, self.branch)
-            logger.info(f"Deleted file: {path}")
-        except Exception as e:
-            logger.warning(f"Failed to delete {path}: {e}")
     
     def queue_update(self, update_type: str, data: dict):
         if update_type not in self._pending_updates:
@@ -237,16 +227,7 @@ class GitHubStorage:
         data = self._get_file_content("data/quiz1_pool.json")
         if data and "questions" in data:
             return data["questions"]
-        return [
-            {
-                "topic": "Bóng đá thế giới",
-                "question": "Cầu thủ nào giữ kỷ lục ghi nhiều bàn thắng nhất tại World Cup?",
-                "options": ["A. Miroslav Klose", "B. Ronaldo Brazil", "C. Pelé", "D. Gerd Müller"],
-                "correct": "A",
-                "explanation": "Miroslav Klose (Đức) giữ kỷ lục với 16 bàn thắng tại World Cup.",
-                "difficulty": "trung bình"
-            }
-        ]
+        return []
     
     def add_quiz1(self, quiz: dict):
         self.queue_update("quiz1", quiz)
@@ -255,15 +236,7 @@ class GitHubStorage:
         data = self._get_file_content("data/quiz2_pool.json")
         if data and "questions" in data:
             return data["questions"]
-        return [
-            {
-                "topic": "Công nghệ",
-                "question": "Ai là người sáng lập Facebook?",
-                "answer": "Mark Zuckerberg",
-                "explanation": "Mark Zuckerberg sáng lập Facebook năm 2004 khi còn là sinh viên Harvard.",
-                "difficulty": "trung bình"
-            }
-        ]
+        return []
     
     def add_quiz2(self, quiz: dict):
         self.queue_update("quiz2", quiz)
@@ -272,11 +245,7 @@ class GitHubStorage:
         data = self._get_file_content("data/math_pool.json")
         if data and "questions" in data:
             return data["questions"]
-        return [
-            {"question": "25 + 37", "answer": 62},
-            {"question": "84 - 29", "answer": 55},
-            {"question": "12 × 8", "answer": 96}
-        ]
+        return []
     
     def add_math(self, math: dict):
         self.queue_update("math", math)
@@ -313,39 +282,6 @@ class GitHubStorage:
             if chat.get("type") in ["group", "supergroup"]:
                 groups.append(chat)
         return groups
-    
-    def save_chat_history(self, chat_id: int, messages: List[dict]):
-        data = {
-            "messages": messages[-CHAT_HISTORY_LIMIT:],
-            "chat_id": chat_id,
-            "saved_at": datetime.now().isoformat()
-        }
-        self._save_file(f"data/chat_history/{chat_id}.json", data, f"Save chat history: {chat_id}")
-    
-    def get_chat_history(self, chat_id: int) -> List[dict]:
-        data = self._get_file_content(f"data/chat_history/{chat_id}.json")
-        if data:
-            saved_at = datetime.fromisoformat(data.get("saved_at", datetime.now().isoformat()))
-            if datetime.now() - saved_at > timedelta(hours=24):
-                self._delete_file(f"data/chat_history/{chat_id}.json")
-                return []
-            return data.get("messages", [])
-        return []
-    
-    def cleanup_old_chat_histories(self):
-        chats_data = self._get_file_content("data/chats.json")
-        if not chats_data:
-            return
-        
-        for chat in chats_data.get("chats", []):
-            chat_id = chat.get("id")
-            if chat_id:
-                history_data = self._get_file_content(f"data/chat_history/{chat_id}.json")
-                if history_data:
-                    saved_at = datetime.fromisoformat(history_data.get("saved_at", datetime.now().isoformat()))
-                    if datetime.now() - saved_at > timedelta(hours=24):
-                        self._delete_file(f"data/chat_history/{chat_id}.json")
-                        logger.info(f"Deleted old chat history for {chat_id}")
 
 try:
     storage = GitHubStorage(GITHUB_TOKEN, GITHUB_REPO)
@@ -354,9 +290,7 @@ except Exception as e:
     storage = None
 
 active_games: Dict[int, dict] = {}
-chat_history: Dict[int, List[dict]] = {}
 autominigame_sessions: Dict[int, dict] = {}
-quiz_history: Dict[int, List[str]] = {}
 auto_minigame_enabled: Dict[int, bool] = {}
 game_messages: Dict[int, List[int]] = {}
 game_timeouts: Dict[int, asyncio.Task] = {}
@@ -559,13 +493,6 @@ class VietnameseQuiz1Game:
         self.current_quiz = None
         
     async def generate_quiz(self) -> dict:
-        global quiz_history
-        
-        if self.chat_id not in quiz_history:
-            quiz_history[self.chat_id] = []
-            
-        recent_questions = quiz_history[self.chat_id][-20:] if len(quiz_history[self.chat_id]) > 0 else []
-        
         topics = [
             "Bóng đá thế giới", 
             "Công nghệ và khoa học", 
@@ -625,33 +552,15 @@ Trả về JSON tiếng Việt:
                     
                     if quiz["question"] and len(quiz["options"]) == 4:
                         if storage:
-                            existing_pool = storage.get_quiz1_pool()
-                            for existing in existing_pool:
-                                if existing.get("question") == quiz["question"]:
-                                    return await self.generate_quiz()
-                        
-                        quiz_id = f"{self.chat_id}_{datetime.now().timestamp()}"
-                        quiz_history[self.chat_id].append(quiz_id)
-                        
-                        if storage:
                             storage.add_quiz1(quiz)
-                        
                         return quiz
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error generating quiz1: {e}")
         
         if storage:
             pool = storage.get_quiz1_pool()
             if pool:
-                available_quiz = [q for q in pool if f"{q.get('question', '')[:30]}" not in recent_questions]
-                if available_quiz:
-                    quiz = random.choice(available_quiz)
-                else:
-                    quiz = random.choice(pool)
-                    
-                quiz_id = f"{self.chat_id}_{datetime.now().timestamp()}"
-                quiz_history[self.chat_id].append(quiz_id)
-                return quiz
+                return random.choice(pool)
         
         return None
 
@@ -662,13 +571,6 @@ class VietnameseQuiz2Game:
         self.current_quiz = None
         
     async def generate_quiz(self) -> dict:
-        global quiz_history
-        
-        if self.chat_id not in quiz_history:
-            quiz_history[self.chat_id] = []
-            
-        recent_questions = quiz_history[self.chat_id][-20:] if len(quiz_history[self.chat_id]) > 0 else []
-        
         topics = [
             "Bóng đá thế giới",
             "Công nghệ hiện đại",
@@ -726,33 +628,15 @@ Trả về JSON tiếng Việt:
                     
                     if quiz["question"] and quiz["answer"]:
                         if storage:
-                            existing_pool = storage.get_quiz2_pool()
-                            for existing in existing_pool:
-                                if existing.get("question") == quiz["question"]:
-                                    return await self.generate_quiz()
-                        
-                        quiz_id = f"{self.chat_id}_{datetime.now().timestamp()}"
-                        quiz_history[self.chat_id].append(quiz_id)
-                        
-                        if storage:
                             storage.add_quiz2(quiz)
-                        
                         return quiz
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error generating quiz2: {e}")
         
         if storage:
             pool = storage.get_quiz2_pool()
             if pool:
-                available_quiz = [q for q in pool if f"{q.get('question', '')[:30]}" not in recent_questions]
-                if available_quiz:
-                    quiz = random.choice(available_quiz)
-                else:
-                    quiz = random.choice(pool)
-                    
-                quiz_id = f"{self.chat_id}_{datetime.now().timestamp()}"
-                quiz_history[self.chat_id].append(quiz_id)
-                return quiz
+                return random.choice(pool)
         
         return None
     
@@ -855,7 +739,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /bal - Xem số dư
 /stats - Thống kê cá nhân
 
-💬 Hoặc chat trực tiếp với mình!"""
+💬 Chat riêng với mình để trò chuyện!"""
         
         await update.message.reply_text(message, parse_mode="Markdown")
         logger.info(f"Start command successful for user {user.id}")
@@ -1114,42 +998,42 @@ async def math_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
 async def start_random_autominigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    if chat_id not in autominigame_sessions or not autominigame_sessions[chat_id]["active"]:
-        return
-    
-    if chat_id in active_games:
-        del active_games[chat_id]
-    
-    if chat_id in game_timeouts:
-        game_timeouts[chat_id].cancel()
-    
-    games = ["guessnumber", "quiz1", "quiz2", "math"]
-    game_type = random.choice(games)
-    
-    session = autominigame_sessions[chat_id]
-    session["current_game"] = game_type
-    session["games_played"] += 1
-    
-    game_names = {
-        "guessnumber": "🎯 Đoán Số",
-        "quiz1": "📝 Quiz Trắc Nghiệm",
-        "quiz2": "✍️ Quiz Trả Lời",
-        "math": "🧮 Toán Học"
-    }
-    
-    msg = await context.bot.send_message(
-        chat_id, 
-        f"🎲 **Autominigame #{session['games_played']}**\n"
-        f"🎮 Trò chơi: {game_names.get(game_type, game_type)}\n"
-        f"⏰ Tự chuyển game sau 5 phút nếu không ai chơi\n\n"
-        f"⏳ Đang tải...",
-        parse_mode="Markdown"
-    )
-    await add_game_message(chat_id, msg.message_id, context)
-    
-    await asyncio.sleep(1)
-    
     try:
+        if chat_id not in autominigame_sessions or not autominigame_sessions[chat_id]["active"]:
+            return
+        
+        if chat_id in active_games:
+            del active_games[chat_id]
+        
+        if chat_id in game_timeouts:
+            game_timeouts[chat_id].cancel()
+        
+        games = ["guessnumber", "quiz1", "quiz2", "math"]
+        game_type = random.choice(games)
+        
+        session = autominigame_sessions[chat_id]
+        session["current_game"] = game_type
+        session["games_played"] += 1
+        
+        game_names = {
+            "guessnumber": "🎯 Đoán Số",
+            "quiz1": "📝 Quiz Trắc Nghiệm",
+            "quiz2": "✍️ Quiz Trả Lời",
+            "math": "🧮 Toán Học"
+        }
+        
+        msg = await context.bot.send_message(
+            chat_id, 
+            f"🎲 **Autominigame #{session['games_played']}**\n"
+            f"🎮 Trò chơi: {game_names.get(game_type, game_type)}\n"
+            f"⏰ Tự chuyển game sau 5 phút nếu không ai chơi\n\n"
+            f"⏳ Đang tải...",
+            parse_mode="Markdown"
+        )
+        await add_game_message(chat_id, msg.message_id, context)
+        
+        await asyncio.sleep(1)
+        
         if game_type == "guessnumber":
             game = GuessNumberGame(chat_id)
             active_games[chat_id] = {"type": "guessnumber", "game": game, "autominigame": True}
@@ -1322,6 +1206,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if storage and chat.type in ["group", "supergroup"]:
             storage.save_chat_info(chat.id, chat.type, chat.title)
         
+        message_handled = False
+        
         if chat_id in active_games:
             game_info = active_games[chat_id]
             game = game_info["game"]
@@ -1331,6 +1217,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     guess = int(message)
                     if 1 <= guess <= 999:
+                        message_handled = True
                         is_finished, response = game.make_guess(guess)
                         
                         if is_finished and "Đúng" in response:
@@ -1353,6 +1240,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 await asyncio.sleep(3)
                                 await start_random_autominigame(chat_id, context)
                     else:
+                        message_handled = True
                         msg = await update.message.reply_text("❌ Từ 1-999 thôi!")
                         if is_autominigame:
                             await add_game_message(chat_id, msg.message_id, context)
@@ -1360,6 +1248,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
                     
             elif game_info["type"] == "quiz2":
+                message_handled = True
                 is_finished, response = game.check_answer(message)
                 
                 if "Chính xác" in response:
@@ -1384,6 +1273,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif game_info["type"] == "math":
                 try:
                     answer = int(message)
+                    message_handled = True
                     is_correct, response = game.check_answer(answer)
                     
                     if is_correct:
@@ -1408,35 +1298,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             
                 except ValueError:
                     pass
-            return
+            
+            if message_handled:
+                return
         
-        if chat_id not in chat_history:
-            if storage:
-                history = storage.get_chat_history(chat_id)
-                chat_history[chat_id] = history if history else []
+        # Chat AI - chỉ hoạt động ở chat riêng
+        if chat.type == "private":
+            messages = [
+                {"role": "system", "content": "Bạn là Linh - cô gái Việt Nam vui vẻ, thân thiện. Trả lời ngắn gọn."},
+                {"role": "user", "content": message}
+            ]
+            
+            response = await call_api(messages, max_tokens=300)
+            
+            if response:
+                await update.message.reply_text(response)
             else:
-                chat_history[chat_id] = []
-            
-        chat_history[chat_id].append({"role": "user", "content": message})
-        
-        if len(chat_history[chat_id]) > CHAT_HISTORY_LIMIT:
-            chat_history[chat_id] = chat_history[chat_id][-CHAT_HISTORY_LIMIT:]
-        
-        messages = [
-            {"role": "system", "content": "Bạn là Linh - cô gái Việt Nam vui vẻ, thân thiện. Trả lời ngắn gọn."}
-        ]
-        messages.extend(chat_history[chat_id])
-        
-        response = await call_api(messages, max_tokens=300)
-        
-        if response:
-            chat_history[chat_id].append({"role": "assistant", "content": response})
-            await update.message.reply_text(response)
-            
-            if storage:
-                storage.save_chat_history(chat_id, chat_history[chat_id])
-        else:
-            await update.message.reply_text("😊 Mình đang nghĩ... Thử lại nhé!")
+                await update.message.reply_text("😊 Mình đang nghĩ... Thử lại nhé!")
     except Exception as e:
         logger.error(f"Error in handle_message: {e}")
 
@@ -1486,19 +1364,9 @@ async def auto_minigame_scheduler(application: Application):
         except Exception as e:
             logger.error(f"Auto minigame scheduler error: {e}")
 
-async def cleanup_old_histories(application: Application):
-    while True:
-        await asyncio.sleep(3600)
-        try:
-            if storage:
-                storage.cleanup_old_chat_histories()
-        except Exception as e:
-            logger.error(f"Cleanup histories error: {e}")
-
 async def post_init(application: Application) -> None:
     asyncio.create_task(periodic_batch_save(application))
     asyncio.create_task(auto_minigame_scheduler(application))
-    asyncio.create_task(cleanup_old_histories(application))
     logger.info("Bot started successfully!")
 
 async def post_shutdown(application: Application) -> None:
