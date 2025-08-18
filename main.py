@@ -239,11 +239,12 @@ class GitHubStorage:
             return data["questions"]
         return [
             {
-                "topic": "Lịch sử Việt Nam",
-                "question": "Vua nào đã đánh thắng quân Nguyên Mông 3 lần?",
-                "options": ["A. Trần Nhân Tông", "B. Lý Thái Tông", "C. Lê Lợi", "D. Quang Trung"],
+                "topic": "Bóng đá thế giới",
+                "question": "Cầu thủ nào giữ kỷ lục ghi nhiều bàn thắng nhất tại World Cup?",
+                "options": ["A. Miroslav Klose", "B. Ronaldo Brazil", "C. Pelé", "D. Gerd Müller"],
                 "correct": "A",
-                "explanation": "Trần Nhân Tông là vị vua đã lãnh đạo nhân dân đánh thắng quân Nguyên Mông 3 lần."
+                "explanation": "Miroslav Klose (Đức) giữ kỷ lục với 16 bàn thắng tại World Cup.",
+                "difficulty": "trung bình"
             }
         ]
     
@@ -256,10 +257,11 @@ class GitHubStorage:
             return data["questions"]
         return [
             {
-                "topic": "Địa lý Việt Nam",
-                "question": "Thủ đô của Việt Nam là gì?",
-                "answer": "Hà Nội",
-                "explanation": "Hà Nội là thủ đô của Việt Nam từ năm 1010."
+                "topic": "Công nghệ",
+                "question": "Ai là người sáng lập Facebook?",
+                "answer": "Mark Zuckerberg",
+                "explanation": "Mark Zuckerberg sáng lập Facebook năm 2004 khi còn là sinh viên Harvard.",
+                "difficulty": "trung bình"
             }
         ]
     
@@ -564,27 +566,39 @@ class VietnameseQuiz1Game:
             
         recent_questions = quiz_history[self.chat_id][-20:] if len(quiz_history[self.chat_id]) > 0 else []
         
-        topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam", "Khoa học Việt Nam", "Thể thao Việt Nam"]
+        topics = [
+            "Bóng đá thế giới", 
+            "Công nghệ và khoa học", 
+            "Địa danh nổi tiếng thế giới", 
+            "Động vật và thực vật",
+            "Câu đố dân gian và logic", 
+            "Nghệ thuật và giải trí",
+            "Lịch sử thế giới",
+            "Thể thao Olympic"
+        ]
         topic = random.choice(topics)
+        difficulty = random.choice(["trung bình", "khó", "cực khó"])
         
-        prompt = f"""Create a quiz question about {topic} with MAXIMUM ACCURACY.
+        prompt = f"""Tạo câu hỏi trắc nghiệm về {topic} với độ khó {difficulty}.
 
-CRITICAL REQUIREMENTS:
-1. MUST be 100% factually accurate and verifiable
-2. 4 options with ONLY 1 correct answer
-3. Different from recent questions
+YÊU CẦU BẮT BUỘC:
+1. Câu hỏi PHẢI 100% chính xác, có thể kiểm chứng
+2. 4 lựa chọn với CHỈ 1 đáp án đúng
+3. Câu hỏi bằng tiếng Việt chuẩn
+4. Nếu độ khó "cực khó", câu hỏi phải thật sự khó và chi tiết
+5. Tránh những câu hỏi quá phổ biến
 
-Return ONLY valid JSON in Vietnamese:
+Trả về JSON tiếng Việt:
 {{
   "topic": "{topic}",
-  "question": "question in Vietnamese",
-  "options": ["A. option", "B. option", "C. option", "D. option"],
-  "answer": "A or B or C or D",
-  "explain": "explanation in Vietnamese"
+  "question": "câu hỏi bằng tiếng Việt",
+  "options": ["A. lựa chọn", "B. lựa chọn", "C. lựa chọn", "D. lựa chọn"],
+  "answer": "A hoặc B hoặc C hoặc D",
+  "explain": "giải thích chi tiết bằng tiếng Việt"
 }}"""
 
         messages = [
-            {"role": "system", "content": "You are a Vietnamese education expert. Create only 100% accurate quiz questions."},
+            {"role": "system", "content": "Bạn là chuyên gia tạo câu hỏi đố vui quốc tế. Tạo câu hỏi chính xác 100%, phù hợp độ khó được yêu cầu."},
             {"role": "user", "content": prompt}
         ]
         
@@ -605,10 +619,17 @@ Return ONLY valid JSON in Vietnamese:
                         "options": data.get("options", []),
                         "correct": data.get("answer", "")[0].upper() if data.get("answer") else "",
                         "explanation": data.get("explain", ""),
+                        "difficulty": difficulty,
                         "created_at": datetime.now().isoformat()
                     }
                     
                     if quiz["question"] and len(quiz["options"]) == 4:
+                        if storage:
+                            existing_pool = storage.get_quiz1_pool()
+                            for existing in existing_pool:
+                                if existing.get("question") == quiz["question"]:
+                                    return await self.generate_quiz()
+                        
                         quiz_id = f"{self.chat_id}_{datetime.now().timestamp()}"
                         quiz_history[self.chat_id].append(quiz_id)
                         
@@ -648,27 +669,38 @@ class VietnameseQuiz2Game:
             
         recent_questions = quiz_history[self.chat_id][-20:] if len(quiz_history[self.chat_id]) > 0 else []
         
-        topics = ["Lịch sử Việt Nam", "Địa lý Việt Nam", "Văn hóa Việt Nam", "Ẩm thực Việt Nam", "Khoa học Việt Nam", "Thể thao Việt Nam"]
+        topics = [
+            "Bóng đá thế giới",
+            "Công nghệ hiện đại",
+            "Địa danh nổi tiếng",
+            "Động vật và thực vật", 
+            "Câu đố logic",
+            "Điện ảnh và âm nhạc",
+            "Khoa học vũ trụ",
+            "Ẩm thực thế giới"
+        ]
         topic = random.choice(topics)
+        difficulty = random.choice(["trung bình", "khó", "cực khó"])
         
-        prompt = f"""Create a quiz question about {topic} with MAXIMUM ACCURACY.
+        prompt = f"""Tạo câu hỏi về {topic} với độ khó {difficulty}.
 
-CRITICAL REQUIREMENTS:
-1. MUST be 100% factually accurate and verifiable
-2. Question should have a SHORT answer (1-3 words maximum)
-3. Answer should be simple and clear
-4. Different from recent questions
+YÊU CẦU BẮT BUỘC:
+1. Câu hỏi PHẢI 100% chính xác
+2. Câu trả lời NGẮN (1-3 từ tối đa)
+3. Đáp án phải rõ ràng, không mơ hồ
+4. Câu hỏi bằng tiếng Việt chuẩn
+5. Nếu độ khó "cực khó", hỏi về chi tiết ít người biết
 
-Return ONLY valid JSON in Vietnamese:
+Trả về JSON tiếng Việt:
 {{
   "topic": "{topic}",
-  "question": "question in Vietnamese (requiring short answer)",
-  "answer": "short answer in Vietnamese (1-3 words)",
-  "explanation": "brief explanation in Vietnamese"
+  "question": "câu hỏi tiếng Việt (yêu cầu trả lời ngắn)",
+  "answer": "đáp án ngắn tiếng Việt (1-3 từ)",
+  "explanation": "giải thích ngắn gọn tiếng Việt"
 }}"""
 
         messages = [
-            {"role": "system", "content": "You are a Vietnamese education expert. Create quiz questions with SHORT, SIMPLE answers."},
+            {"role": "system", "content": "Bạn là chuyên gia tạo câu đố quốc tế. Tạo câu hỏi có đáp án NGẮN, CHÍNH XÁC."},
             {"role": "user", "content": prompt}
         ]
         
@@ -688,10 +720,17 @@ Return ONLY valid JSON in Vietnamese:
                         "question": data.get("question", ""),
                         "answer": data.get("answer", ""),
                         "explanation": data.get("explanation", ""),
+                        "difficulty": difficulty,
                         "created_at": datetime.now().isoformat()
                     }
                     
                     if quiz["question"] and quiz["answer"]:
+                        if storage:
+                            existing_pool = storage.get_quiz2_pool()
+                            for existing in existing_pool:
+                                if existing.get("question") == quiz["question"]:
+                                    return await self.generate_quiz()
+                        
                         quiz_id = f"{self.chat_id}_{datetime.now().timestamp()}"
                         quiz_history[self.chat_id].append(quiz_id)
                         
@@ -775,10 +814,14 @@ async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
     if chat_id in autominigame_sessions and autominigame_sessions[chat_id]["active"]:
         msg = await context.bot.send_message(
             chat_id,
-            "⏰ Hết giờ! Không ai chơi, chuyển game mới...",
+            "⏰ Hết giờ! Không ai chơi trong 5 phút.\n\n"
+            "🎲 Đang chuyển sang game mới...",
             parse_mode="Markdown"
         )
         await add_game_message(chat_id, msg.message_id, context)
+        
+        if chat_id in game_timeouts:
+            del game_timeouts[chat_id]
         
         await asyncio.sleep(2)
         await start_random_autominigame(chat_id, context)
@@ -1097,7 +1140,8 @@ async def start_random_autominigame(chat_id: int, context: ContextTypes.DEFAULT_
     msg = await context.bot.send_message(
         chat_id, 
         f"🎲 **Autominigame #{session['games_played']}**\n"
-        f"🎮 Trò chơi: {game_names.get(game_type, game_type)}\n\n"
+        f"🎮 Trò chơi: {game_names.get(game_type, game_type)}\n"
+        f"⏰ Tự chuyển game sau 5 phút nếu không ai chơi\n\n"
         f"⏳ Đang tải...",
         parse_mode="Markdown"
     )
@@ -1142,9 +1186,13 @@ async def start_random_autominigame(chat_id: int, context: ContextTypes.DEFAULT_
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
+            difficulty_icon = {"trung bình": "⭐", "khó": "⭐⭐", "cực khó": "⭐⭐⭐"}
+            
             msg = await context.bot.send_message(
                 chat_id,
-                f"❓ **{quiz['topic']}**\n\n{quiz['question']}\n\n🏆 Ai trả lời đúng sẽ được 300 điểm!",
+                f"❓ **{quiz['topic']}** {difficulty_icon.get(quiz.get('difficulty', 'trung bình'), '')}\n\n"
+                f"{quiz['question']}\n\n"
+                f"🏆 Ai trả lời đúng sẽ được 300 điểm!",
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
@@ -1164,10 +1212,14 @@ async def start_random_autominigame(chat_id: int, context: ContextTypes.DEFAULT_
             game.current_quiz = quiz
             active_games[chat_id] = {"type": "quiz2", "game": game, "autominigame": True}
             
+            difficulty_icon = {"trung bình": "⭐", "khó": "⭐⭐", "cực khó": "⭐⭐⭐"}
+            
             msg = await context.bot.send_message(
                 chat_id,
-                f"❓ **{quiz['topic']}**\n\n{quiz['question']}\n\n"
-                f"💡 Trả lời ngắn gọn!\n🏆 Ai trả lời đúng sẽ được 300 điểm!",
+                f"❓ **{quiz['topic']}** {difficulty_icon.get(quiz.get('difficulty', 'trung bình'), '')}\n\n"
+                f"{quiz['question']}\n\n"
+                f"💡 Trả lời ngắn gọn!\n"
+                f"🏆 Ai trả lời đúng sẽ được 300 điểm!",
                 parse_mode="Markdown"
             )
             await add_game_message(chat_id, msg.message_id, context)
@@ -1188,7 +1240,8 @@ async def start_random_autominigame(chat_id: int, context: ContextTypes.DEFAULT_
             msg = await context.bot.send_message(
                 chat_id,
                 f"🧮 **TOÁN HỌC**\n\nTính: {question} = ?\n\n"
-                f"📝 {game.max_attempts} lần thử\n🏆 Ai trả lời đúng sẽ được điểm!",
+                f"📝 {game.max_attempts} lần thử\n"
+                f"🏆 Ai trả lời đúng sẽ được điểm!",
                 parse_mode="Markdown"
             )
             await add_game_message(chat_id, msg.message_id, context)
