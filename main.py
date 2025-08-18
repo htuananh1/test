@@ -16,13 +16,14 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
-CLAUDE_MODEL = "anthropic/claude-3.5-sonnet"
+CLAUDE_MODEL = "anthropic/claude-3.7-sonnet"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 GITHUB_REPO = "htuananh1/Data-manager"
 
 START_BALANCE = 1000
 CHAT_HISTORY_LIMIT = 20
+AUTO_MINIGAME_INTERVAL = 3600  # 1 giờ
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -64,6 +65,14 @@ class GitHubStorage:
                 
         except Exception as e:
             logger.error(f"Failed to save {path}: {e}")
+    
+    def _delete_file(self, path: str):
+        try:
+            file = self.repo.get_contents(path, ref=self.branch)
+            self.repo.delete_file(path, f"Delete old file: {path}", file.sha, self.branch)
+            logger.info(f"Deleted file: {path}")
+        except Exception as e:
+            logger.warning(f"Failed to delete {path}: {e}")
     
     def queue_update(self, update_type: str, data: dict):
         if update_type not in self._pending_updates:
@@ -268,6 +277,78 @@ class GitHubStorage:
     
     def add_math(self, math: dict):
         self.queue_update("math", math)
+    
+    def save_chat_info(self, chat_id: int, chat_type: str, title: str = None):
+        data = self._get_file_content("data/chats.json") or {"chats": []}
+        
+        # Kiểm tra chat đã tồn tại chưa
+        for i, chat in enumerate(data["chats"]):
+            if chat.get("id") == chat_id:
+                data["chats"][i] = {
+                    "id": chat_id,
+                    "type": chat_type,
+                    "title": title,
+                    "updated": datetime.now().isoformat()
+                }
+                self._save_file("data/chats.json", data, f"Update chat: {chat_id}")
+                return
+        
+        # Thêm chat mới
+        data["chats"].append({
+            "id": chat_id,
+            "type": chat_type,
+            "title": title,
+            "updated": datetime.now().isoformat()
+        })
+        self._save_file("data/chats.json", data, f"Add chat: {chat_id}")
+    
+    def get_all_groups(self) -> List[dict]:
+        data = self._get_file_content("data/chats.json")
+        if not data or "chats" not in data:
+            return []
+        
+        # Chỉ lấy groups và supergroups
+        groups = []
+        for chat in data["chats"]:
+            if chat.get("type") in ["group", "supergroup"]:
+                groups.append(chat)
+        return groups
+    
+    def save_chat_history(self, chat_id: int, messages: List[dict]):
+        data = {
+            "messages": messages[-CHAT_HISTORY_LIMIT:],
+            "chat_id": chat_id,
+            "saved_at": datetime.now().isoformat()
+        }
+        self._save_file(f"data/chat_history/{chat_id}.json", data, f"Save chat history: {chat_id}")
+    
+    def get_chat_history(self, chat_id: int) -> List[dict]:
+        data = self._get_file_content(f"data/chat_history/{chat_id}.json")
+        if data:
+            # Kiểm tra xem đã quá 24h chưa
+            saved_at = datetime.fromisoformat(data.get("saved_at", datetime.now().isoformat()))
+            if datetime.now() - saved_at > timedelta(hours=24):
+                # Xóa file cũ
+                self._delete_file(f"data/chat_history/{chat_id}.json")
+                return []
+            return data.get("messages", [])
+        return []
+    
+    def cleanup_old_chat_histories(self):
+        # Lấy danh sách tất cả chats
+        chats_data = self._get_file_content("data/chats.json")
+        if not chats_data:
+            return
+        
+        for chat in chats_data.get("chats", []):
+            chat_id = chat.get("id")
+            if chat_id:
+                history_data = self._get_file_content(f"data/chat_history/{chat_id}.json")
+                if history_data:
+                    saved_at = datetime.fromisoformat(history_data.get("saved_at", datetime.now().isoformat()))
+                    if datetime.now() - saved_at > timedelta(hours=24):
+                        self._delete_file(f"data/chat_history/{chat_id}.json")
+                        logger.info(f"Deleted old chat history for {chat_id}")
 
 try:
     storage = GitHubStorage(GITHUB_TOKEN, GITHUB_REPO)
@@ -279,6 +360,7 @@ active_games: Dict[int, dict] = {}
 chat_history: Dict[int, List[dict]] = {}
 minigame_sessions: Dict[int, dict] = {}
 quiz_history: Dict[int, List[str]] = {}
+auto_minigame_enabled: Dict[int, bool] = {}
 
 def _fmt_money(x: int) -> str:
     return f"{x:,}".replace(",", ".")
@@ -673,6 +755,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username = user.username or user.first_name
         balance = get_user_balance(user.id)
         
+        # Lưu thông tin chat
+        chat = update.effective_chat
+        if storage:
+            storage.save_chat_info(chat.id, chat.type, chat.title)
+        
         message = f"""👋 Xin chào {username}! Mình là Linh Bot!
 
 💰 Số dư của bạn: {_fmt_money(balance)}
@@ -680,6 +767,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎮 **Minigame:**
 /minigame - Chơi ngẫu nhiên các game
 /stopmini - Dừng minigame
+/autominigame - Bật/tắt minigame tự động (mỗi giờ)
 ⚡ Ai trả lời đúng sẽ được điểm!
 
 📝 **Chơi riêng lẻ:**
@@ -706,6 +794,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📊 /top - Bảng xếp hạng\n"
             "💰 /bal - Xem số dư"
         )
+
+async def autominigame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = update.effective_chat.id
+        chat = update.effective_chat
+        
+        # Chỉ cho phép trong group
+        if chat.type not in ["group", "supergroup"]:
+            await update.message.reply_text("⚠️ Chỉ sử dụng được trong nhóm!")
+            return
+        
+        # Toggle auto minigame
+        if chat_id not in auto_minigame_enabled:
+            auto_minigame_enabled[chat_id] = True
+        else:
+            auto_minigame_enabled[chat_id] = not auto_minigame_enabled[chat_id]
+        
+        status = "BẬT" if auto_minigame_enabled[chat_id] else "TẮT"
+        await update.message.reply_text(f"🎮 Minigame tự động đã được **{status}**\n\nMinigame sẽ tự động chạy mỗi giờ!", parse_mode="Markdown")
+        
+        # Lưu thông tin chat
+        if storage:
+            storage.save_chat_info(chat.id, chat.type, chat.title)
+            
+    except Exception as e:
+        logger.error(f"Error in autominigame: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
 async def bal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -789,19 +904,22 @@ async def guessnumber_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
         
-        if chat_id in active_games:
-            del active_games[chat_id]
+        if chat_id not in minigame_sessions:
+            if chat_id in active_games:
+                del active_games[chat_id]
             
-        game = GuessNumberGame(chat_id)
-        active_games[chat_id] = {"type": "guessnumber", "game": game}
-        
-        await update.message.reply_text(f"""🎮 ĐOÁN SỐ 1-999
+            game = GuessNumberGame(chat_id)
+            active_games[chat_id] = {"type": "guessnumber", "game": game}
+            
+            await update.message.reply_text(f"""🎮 ĐOÁN SỐ 1-999
 
 💡 {game.riddle}
 📝 15 lần | 💰 5000đ
 /hint - Gợi ý (-500đ, tối đa 4 lần)
 
 Đoán đi!""")
+        else:
+            await update.message.reply_text("⚠️ Đang trong minigame! Dùng /stopmini để dừng.")
     except Exception as e:
         logger.error(f"Error in guessnumber: {e}")
         await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
@@ -810,32 +928,35 @@ async def quiz1_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
         
-        if chat_id in active_games:
-            del active_games[chat_id]
-        
-        loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi...")
-        
-        game = VietnameseQuiz1Game(chat_id)
-        quiz = await game.generate_quiz()
-        
-        if not quiz:
-            await loading_msg.edit_text("❌ Lỗi tạo câu hỏi!")
-            return
-        
-        game.current_quiz = quiz
-        active_games[chat_id] = {"type": "quiz1", "game": game}
-        
-        keyboard = []
-        for option in quiz["options"]:
-            keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await loading_msg.edit_text(
-            f"❓ **{quiz['topic']}**\n\n{quiz['question']}",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
+        if chat_id not in minigame_sessions:
+            if chat_id in active_games:
+                del active_games[chat_id]
+            
+            loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi...")
+            
+            game = VietnameseQuiz1Game(chat_id)
+            quiz = await game.generate_quiz()
+            
+            if not quiz:
+                await loading_msg.edit_text("❌ Lỗi tạo câu hỏi!")
+                return
+            
+            game.current_quiz = quiz
+            active_games[chat_id] = {"type": "quiz1", "game": game}
+            
+            keyboard = []
+            for option in quiz["options"]:
+                keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await loading_msg.edit_text(
+                f"❓ **{quiz['topic']}**\n\n{quiz['question']}",
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("⚠️ Đang trong minigame! Dùng /stopmini để dừng.")
     except Exception as e:
         logger.error(f"Error in quiz1: {e}")
         await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
@@ -844,25 +965,28 @@ async def quiz2_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
         
-        if chat_id in active_games:
-            del active_games[chat_id]
-        
-        loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi...")
-        
-        game = VietnameseQuiz2Game(chat_id)
-        quiz = await game.generate_quiz()
-        
-        if not quiz:
-            await loading_msg.edit_text("❌ Lỗi tạo câu hỏi!")
-            return
-        
-        game.current_quiz = quiz
-        active_games[chat_id] = {"type": "quiz2", "game": game}
-        
-        await loading_msg.edit_text(
-            f"❓ **{quiz['topic']}**\n\n{quiz['question']}\n\n💡 Trả lời ngắn gọn (1-3 từ)",
-            parse_mode="Markdown"
-        )
+        if chat_id not in minigame_sessions:
+            if chat_id in active_games:
+                del active_games[chat_id]
+            
+            loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi...")
+            
+            game = VietnameseQuiz2Game(chat_id)
+            quiz = await game.generate_quiz()
+            
+            if not quiz:
+                await loading_msg.edit_text("❌ Lỗi tạo câu hỏi!")
+                return
+            
+            game.current_quiz = quiz
+            active_games[chat_id] = {"type": "quiz2", "game": game}
+            
+            await loading_msg.edit_text(
+                f"❓ **{quiz['topic']}**\n\n{quiz['question']}\n\n💡 Trả lời ngắn gọn (1-3 từ)",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("⚠️ Đang trong minigame! Dùng /stopmini để dừng.")
     except Exception as e:
         logger.error(f"Error in quiz2: {e}")
         await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
@@ -871,24 +995,27 @@ async def math_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
         
-        if chat_id in active_games:
-            del active_games[chat_id]
-        
-        loading_msg = await update.message.reply_text("⏳ Đang tạo bài toán...")
-        
-        game = MathQuizGame(chat_id)
-        question = await game.generate_question()
-        
-        if not question:
-            await loading_msg.edit_text("❌ Lỗi tạo câu hỏi!")
-            return
-        
-        active_games[chat_id] = {"type": "math", "game": game}
-        
-        await loading_msg.edit_text(
-            f"🧮 **TOÁN HỌC**\n\nTính: {question} = ?\n\n📝 Bạn có {game.max_attempts} lần thử",
-            parse_mode="Markdown"
-        )
+        if chat_id not in minigame_sessions:
+            if chat_id in active_games:
+                del active_games[chat_id]
+            
+            loading_msg = await update.message.reply_text("⏳ Đang tạo bài toán...")
+            
+            game = MathQuizGame(chat_id)
+            question = await game.generate_question()
+            
+            if not question:
+                await loading_msg.edit_text("❌ Lỗi tạo câu hỏi!")
+                return
+            
+            active_games[chat_id] = {"type": "math", "game": game}
+            
+            await loading_msg.edit_text(
+                f"🧮 **TOÁN HỌC**\n\nTính: {question} = ?\n\n📝 Bạn có {game.max_attempts} lần thử",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("⚠️ Đang trong minigame! Dùng /stopmini để dừng.")
     except Exception as e:
         logger.error(f"Error in math: {e}")
         await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
@@ -1095,7 +1222,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     result = f"❌ Sai rồi! Đáp án: {quiz['correct']}\n\n{quiz['explanation']}"
                 
-                await query.message.edit_text(result, parse_mode="Markdown")
+                await context.bot.send_message(chat_id, result, parse_mode="Markdown")
                 
                 del active_games[chat_id]
                 
@@ -1111,6 +1238,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         user = update.effective_user
         username = user.username or user.first_name
+        
+        # Lưu thông tin chat
+        chat = update.effective_chat
+        if storage and chat.type in ["group", "supergroup"]:
+            storage.save_chat_info(chat.id, chat.type, chat.title)
         
         if chat_id in active_games:
             game_info = active_games[chat_id]
@@ -1177,8 +1309,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             return
         
+        # Chat AI - Lấy history từ GitHub hoặc local
         if chat_id not in chat_history:
-            chat_history[chat_id] = []
+            if storage:
+                history = storage.get_chat_history(chat_id)
+                chat_history[chat_id] = history if history else []
+            else:
+                chat_history[chat_id] = []
             
         chat_history[chat_id].append({"role": "user", "content": message})
         
@@ -1195,6 +1332,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if response:
             chat_history[chat_id].append({"role": "assistant", "content": response})
             await update.message.reply_text(response)
+            
+            # Lưu chat history vào GitHub
+            if storage:
+                storage.save_chat_history(chat_id, chat_history[chat_id])
         else:
             await update.message.reply_text("😊 Mình đang nghĩ... Thử lại nhé!")
     except Exception as e:
@@ -1209,8 +1350,54 @@ async def periodic_batch_save(application: Application):
         except Exception as e:
             logger.error(f"Batch save error: {e}")
 
+async def auto_minigame_scheduler(application: Application):
+    while True:
+        await asyncio.sleep(AUTO_MINIGAME_INTERVAL)
+        try:
+            if not storage:
+                continue
+                
+            groups = storage.get_all_groups()
+            
+            for group in groups:
+                chat_id = group.get("id")
+                if chat_id and auto_minigame_enabled.get(chat_id, False):
+                    # Kiểm tra không có minigame đang chạy
+                    if chat_id not in minigame_sessions:
+                        minigame_sessions[chat_id] = {
+                            "active": True,
+                            "current_game": None,
+                            "games_played": 0,
+                            "start_time": datetime.now(),
+                            "starter_name": "Linh Bot (Auto)"
+                        }
+                        
+                        await application.bot.send_message(
+                            chat_id,
+                            "🎮 **MINIGAME TỰ ĐỘNG BẮT ĐẦU!**\n\nCùng chơi game nào! 🎉",
+                            parse_mode="Markdown"
+                        )
+                        
+                        await start_random_minigame(chat_id, application)
+                        
+                        logger.info(f"Started auto minigame in group {chat_id}")
+                        
+        except Exception as e:
+            logger.error(f"Auto minigame scheduler error: {e}")
+
+async def cleanup_old_histories(application: Application):
+    while True:
+        await asyncio.sleep(3600)  # Mỗi giờ
+        try:
+            if storage:
+                storage.cleanup_old_chat_histories()
+        except Exception as e:
+            logger.error(f"Cleanup histories error: {e}")
+
 async def post_init(application: Application) -> None:
     asyncio.create_task(periodic_batch_save(application))
+    asyncio.create_task(auto_minigame_scheduler(application))
+    asyncio.create_task(cleanup_old_histories(application))
     logger.info("Bot started successfully!")
 
 async def post_shutdown(application: Application) -> None:
@@ -1227,6 +1414,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("minigame", minigame_cmd))
     application.add_handler(CommandHandler("stopmini", stop_minigame_cmd))
+    application.add_handler(CommandHandler("autominigame", autominigame_cmd))
     application.add_handler(CommandHandler("guessnumber", guessnumber_cmd))
     application.add_handler(CommandHandler("quiz1", quiz1_cmd))
     application.add_handler(CommandHandler("quiz2", quiz2_cmd))
