@@ -342,6 +342,7 @@ game_start_times: Dict[int, datetime] = {}
 wrong_answer_cooldowns: Dict[Tuple[int, int], datetime] = {}
 minigame_groups: Set[int] = set()
 user_answered: Dict[Tuple[int, int], bool] = {}
+quiz_scheduling: Dict[int, datetime] = {}  # Track quiz scheduling
 
 def _fmt_money(x: int) -> str:
     return f"{x:,}".replace(",", ".")
@@ -397,12 +398,56 @@ async def generate_quiz_with_gemini(topic: str, difficulty: str, retry_count: in
             "cực khó": "cực kỳ khó, chỉ người am hiểu sâu mới biết, có thể là những chi tiết rất cụ thể"
         }
         
+        # Hướng dẫn đặc biệt cho từng chủ đề
+        topic_guide = {
+            "Bóng đá": """về bóng đá thế giới bao gồm:
+- Các giải đấu: World Cup, Euro, Copa America, Champions League, Europa League, Premier League, La Liga, Serie A, Bundesliga, Ligue 1
+- Câu lạc bộ nổi tiếng: Real Madrid, Barcelona, Manchester United, Liverpool, Bayern Munich, Juventus, PSG, v.v.
+- Cầu thủ huyền thoại và hiện tại: Pele, Maradona, Messi, Ronaldo, Neymar, Mbappe, Haaland, v.v.
+- Huấn luyện viên nổi tiếng: Pep Guardiola, Jurgen Klopp, Jose Mourinho, Carlo Ancelotti, v.v.
+- Lịch sử bóng đá: các kỷ lục, thành tích, sự kiện quan trọng
+- Luật bóng đá, công nghệ VAR, các vị trí trong sân
+- Chuyển nhượng kỷ lục, derby nổi tiếng, sân vận động lớn""",
+            "Địa lý": "về địa lý THẾ GIỚI - các quốc gia, thủ đô, dãy núi, sông ngòi, đại dương, sa mạc, hồ, eo biển, quần đảo trên TOÀN THẾ GIỚI",
+            "Lịch sử": "về lịch sử THẾ GIỚI - các nền văn minh cổ đại, đế chế, chiến tranh, nhân vật lịch sử, sự kiện quan trọng của TOÀN THẾ GIỚI",
+            "Kĩ năng sống": "về kỹ năng sống, tâm lý học, giao tiếp, phát triển bản thân, sức khỏe tinh thần",
+            "Động vật": "về động vật trên khắp thế giới, đặc điểm sinh học, môi trường sống, hành vi, các loài quý hiếm",
+            "Anime & Manga": "về anime và manga Nhật Bản, các series nổi tiếng, nhân vật, tác giả, studio"
+        }
+        
         # Thêm hướng dẫn để tránh tạo câu hỏi trùng
         avoid_duplicate = ""
         if retry_count > 0:
             avoid_duplicate = f"\nLưu ý: Đây là lần thử thứ {retry_count + 1}, hãy tạo câu hỏi HOÀN TOÀN MỚI và KHÁC BIỆT."
         
-        prompt = f"""Tạo 1 câu hỏi trắc nghiệm về chủ đề "{topic}" với độ khó "{difficulty}" ({difficulty_guide[difficulty]}).{avoid_duplicate}
+        # Nhấn mạnh phạm vi toàn cầu cho lịch sử và địa lý
+        global_emphasis = ""
+        if topic in ["Địa lý", "Lịch sử"]:
+            global_emphasis = "\n\n⚠️ QUAN TRỌNG: Câu hỏi PHẢI về phạm vi THẾ GIỚI/QUỐC TẾ, KHÔNG chỉ riêng về Việt Nam!"
+        
+        # Thêm hướng dẫn đa dạng cho bóng đá
+        football_variety = ""
+        if topic == "Bóng đá":
+            football_variety = "\n\n⚠️ QUAN TRỌNG: Tạo câu hỏi ĐA DẠNG về nhiều khía cạnh của bóng đá, KHÔNG CHỈ về World Cup!"
+        
+        # Ví dụ cụ thể cho bóng đá
+        football_examples = ""
+        if topic == "Bóng đá":
+            football_examples = """
+
+Ví dụ câu hỏi tốt về Bóng đá:
+- Câu lạc bộ nào vô địch Champions League nhiều nhất?
+- Ai là cầu thủ ghi nhiều bàn nhất lịch sử Premier League?
+- Derby nào được gọi là "El Clasico"?
+- Sân vận động nào có sức chứa lớn nhất châu Âu?
+- Cầu thủ nào giữ kỷ lục chuyển nhượng đắt nhất?
+- Đội tuyển nào vô địch Euro 2020?
+- Ai được mệnh danh là "The Special One"?
+- Luật việt vị được thay đổi như thế nào năm 2022?"""
+        
+        prompt = f"""Tạo 1 câu hỏi trắc nghiệm về chủ đề "{topic}" với độ khó "{difficulty}" ({difficulty_guide[difficulty]}).
+
+Chủ đề cụ thể: {topic_guide.get(topic, topic)}{global_emphasis}{football_variety}{avoid_duplicate}
 
 Yêu cầu:
 1. Câu hỏi phải thú vị, có giá trị kiến thức
@@ -410,6 +455,18 @@ Yêu cầu:
 3. Giải thích phải chi tiết, có thông tin bổ ích
 4. Hoàn toàn bằng tiếng Việt
 5. Câu hỏi phải CỤ THỂ và ĐỘC ĐÁO
+6. Với Địa lý và Lịch sử: tập trung vào các quốc gia, sự kiện, địa điểm TRÊN TOÀN THẾ GIỚI
+7. Với Bóng đá: ĐA DẠNG các khía cạnh - giải đấu, CLB, cầu thủ, HLV, kỷ lục, luật, sân vận động, v.v.{football_examples}
+
+Ví dụ câu hỏi tốt về Địa lý thế giới:
+- Eo biển nào ngăn cách châu Âu và châu Phi?
+- Thành phố nào là thủ đô của Argentina?
+- Sa mạc Sahara nằm ở châu lục nào?
+
+Ví dụ câu hỏi tốt về Lịch sử thế giới:
+- Ai là hoàng đế đầu tiên của đế chế La Mã?
+- Chiến tranh thế giới thứ nhất bắt đầu năm nào?
+- Nền văn minh Maya phát triển ở khu vực nào?
 
 Trả về JSON với format:
 {{
@@ -423,7 +480,7 @@ Trả về JSON với format:
         messages = [
             {
                 "role": "system",
-                "content": "Bạn là chuyên gia tạo câu hỏi trắc nghiệm chất lượng cao. Luôn tạo câu hỏi mới và độc đáo. Chỉ trả về JSON, không giải thích thêm."
+                "content": "Bạn là chuyên gia tạo câu hỏi trắc nghiệm chất lượng cao về các chủ đề toàn cầu. Với Bóng đá, hãy tạo câu hỏi ĐA DẠNG về mọi khía cạnh: các giải đấu khác nhau, CLB, cầu thủ, HLV, lịch sử, kỷ lục, luật, công nghệ, sân vận động - KHÔNG CHỈ World Cup. Chỉ trả về JSON, không giải thích thêm."
             },
             {
                 "role": "user",
@@ -546,18 +603,39 @@ async def cleanup_game(chat_id: int):
     if chat_id in game_start_times:
         del game_start_times[chat_id]
     
+    # Cleanup quiz scheduling tracker
+    if chat_id in quiz_scheduling:
+        del quiz_scheduling[chat_id]
+    
     keys_to_remove = [key for key in user_answered.keys() if key[0] == chat_id]
     for key in keys_to_remove:
         del user_answered[key]
 
 async def schedule_next_quiz(chat_id: int, context: ContextTypes.DEFAULT_TYPE, delay: int = 5):
     try:
+        # Check xem có đang schedule quiz không
+        if chat_id in quiz_scheduling:
+            last_schedule = quiz_scheduling[chat_id]
+            if (datetime.now() - last_schedule).total_seconds() < delay:
+                logger.warning(f"Quiz already scheduled recently for chat {chat_id}")
+                return
+        
+        quiz_scheduling[chat_id] = datetime.now()
+        
         await asyncio.sleep(delay)
+        
         if chat_id in minigame_groups:
             logger.info(f"Creating new quiz for chat {chat_id}")
             await start_random_minigame(chat_id, context)
+            
+        # Cleanup scheduling tracker
+        if chat_id in quiz_scheduling:
+            del quiz_scheduling[chat_id]
+            
     except Exception as e:
         logger.error(f"Error scheduling next quiz for {chat_id}: {e}")
+        if chat_id in quiz_scheduling:
+            del quiz_scheduling[chat_id]
 
 async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -705,7 +783,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Bot tự động tạo quiz với Gemini AI!
 
 📚 **Các chủ đề:**
-{', '.join(QUIZ_TOPICS)}
+⚽ Bóng đá - Giải đấu, CLB, cầu thủ, HLV, kỷ lục
+🌍 Địa lý thế giới - Các quốc gia, thủ đô, địa hình toàn cầu
+📜 Lịch sử thế giới - Sự kiện, nhân vật lịch sử toàn cầu  
+💡 Kĩ năng sống - Phát triển bản thân, tâm lý
+🦁 Động vật - Các loài động vật trên thế giới
+🎌 Anime & Manga - Văn hóa Nhật Bản
 
 ⚡ **Độ khó:** Bình thường, Khó, Cực khó
 
@@ -901,59 +984,119 @@ async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
-        await query.answer()
+        
+        # Answer với cache_time để tránh spam click
+        await query.answer(cache_time=5)
         
         data = query.data
         chat_id = update.effective_chat.id
         user = update.effective_user
         username = user.username or user.first_name
         
+        # Check game còn active không
+        if chat_id not in active_games:
+            await query.answer("⏰ Quiz đã kết thúc!", show_alert=True)
+            return
+        
+        # Check user đã trả lời chưa
         user_key = (chat_id, user.id)
         if user_key in user_answered:
             await query.answer("⚠️ Bạn đã trả lời rồi!", show_alert=True)
             return
         
-        if chat_id in active_games:
-            game_info = active_games[chat_id]
-            game = game_info["game"]
+        game_info = active_games[chat_id]
+        game = game_info["game"]
+        
+        # Đánh dấu user đã trả lời NGAY LẬP TỨC
+        user_answered[user_key] = True
+        
+        if data.startswith("quiz_") and game_info["type"] == "quiz":
+            quiz = game.current_quiz
+            answer = data.split("_")[1]
             
-            user_answered[user_key] = True
+            correct_option = quiz['correct']
+            correct_answer_text = quiz.get('correct_answer', '')
             
-            if data.startswith("quiz_") and game_info["type"] == "quiz":
-                quiz = game.current_quiz
-                answer = data.split("_")[1]
+            # Disable tất cả buttons ngay lập tức cho user này
+            try:
+                # Edit message để disable buttons
+                keyboard = []
+                for option in quiz["options"]:
+                    # Thêm emoji cho option user chọn
+                    if option[0] == answer:
+                        if answer == correct_option:
+                            text = f"✅ {option}"
+                        else:
+                            text = f"❌ {option}"
+                    else:
+                        text = option
+                    keyboard.append([InlineKeyboardButton(text, callback_data=f"disabled_{option[0]}")])
                 
-                correct_option = quiz['correct']
-                correct_answer_text = quiz.get('correct_answer', '')
+                reply_markup = InlineKeyboardMarkup(keyboard)
                 
-                if answer == correct_option:
-                    points = 300
-                    result = f"🎉 **{username}** trả lời chính xác! (+{points}đ)\n\n"
-                    result += f"✅ Đáp án: **{correct_option}**"
-                    if correct_answer_text:
-                        result += f" - {correct_answer_text}"
-                    result += f"\n💡 {quiz.get('explanation', '')}"
-                    
-                    update_user_balance(user.id, username, points, "quiz")
-                else:
-                    result = f"❌ **{username}** - Chưa đúng!\n\n"
-                    result += f"✅ Đáp án đúng: **{correct_option}**"
-                    if correct_answer_text:
-                        result += f" - {correct_answer_text}"
-                    result += f"\n💡 {quiz.get('explanation', '')}"
+                # Update message với buttons đã disable cho user này
+                source_text = ""
+                if quiz.get("generated"):
+                    source_text = " ✨"
                 
-                msg = await context.bot.send_message(chat_id, result, parse_mode="Markdown")
+                await query.edit_message_text(
+                    f"❓ **{quiz['topic']}{source_text}**\n\n"
+                    f"{quiz['question']}\n\n"
+                    f"🏆 Ai trả lời đúng sẽ được 300 điểm!\n"
+                    f"⚠️ Mỗi người chỉ được chọn 1 lần!\n\n"
+                    f"👤 **{username}** đã chọn: {answer}",
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.warning(f"Cannot edit message for user {user.id}: {e}")
+            
+            # Delay nhỏ để tránh spam
+            await asyncio.sleep(0.5)
+            
+            # Tạo kết quả
+            if answer == correct_option:
+                points = 300
+                result = f"🎉 **{username}** trả lời chính xác! (+{points}đ)\n\n"
+                result += f"✅ Đáp án: **{correct_option}**"
+                if correct_answer_text:
+                    result += f" - {correct_answer_text}"
+                result += f"\n💡 {quiz.get('explanation', '')}"
                 
-                if game_info.get("minigame"):
-                    await add_game_message(chat_id, msg.message_id, context)
-                
-                await cleanup_game(chat_id)
-                
-                if chat_id in minigame_groups:
-                    asyncio.create_task(schedule_next_quiz(chat_id, context, 5))
+                update_user_balance(user.id, username, points, "quiz")
+            else:
+                result = f"❌ **{username}** - Chưa đúng!\n\n"
+                result += f"✅ Đáp án đúng: **{correct_option}**"
+                if correct_answer_text:
+                    result += f" - {correct_answer_text}"
+                result += f"\n💡 {quiz.get('explanation', '')}"
+            
+            msg = await context.bot.send_message(chat_id, result, parse_mode="Markdown")
+            
+            if game_info.get("minigame"):
+                await add_game_message(chat_id, msg.message_id, context)
+            
+            # Đợi 1 chút trước khi cleanup để tránh race condition
+            await asyncio.sleep(1)
+            
+            # Cleanup game
+            await cleanup_game(chat_id)
+            
+            # Schedule next quiz nếu là minigame
+            if chat_id in minigame_groups:
+                asyncio.create_task(schedule_next_quiz(chat_id, context, 5))
+        
+        # Handle disabled buttons
+        elif data.startswith("disabled_"):
+            await query.answer("⚠️ Bạn đã trả lời rồi!", show_alert=True)
+            return
                         
     except Exception as e:
         logger.error(f"Error in button callback: {e}")
+        try:
+            await query.answer("❌ Có lỗi xảy ra!", show_alert=True)
+        except:
+            pass
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1080,7 +1223,7 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(cleanup_memory(application))
     asyncio.create_task(quiz_health_check(application))
     asyncio.create_task(load_minigame_groups(application))
-    logger.info("Bot started successfully - Gemini Quiz Generator with Duplicate Check!")
+    logger.info("Bot started successfully - Gemini Quiz Generator with Extended Football Topics!")
 
 async def post_shutdown(application: Application) -> None:
     for task in game_timeouts.values():
@@ -1111,7 +1254,7 @@ def main():
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot - Gemini Quiz Generator with Duplicate Check! 💕")
+    logger.info("Linh Bot - Gemini Quiz Generator with Extended Football Topics! 💕")
     application.run_polling()
 
 if __name__ == "__main__":
