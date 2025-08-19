@@ -7,6 +7,7 @@ import json
 import base64
 import unicodedata
 import re
+import html
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Set
 from collections import deque
@@ -17,7 +18,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
-CHAT_MODEL = "alibaba/qwen-3-235b"
+CHAT_MODEL = "google/gemini-2.5-flash-lite"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 GITHUB_REPO = "htuananh1/Data-manager"
@@ -28,7 +29,24 @@ GAME_TIMEOUT = 600
 WRONG_ANSWER_COOLDOWN = 5
 MAX_GAME_MESSAGES = 5
 CHAT_SAVE_INTERVAL = 300
-QUIZ_CHECK_INTERVAL = 60  # Check mỗi 60 giây xem có cần tạo quiz mới không
+QUIZ_CHECK_INTERVAL = 60
+
+# OpenTDB Categories và difficulties
+QUIZ_CATEGORIES = {
+    9: "Kiến thức tổng quát",
+    17: "Khoa học & Thiên nhiên", 
+    18: "Khoa học máy tính",
+    21: "Thể thao",
+    22: "Địa lý",
+    23: "Lịch sử", 
+    25: "Nghệ thuật",
+    27: "Động vật",
+    31: "Anime & Manga",
+    11: "Phim ảnh",
+    12: "Âm nhạc"
+}
+
+DIFFICULTIES = ["medium", "hard"]
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -121,22 +139,26 @@ class GitHubStorage:
             
             self._save_file("data/scores.json", scores_data, f"Batch update scores at {timestamp}")
         
-        if "quiz" in self._pending_updates:
-            quiz_data = self._get_file_content("data/quiz_pool.json") or {"questions": []}
+        # CHỈ LƯU QUIZ ĐÃ DỊCH
+        if "translated_quiz" in self._pending_updates:
+            quiz_data = self._get_file_content("data/translated_quiz_pool.json") or {"questions": []}
             
-            for quiz in self._pending_updates["quiz"]:
+            for quiz in self._pending_updates["translated_quiz"]:
+                # Kiểm tra trùng lặp dựa trên câu hỏi đã dịch
                 duplicate = False
                 for existing in quiz_data["questions"]:
                     if existing.get("question") == quiz.get("question"):
                         duplicate = True
                         break
+                
                 if not duplicate:
                     quiz_data["questions"].append(quiz)
+                    logger.info(f"Added translated quiz to pool: {quiz['question'][:50]}...")
             
             quiz_data["total"] = len(quiz_data["questions"])
             quiz_data["last_updated"] = timestamp
             
-            self._save_file("data/quiz_pool.json", quiz_data, f"Batch update quiz at {timestamp}")
+            self._save_file("data/translated_quiz_pool.json", quiz_data, f"Batch update translated quiz at {timestamp}")
         
         current_time = datetime.now()
         for chat_id, chat_data in list(self._chat_save_queue.items()):
@@ -215,14 +237,16 @@ class GitHubStorage:
                 'games_played': {}
             }
     
-    def get_quiz_pool(self) -> List[dict]:
-        data = self._get_file_content("data/quiz_pool.json")
+    def get_translated_quiz_pool(self) -> List[dict]:
+        """Lấy pool quiz đã dịch"""
+        data = self._get_file_content("data/translated_quiz_pool.json")
         if data and "questions" in data:
             return data["questions"]
         return []
     
-    def add_quiz(self, quiz: dict):
-        self.queue_update("quiz", quiz)
+    def add_translated_quiz(self, quiz: dict):
+        """Thêm quiz đã dịch vào queue"""
+        self.queue_update("translated_quiz", quiz)
     
     def get_minigame_groups(self) -> Set[int]:
         data = self._get_file_content("data/minigame_groups.json")
@@ -266,7 +290,7 @@ active_games: Dict[int, dict] = {}
 chat_history: Dict[int, deque] = {}
 game_messages: Dict[int, List[int]] = {}
 game_timeouts: Dict[int, asyncio.Task] = {}
-game_start_times: Dict[int, datetime] = {}  # Theo dõi thời gian bắt đầu game
+game_start_times: Dict[int, datetime] = {}
 wrong_answer_cooldowns: Dict[Tuple[int, int], datetime] = {}
 minigame_groups: Set[int] = set()
 user_answered: Dict[Tuple[int, int], bool] = {}
@@ -298,14 +322,14 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
             "model": model or CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.3
+            "temperature": 0.1
         }
         
         response = requests.post(
             f"{BASE_URL}/chat/completions",
             headers=headers,
             json=data,
-            timeout=25
+            timeout=30
         )
         
         if response.status_code == 200:
@@ -315,6 +339,125 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
         logger.error(f"API call error: {e}")
         return None
 
+async def translate_text(text: str) -> str:
+    """Dịch text sang tiếng Việt bằng Gemini"""
+    try:
+        messages = [
+            {
+                "role": "system", 
+                "content": "You are a professional translator. Translate text to Vietnamese accurately. Only return the translation, no explanations."
+            },
+            {
+                "role": "user", 
+                "content": f"Translate to Vietnamese: {text}"
+            }
+        ]
+        
+        response = await call_api(messages, max_tokens=100)
+        if response:
+            translated = response.strip()
+            if translated.startswith('"') and translated.endswith('"'):
+                translated = translated[1:-1]
+            return translated
+        return text
+    except Exception as e:
+        logger.error(f"Translation error: {e}")
+        return text
+
+async def get_quiz_from_opentdb() -> Optional[dict]:
+    """Lấy quiz từ OpenTDB API, dịch và CHỈ LƯU KHI DỊCH THÀNH CÔNG"""
+    try:
+        category = random.choice(list(QUIZ_CATEGORIES.keys()))
+        difficulty = random.choice(DIFFICULTIES)
+        
+        url = f"https://opentdb.com/api.php?amount=1&category={category}&difficulty={difficulty}&type=multiple"
+        
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            if data["response_code"] == 0 and data["results"]:
+                quiz_data = data["results"][0]
+                
+                # Decode HTML entities
+                question = html.unescape(quiz_data["question"])
+                correct_answer = html.unescape(quiz_data["correct_answer"])
+                incorrect_answers = [html.unescape(ans) for ans in quiz_data["incorrect_answers"]]
+                
+                logger.info(f"Translating OpenTDB quiz with Gemini...")
+                
+                # Dịch câu hỏi
+                question_vn = await translate_text(question)
+                if question_vn == question:  # Dịch thất bại
+                    logger.warning("Failed to translate question")
+                    return None
+                
+                # Dịch đáp án đúng
+                correct_answer_vn = await translate_text(correct_answer)
+                if correct_answer_vn == correct_answer:  # Dịch thất bại
+                    logger.warning("Failed to translate correct answer")
+                    return None
+                
+                # Dịch các đáp án sai
+                incorrect_answers_vn = []
+                for ans in incorrect_answers:
+                    translated = await translate_text(ans)
+                    if translated == ans:  # Dịch thất bại
+                        logger.warning(f"Failed to translate incorrect answer: {ans}")
+                        return None
+                    incorrect_answers_vn.append(translated)
+                    await asyncio.sleep(0.1)
+                
+                # Tạo list tất cả đáp án và đảo trộn
+                all_answers = [correct_answer_vn] + incorrect_answers_vn
+                random.shuffle(all_answers)
+                
+                # Tìm vị trí đáp án đúng sau khi đảo
+                correct_index = all_answers.index(correct_answer_vn)
+                correct_letter = ["A", "B", "C", "D"][correct_index]
+                
+                # Format options với A, B, C, D
+                options = []
+                for i, answer in enumerate(all_answers):
+                    letter = ["A", "B", "C", "D"][i]
+                    options.append(f"{letter}. {answer}")
+                
+                # Tạo giải thích
+                explanation = f"Đáp án đúng là {correct_letter}. {correct_answer_vn}"
+                
+                difficulty_vn = "Trung bình" if difficulty == "medium" else "Khó"
+                topic = QUIZ_CATEGORIES.get(category, "Tổng quát")
+                
+                quiz = {
+                    "topic": f"{topic} ({difficulty_vn})",
+                    "question": question_vn,
+                    "options": options,
+                    "correct": correct_letter,
+                    "explanation": explanation,
+                    "source": "OpenTDB + Gemini",
+                    "original_question": question,  # Lưu câu gốc để debug
+                    "original_category": quiz_data["category"],
+                    "difficulty": difficulty,
+                    "translated_at": datetime.now().isoformat(),
+                    "created_at": datetime.now().isoformat()
+                }
+                
+                logger.info(f"Successfully translated quiz: {question_vn[:50]}...")
+                
+                # CHỈ LƯU KHI DỊCH THÀNH CÔNG
+                if storage:
+                    storage.add_translated_quiz(quiz)
+                    logger.info("Quiz saved to translated pool")
+                
+                return quiz
+                
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error getting quiz from OpenTDB: {e}")
+        return None
+
 class QuizGame:
     def __init__(self, chat_id: int):
         self.chat_id = chat_id
@@ -322,107 +465,18 @@ class QuizGame:
         self.current_quiz = None
         
     async def generate_quiz(self) -> dict:
-        existing_questions = []
+        # Thử lấy từ OpenTDB và dịch mới
+        quiz = await get_quiz_from_opentdb()
+        
+        if quiz:
+            return quiz
+        
+        # Fallback về pool quiz đã dịch
         if storage:
-            pool = storage.get_quiz_pool()
-            existing_questions = [q.get("question", "") for q in pool]
-        
-        prompt = """Hãy tạo ra một câu hỏi trắc nghiệm bằng tiếng Việt (1–3 câu), thuộc một trong các chủ đề sau:
-- Bóng đá thế giới
-- Công nghệ và khoa học
-- Địa danh nổi tiếng thế giới
-- Động vật và thực vật
-- Nghệ thuật và giải trí
-- Lịch sử thế giới
-- Thể thao Olympic
-- Văn học và ngôn ngữ
-- Ẩm thực thế giới
-- Thiên nhiên và môi trường
-
-Yêu cầu:
-1. Câu hỏi có 4 đáp án lựa chọn A, B, C, D.  
-2. Chỉ có duy nhất 1 đáp án đúng.  
-3. Nội dung chính xác, rõ ràng, không mơ hồ.
-4. Thêm giải thích chi tiết cho đáp án đúng.
-5. Xuất ra theo định dạng:  
-
-❓ [Chủ đề]  
-[Câu hỏi]  
-
-A. ...  
-B. ...  
-C. ...  
-D. ...  
-
-✅ Đáp án đúng: [Ký tự A/B/C/D]
-💡 Giải thích: [Giải thích chi tiết tại sao đáp án này đúng]"""
-
-        messages = [{"role": "user", "content": prompt}]
-        
-        max_retries = 5
-        for retry in range(max_retries):
-            try:
-                response = await call_api(messages, model=CHAT_MODEL, max_tokens=600)
-                
-                if response:
-                    lines = response.strip().split('\n')
-                    
-                    topic = ""
-                    question = ""
-                    options = []
-                    correct = ""
-                    explanation = ""
-                    
-                    for line in lines:
-                        line = line.strip()
-                        if line.startswith("❓"):
-                            topic = line.replace("❓", "").strip()
-                        elif line.startswith("A."):
-                            options.append(line)
-                        elif line.startswith("B."):
-                            options.append(line)
-                        elif line.startswith("C."):
-                            options.append(line)
-                        elif line.startswith("D."):
-                            options.append(line)
-                        elif line.startswith("✅"):
-                            correct = line.split(":")[-1].strip()[0].upper()
-                        elif line.startswith("💡"):
-                            explanation = line.replace("💡 Giải thích:", "").strip()
-                        elif line and not line.startswith(("❓", "A.", "B.", "C.", "D.", "✅", "💡")):
-                            if not question:
-                                question = line
-                    
-                    if question in existing_questions:
-                        logger.info(f"Duplicate question found, retrying... (attempt {retry + 1})")
-                        continue
-                    
-                    if topic and question and len(options) == 4 and correct in ["A", "B", "C", "D"]:
-                        quiz = {
-                            "topic": topic,
-                            "question": question,
-                            "options": options,
-                            "correct": correct,
-                            "explanation": explanation or f"Đáp án đúng là {correct}",
-                            "created_at": datetime.now().isoformat()
-                        }
-                        
-                        if storage:
-                            storage.add_quiz(quiz)
-                        
-                        logger.info(f"Generated new quiz: {question[:50]}...")
-                        return quiz
-                    else:
-                        logger.warning(f"Invalid quiz format, retrying... (attempt {retry + 1})")
-                        
-            except Exception as e:
-                logger.error(f"Error generating quiz (retry {retry}): {e}")
-        
-        if storage:
-            pool = storage.get_quiz_pool()
-            if pool:
-                fallback_quiz = random.choice(pool)
-                logger.info("Using fallback quiz from pool")
+            translated_pool = storage.get_translated_quiz_pool()
+            if translated_pool:
+                fallback_quiz = random.choice(translated_pool)
+                logger.info("Using fallback quiz from translated pool")
                 return fallback_quiz
         
         logger.error("Failed to generate or find any quiz")
@@ -449,7 +503,6 @@ async def add_game_message(chat_id: int, message_id: int, context: ContextTypes.
     await delete_old_messages(chat_id, context)
 
 async def cleanup_game(chat_id: int):
-    """Cleanup game data"""
     if chat_id in active_games:
         del active_games[chat_id]
     
@@ -463,13 +516,11 @@ async def cleanup_game(chat_id: int):
     if chat_id in game_start_times:
         del game_start_times[chat_id]
     
-    # Clear user answers for this chat
     keys_to_remove = [key for key in user_answered.keys() if key[0] == chat_id]
     for key in keys_to_remove:
         del user_answered[key]
 
 async def schedule_next_quiz(chat_id: int, context: ContextTypes.DEFAULT_TYPE, delay: int = 3):
-    """Schedule next quiz với error handling"""
     try:
         await asyncio.sleep(delay)
         if chat_id in minigame_groups:
@@ -479,7 +530,6 @@ async def schedule_next_quiz(chat_id: int, context: ContextTypes.DEFAULT_TYPE, d
         logger.error(f"Error scheduling next quiz for {chat_id}: {e}")
 
 async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Improved timeout handler với error handling"""
     try:
         await asyncio.sleep(GAME_TIMEOUT)
         
@@ -500,10 +550,8 @@ async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 logger.error(f"Error sending timeout message to {chat_id}: {e}")
         
-        # Cleanup current game
         await cleanup_game(chat_id)
         
-        # Schedule next quiz
         if chat_id in minigame_groups:
             asyncio.create_task(schedule_next_quiz(chat_id, context))
             
@@ -511,7 +559,6 @@ async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"Timeout handler cancelled for chat {chat_id}")
     except Exception as e:
         logger.error(f"Error in timeout handler for {chat_id}: {e}")
-        # Fallback: cleanup và tạo quiz mới
         await cleanup_game(chat_id)
         if chat_id in minigame_groups:
             asyncio.create_task(schedule_next_quiz(chat_id, context, 5))
@@ -524,7 +571,6 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             logger.info(f"Chat {chat_id} not in minigame groups")
             return
         
-        # Cleanup any existing game
         await cleanup_game(chat_id)
         
         loading_msg = await context.bot.send_message(
@@ -532,7 +578,7 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             f"🎲 **MINIGAME**\n"
             f"🎮 📝 Quiz Trắc Nghiệm\n"
             f"⏰ Tự đổi câu mới sau 10 phút\n\n"
-            f"⏳ Đang tải...",
+            f"⏳ Đang dịch quiz mới với Gemini...",
             parse_mode="Markdown"
         )
         await add_game_message(chat_id, loading_msg.message_id, context)
@@ -546,7 +592,6 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             logger.error(f"Failed to generate quiz for chat {chat_id}")
             error_msg = await context.bot.send_message(chat_id, "❌ Lỗi! Thử lại sau...")
             await add_game_message(chat_id, error_msg.message_id, context)
-            # Retry after 30 seconds
             asyncio.create_task(schedule_next_quiz(chat_id, context, 30))
             return
         
@@ -560,9 +605,14 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
+        # Hiển thị source nếu là quiz mới dịch
+        source_text = ""
+        if quiz.get("translated_at"):
+            source_text = " (Mới dịch)"
+        
         quiz_msg = await context.bot.send_message(
             chat_id,
-            f"❓ **{quiz['topic']}**\n\n"
+            f"❓ **{quiz['topic']}{source_text}**\n\n"
             f"{quiz['question']}\n\n"
             f"🏆 Ai trả lời đúng sẽ được 300 điểm!\n"
             f"⚠️ Mỗi người chỉ được chọn 1 lần!",
@@ -576,14 +626,12 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
         except:
             pass
         
-        # Create timeout task
         game_timeouts[chat_id] = asyncio.create_task(game_timeout_handler(chat_id, context))
         logger.info(f"Quiz created successfully for chat {chat_id}")
         
     except Exception as e:
         logger.error(f"Error in start_random_minigame for {chat_id}: {e}")
         await cleanup_game(chat_id)
-        # Retry after 60 seconds
         if chat_id in minigame_groups:
             asyncio.create_task(schedule_next_quiz(chat_id, context, 60))
 
@@ -603,15 +651,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if chat.id not in active_games:
                 asyncio.create_task(start_random_minigame(chat.id, context))
         
+        # Hiển thị số lượng quiz đã dịch
+        translated_count = 0
+        if storage:
+            translated_pool = storage.get_translated_quiz_pool()
+            translated_count = len(translated_pool)
+        
         message = f"""👋 Xin chào {username}! Mình là Linh Bot!
 
 💰 Số dư của bạn: {_fmt_money(balance)}
 
 🎮 **Minigame tự động trong nhóm**
-Bot sẽ tự động tạo quiz liên tục!
+Bot sẽ tự động tạo quiz từ OpenTDB + Gemini dịch!
 
 📝 **Chơi riêng lẻ:**
-/quiz - Quiz trắc nghiệm
+/quiz - Quiz trắc nghiệm từ OpenTDB
 
 📊 **Thông tin:**
 /top - Bảng xếp hạng
@@ -621,6 +675,8 @@ Bot sẽ tự động tạo quiz liên tục!
 🛠️ **Admin:**
 /clean - Dọn dẹp bot (chỉ admin)
 /stopminigame - Dừng minigame trong nhóm
+
+📚 **Quiz pool:** {translated_count} câu đã dịch
 
 💬 Chat riêng với mình để trò chuyện!"""
         
@@ -673,7 +729,6 @@ async def clean_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if storage:
             await storage.batch_save()
         
-        # Cleanup all games
         for chat_id in list(active_games.keys()):
             await cleanup_game(chat_id)
         
@@ -746,7 +801,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += "\n🎮 **Đã chơi:**\n"
             for game, count in games.items():
                 if game == "quiz":
-                    msg += f"• Quiz trắc nghiệm: {count} lần\n"
+                    msg += f"• Quiz Gemini: {count} lần\n"
         
         await update.message.reply_text(msg, parse_mode="Markdown")
         
@@ -766,7 +821,7 @@ async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Đang có game khác!")
             return
         
-        loading_msg = await update.message.reply_text("⏳ Đang tạo câu hỏi...")
+        loading_msg = await update.message.reply_text("⏳ Đang dịch quiz mới với Gemini...")
         
         game = QuizGame(chat_id)
         quiz = await game.generate_quiz()
@@ -784,8 +839,13 @@ async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
+        # Hiển thị source
+        source_text = ""
+        if quiz.get("translated_at"):
+            source_text = " (Mới dịch)"
+        
         await loading_msg.edit_text(
-            f"❓ **{quiz['topic']}**\n\n{quiz['question']}",
+            f"❓ **{quiz['topic']}{source_text}**\n\n{quiz['question']}",
             reply_markup=reply_markup,
             parse_mode="Markdown"
         )
@@ -835,10 +895,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if game_info.get("minigame"):
                     await add_game_message(chat_id, msg.message_id, context)
                 
-                # Cleanup current game
                 await cleanup_game(chat_id)
                 
-                # Schedule next quiz if in minigame group
                 if chat_id in minigame_groups:
                     asyncio.create_task(schedule_next_quiz(chat_id, context))
                         
@@ -875,11 +933,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_history[user_id].append({"role": "user", "content": message})
             
             messages = [
-                {"role": "system", "content": "Bạn là Linh - cô gái Việt Nam vui vẻ, thân thiện. Trả lời ngắn gọn."}
+                {"role": "system", "content": "You are Linh, a cheerful Vietnamese girl. Reply in Vietnamese, keep responses short and friendly."}
             ]
             messages.extend(list(chat_history[user_id]))
             
-            response = await call_api(messages, max_tokens=200)
+            response = await call_api(messages, max_tokens=150)
             
             if response:
                 chat_history[user_id].append({"role": "assistant", "content": response})
@@ -903,7 +961,6 @@ async def periodic_batch_save(application: Application):
             logger.error(f"Batch save error: {e}")
 
 async def quiz_health_check(application: Application):
-    """Health check để đảm bảo quiz luôn chạy"""
     while True:
         await asyncio.sleep(QUIZ_CHECK_INTERVAL)
         try:
@@ -916,10 +973,9 @@ async def quiz_health_check(application: Application):
                         asyncio.create_task(start_random_minigame(chat_id, application))
                         continue
                     
-                    # Check if game is stuck (running too long)
                     if chat_id in game_start_times:
                         game_duration = (current_time - game_start_times[chat_id]).total_seconds()
-                        if game_duration > GAME_TIMEOUT + 60:  # 1 minute grace period
+                        if game_duration > GAME_TIMEOUT + 60:
                             logger.warning(f"Game stuck for chat {chat_id}, restarting...")
                             await cleanup_game(chat_id)
                             asyncio.create_task(start_random_minigame(chat_id, application))
@@ -963,19 +1019,18 @@ async def load_minigame_groups(application: Application):
         for chat_id in minigame_groups:
             try:
                 await start_random_minigame(chat_id, application)
-                await asyncio.sleep(2)  # Tăng delay để tránh spam
+                await asyncio.sleep(2)
             except Exception as e:
                 logger.error(f"Error starting minigame for {chat_id}: {e}")
 
 async def post_init(application: Application) -> None:
     asyncio.create_task(periodic_batch_save(application))
     asyncio.create_task(cleanup_memory(application))
-    asyncio.create_task(quiz_health_check(application))  # Health check mới
+    asyncio.create_task(quiz_health_check(application))
     asyncio.create_task(load_minigame_groups(application))
-    logger.info("Bot started successfully!")
+    logger.info("Bot started successfully - Only saving translated quizzes!")
 
 async def post_shutdown(application: Application) -> None:
-    # Cleanup all tasks
     for task in game_timeouts.values():
         try:
             task.cancel()
@@ -1004,7 +1059,7 @@ def main():
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot is running! 💕")
+    logger.info("Linh Bot - Only translated quizzes saved! 💕")
     application.run_polling()
 
 if __name__ == "__main__":
