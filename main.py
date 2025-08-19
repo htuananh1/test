@@ -32,6 +32,7 @@ CHAT_SAVE_INTERVAL = 300
 QUIZ_CHECK_INTERVAL = 60
 MAX_QUIZ_RETRY = 3
 MAX_FILE_SIZE = 3 * 1024 * 1024  # 3MB
+ADMIN_ID = 2026797305  # Admin ID
 
 # Các đề tài quiz
 QUIZ_TOPICS = [
@@ -475,6 +476,7 @@ wrong_answer_cooldowns: Dict[Tuple[int, int], datetime] = {}
 minigame_groups: Set[int] = set()
 user_answered: Dict[Tuple[int, int], bool] = {}
 quiz_scheduling: Dict[int, datetime] = {}  # Track quiz scheduling
+quiz_creation_locks: Dict[int, asyncio.Lock] = {}  # Lock cho việc tạo quiz
 
 def _fmt_money(x: int) -> str:
     return f"{x:,}".replace(",", ".")
@@ -721,8 +723,8 @@ async def add_game_message(chat_id: int, message_id: int, context: ContextTypes.
     game_messages[chat_id].append(message_id)
     await delete_old_messages(chat_id, context)
 
-async def cleanup_game(chat_id: int):
-    if chat_id in active_games:
+async def cleanup_game(chat_id: int, keep_active: bool = False):
+    if not keep_active and chat_id in active_games:
         del active_games[chat_id]
     
     if chat_id in game_timeouts:
@@ -748,24 +750,31 @@ async def schedule_next_quiz(chat_id: int, context: ContextTypes.DEFAULT_TYPE, d
         # Check xem có đang schedule quiz không
         if chat_id in quiz_scheduling:
             last_schedule = quiz_scheduling[chat_id]
-            if (datetime.now() - last_schedule).total_seconds() < delay:
-                logger.warning(f"Quiz already scheduled recently for chat {chat_id}")
+            if (datetime.now() - last_schedule).total_seconds() < delay + 2:  # Thêm buffer 2s
+                logger.warning(f"Quiz already scheduled recently for chat {chat_id}, skipping")
                 return
         
         quiz_scheduling[chat_id] = datetime.now()
+        logger.info(f"Scheduled next quiz for chat {chat_id} after {delay}s delay")
         
         await asyncio.sleep(delay)
         
-        if chat_id in minigame_groups:
-            logger.info(f"Creating new quiz for chat {chat_id}")
-            await start_random_minigame(chat_id, context)
+        # Double check sau khi sleep
+        if chat_id not in minigame_groups:
+            logger.info(f"Chat {chat_id} no longer in minigame groups")
+            return
             
-        # Cleanup scheduling tracker
-        if chat_id in quiz_scheduling:
-            del quiz_scheduling[chat_id]
-            
+        if chat_id in active_games:
+            logger.warning(f"Game already active for chat {chat_id} after delay")
+            return
+        
+        logger.info(f"Creating new quiz for chat {chat_id}")
+        await start_random_minigame(chat_id, context)
+        
     except Exception as e:
         logger.error(f"Error scheduling next quiz for {chat_id}: {e}")
+    finally:
+        # Cleanup scheduling tracker
         if chat_id in quiz_scheduling:
             del quiz_scheduling[chat_id]
 
@@ -804,81 +813,104 @@ async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
             asyncio.create_task(schedule_next_quiz(chat_id, context, 5))
 
 async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        logger.info(f"Starting minigame for chat {chat_id}")
-        
-        if chat_id not in minigame_groups:
-            logger.info(f"Chat {chat_id} not in minigame groups")
-            return
-        
-        # Kiểm tra xem có đang có game không
-        if chat_id in active_games:
-            logger.warning(f"Game already active for chat {chat_id}, skipping")
-            return
-        
-        await cleanup_game(chat_id)
-        
-        loading_msg = await context.bot.send_message(
-            chat_id, 
-            f"🎲 **MINIGAME**\n"
-            f"🎮 📝 Quiz Trắc Nghiệm\n"
-            f"⏰ Tự đổi câu mới sau 10 phút\n\n"
-            f"⏳ Đang tạo quiz mới với Gemini...",
-            parse_mode="Markdown"
-        )
-        await add_game_message(chat_id, loading_msg.message_id, context)
-        
-        await asyncio.sleep(1)
-        
-        game = QuizGame(chat_id)
-        quiz = await game.generate_quiz()
-        
-        if not quiz:
-            logger.error(f"Failed to generate quiz for chat {chat_id}")
-            error_msg = await context.bot.send_message(chat_id, "❌ Lỗi! Thử lại sau...")
-            await add_game_message(chat_id, error_msg.message_id, context)
-            asyncio.create_task(schedule_next_quiz(chat_id, context, 30))
-            return
-        
-        game.current_quiz = quiz
-        active_games[chat_id] = {"type": "quiz", "game": game, "minigame": True}
-        game_start_times[chat_id] = datetime.now()
-        
-        keyboard = []
-        for option in quiz["options"]:
-            keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Hiển thị source
-        source_text = ""
-        if quiz.get("generated"):
-            source_text = " ✨"  # Icon cho quiz mới tạo
-        
-        quiz_msg = await context.bot.send_message(
-            chat_id,
-            f"❓ **{quiz['topic']}{source_text}**\n\n"
-            f"{quiz['question']}\n\n"
-            f"🏆 Ai trả lời đúng sẽ được 300 điểm!\n"
-            f"⚠️ Mỗi người chỉ được chọn 1 lần!",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
-        await add_game_message(chat_id, quiz_msg.message_id, context)
-        
+    # Tạo lock nếu chưa có
+    if chat_id not in quiz_creation_locks:
+        quiz_creation_locks[chat_id] = asyncio.Lock()
+    
+    # Acquire lock để đảm bảo chỉ 1 quiz được tạo
+    async with quiz_creation_locks[chat_id]:
         try:
-            await context.bot.delete_message(chat_id, loading_msg.message_id)
-        except:
-            pass
-        
-        game_timeouts[chat_id] = asyncio.create_task(game_timeout_handler(chat_id, context))
-        logger.info(f"Quiz created successfully for chat {chat_id}")
-        
-    except Exception as e:
-        logger.error(f"Error in start_random_minigame for {chat_id}: {e}")
-        await cleanup_game(chat_id)
-        if chat_id in minigame_groups:
-            asyncio.create_task(schedule_next_quiz(chat_id, context, 60))
+            logger.info(f"Starting minigame for chat {chat_id}")
+            
+            if chat_id not in minigame_groups:
+                logger.info(f"Chat {chat_id} not in minigame groups")
+                return
+            
+            # Double check xem có đang có game không
+            if chat_id in active_games:
+                logger.warning(f"Game already active for chat {chat_id}, skipping")
+                return
+            
+            # Check scheduling
+            if chat_id in quiz_scheduling:
+                logger.warning(f"Quiz is being scheduled for chat {chat_id}, skipping")
+                return
+            
+            # Set active game NGAY LẬP TỨC để prevent race condition
+            active_games[chat_id] = {"type": "quiz", "game": None, "minigame": True, "creating": True}
+            
+            await cleanup_game(chat_id, keep_active=True)  # Cleanup nhưng giữ active flag
+            
+            loading_msg = await context.bot.send_message(
+                chat_id, 
+                f"🎲 **MINIGAME**\n"
+                f"🎮 📝 Quiz Trắc Nghiệm\n"
+                f"⏰ Tự đổi câu mới sau 10 phút\n\n"
+                f"⏳ Đang tạo quiz mới với Gemini...",
+                parse_mode="Markdown"
+            )
+            await add_game_message(chat_id, loading_msg.message_id, context)
+            
+            await asyncio.sleep(1)
+            
+            game = QuizGame(chat_id)
+            quiz = await game.generate_quiz()
+            
+            if not quiz:
+                logger.error(f"Failed to generate quiz for chat {chat_id}")
+                error_msg = await context.bot.send_message(chat_id, "❌ Lỗi! Thử lại sau...")
+                await add_game_message(chat_id, error_msg.message_id, context)
+                
+                # Cleanup active games
+                if chat_id in active_games:
+                    del active_games[chat_id]
+                
+                asyncio.create_task(schedule_next_quiz(chat_id, context, 30))
+                return
+            
+            # Update active game với game object thật
+            game.current_quiz = quiz
+            active_games[chat_id] = {"type": "quiz", "game": game, "minigame": True}
+            game_start_times[chat_id] = datetime.now()
+            
+            keyboard = []
+            for option in quiz["options"]:
+                keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Hiển thị source
+            source_text = ""
+            if quiz.get("generated"):
+                source_text = " ✨"  # Icon cho quiz mới tạo
+            
+            quiz_msg = await context.bot.send_message(
+                chat_id,
+                f"❓ **{quiz['topic']}{source_text}**\n\n"
+                f"{quiz['question']}\n\n"
+                f"🏆 Ai trả lời đúng sẽ được 300 điểm!\n"
+                f"⚠️ Mỗi người chỉ được chọn 1 lần!",
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+            await add_game_message(chat_id, quiz_msg.message_id, context)
+            
+            try:
+                await context.bot.delete_message(chat_id, loading_msg.message_id)
+            except:
+                pass
+            
+            game_timeouts[chat_id] = asyncio.create_task(game_timeout_handler(chat_id, context))
+            logger.info(f"Quiz created successfully for chat {chat_id}")
+            
+        except Exception as e:
+            logger.error(f"Error in start_random_minigame for {chat_id}: {e}")
+            # Cleanup active games nếu lỗi
+            if chat_id in active_games:
+                del active_games[chat_id]
+            await cleanup_game(chat_id)
+            if chat_id in minigame_groups:
+                asyncio.create_task(schedule_next_quiz(chat_id, context, 60))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1024,7 +1056,7 @@ async def clean_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = update.effective_user
         
-        if user.id not in [1234567890]:
+        if user.id != ADMIN_ID:
             await update.message.reply_text("⚠️ Chỉ admin mới dùng được lệnh này!")
             return
         
@@ -1180,6 +1212,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         game_info = active_games[chat_id]
+        
+        # Check nếu game đang được tạo
+        if game_info.get("creating"):
+            await query.answer("⏳ Quiz đang được tạo...", show_alert=True)
+            return
+            
         game = game_info["game"]
         
         # Đánh dấu user đã trả lời NGAY LẬP TỨC
@@ -1264,8 +1302,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Cleanup game
             await cleanup_game(chat_id)
             
-            # Schedule next quiz nếu là minigame
-            if chat_id in minigame_groups:
+            # Schedule next quiz nếu là minigame - CHỈ SCHEDULE 1 LẦN
+            if chat_id in minigame_groups and chat_id not in quiz_scheduling:
                 asyncio.create_task(schedule_next_quiz(chat_id, context, 5))
         
         # Handle disabled buttons
@@ -1374,6 +1412,15 @@ async def cleanup_memory(application: Application):
             for key in keys_to_remove:
                 del user_answered[key]
             
+            # Cleanup locks cho các chat không active
+            inactive_chats = []
+            for chat_id in list(quiz_creation_locks.keys()):
+                if chat_id not in minigame_groups and chat_id not in active_games:
+                    inactive_chats.append(chat_id)
+            
+            for chat_id in inactive_chats:
+                del quiz_creation_locks[chat_id]
+            
             inactive_users = []
             for user_id in list(chat_history.keys()):
                 if len(chat_history[user_id]) == 0:
@@ -1382,7 +1429,7 @@ async def cleanup_memory(application: Application):
             for user_id in inactive_users:
                 del chat_history[user_id]
             
-            logger.info(f"Memory cleanup completed. Active chats: {len(chat_history)}, Active games: {len(active_games)}")
+            logger.info(f"Memory cleanup completed. Active chats: {len(chat_history)}, Active games: {len(active_games)}, Locks: {len(quiz_creation_locks)}")
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
 
@@ -1405,7 +1452,7 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(cleanup_memory(application))
     asyncio.create_task(quiz_health_check(application))
     asyncio.create_task(load_minigame_groups(application))
-    logger.info("Bot started successfully - Auto split files & Group leaderboards!")
+    logger.info("Bot started successfully - Fixed duplicate quiz issue!")
 
 async def post_shutdown(application: Application) -> None:
     for task in game_timeouts.values():
@@ -1437,7 +1484,7 @@ def main():
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot - Auto split files & Group leaderboards! 💕")
+    logger.info("Linh Bot - Fixed duplicate quiz issue! 💕")
     application.run_polling()
 
 if __name__ == "__main__":
