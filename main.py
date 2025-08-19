@@ -30,7 +30,8 @@ WRONG_ANSWER_COOLDOWN = 5
 MAX_GAME_MESSAGES = 5
 CHAT_SAVE_INTERVAL = 300
 QUIZ_CHECK_INTERVAL = 60
-MAX_QUIZ_RETRY = 3  # Số lần thử tạo quiz mới nếu trùng
+MAX_QUIZ_RETRY = 3
+MAX_FILE_SIZE = 3 * 1024 * 1024  # 3MB
 
 # Các đề tài quiz
 QUIZ_TOPICS = [
@@ -58,6 +59,7 @@ class GitHubStorage:
             self._last_batch_save = datetime.now()
             self._chat_save_queue = {}
             self._quiz_questions_cache = set()  # Cache câu hỏi để check nhanh
+            self._quiz_file_index = 0  # Track file index hiện tại
             logger.info("GitHub storage initialized successfully")
         except Exception as e:
             logger.error(f"Failed to init GitHub storage: {e}")
@@ -73,10 +75,57 @@ class GitHubStorage:
             logger.warning(f"File {path} not found or error: {e}")
             return None
     
+    def _get_file_size(self, path: str) -> int:
+        """Lấy kích thước file trên GitHub"""
+        try:
+            file = self.repo.get_contents(path, ref=self.branch)
+            return file.size
+        except:
+            return 0
+    
+    def _get_current_quiz_file(self) -> str:
+        """Tìm file quiz pool hiện tại (chưa đầy)"""
+        base_path = "data/translated_quiz_pool"
+        
+        # Check file gốc
+        if self._get_file_size(f"{base_path}.json") < MAX_FILE_SIZE:
+            return f"{base_path}.json"
+        
+        # Check các file đánh số
+        index = 1
+        while True:
+            file_path = f"{base_path}_{index}.json"
+            size = self._get_file_size(file_path)
+            if size == 0:  # File chưa tồn tại
+                return file_path
+            elif size < MAX_FILE_SIZE:  # File còn chỗ
+                return file_path
+            index += 1
+    
+    def _get_all_quiz_files(self) -> List[str]:
+        """Lấy danh sách tất cả file quiz"""
+        files = []
+        base_path = "data/translated_quiz_pool"
+        
+        # File gốc
+        if self._get_file_size(f"{base_path}.json") > 0:
+            files.append(f"{base_path}.json")
+        
+        # Các file đánh số
+        index = 1
+        while True:
+            file_path = f"{base_path}_{index}.json"
+            if self._get_file_size(file_path) == 0:
+                break
+            files.append(file_path)
+            index += 1
+        
+        return files
+    
     def _save_file(self, path: str, data: dict, message: str):
         try:
             # Format đặc biệt cho translated_quiz_pool.json
-            if path == "data/translated_quiz_pool.json" and "questions" in data:
+            if "translated_quiz_pool" in path and "questions" in data:
                 # Tạo JSON với mỗi quiz trên 1 dòng
                 content = '{\n  "questions": [\n'
                 questions = []
@@ -121,6 +170,7 @@ class GitHubStorage:
             
         timestamp = datetime.now().isoformat()
         
+        # Lưu scores toàn cục
         if "scores" in self._pending_updates:
             scores_data = self._get_file_content("data/scores.json") or {"users": {}}
             
@@ -153,8 +203,40 @@ class GitHubStorage:
             
             self._save_file("data/scores.json", scores_data, f"Batch update scores at {timestamp}")
         
+        # Lưu scores theo nhóm
+        if "group_scores" in self._pending_updates:
+            for update in self._pending_updates["group_scores"]:
+                chat_id = update["chat_id"]
+                file_path = f"data/group_scores/{chat_id}.json"
+                
+                group_data = self._get_file_content(file_path) or {"users": {}, "chat_id": chat_id}
+                user_key = str(update["user_id"])
+                
+                if user_key not in group_data["users"]:
+                    group_data["users"][user_key] = {
+                        "user_id": update["user_id"],
+                        "username": update["username"],
+                        "score": 0,
+                        "games_won": 0,
+                        "created_at": timestamp
+                    }
+                
+                user = group_data["users"][user_key]
+                user["score"] += update["amount"]
+                user["username"] = update["username"]
+                user["last_updated"] = timestamp
+                
+                if update["amount"] > 0:
+                    user["games_won"] = user.get("games_won", 0) + 1
+                
+                group_data["last_updated"] = timestamp
+                self._save_file(file_path, group_data, f"Update group {chat_id} scores")
+        
+        # Lưu quiz với file splitting
         if "translated_quiz" in self._pending_updates:
-            quiz_data = self._get_file_content("data/translated_quiz_pool.json") or {"questions": []}
+            # Tìm file hiện tại
+            current_file = self._get_current_quiz_file()
+            quiz_data = self._get_file_content(current_file) or {"questions": []}
             
             # Tạo set các câu hỏi đã có để check nhanh
             existing_questions = {self._normalize_question(q.get("question")) for q in quiz_data["questions"]}
@@ -168,7 +250,7 @@ class GitHubStorage:
                     existing_questions.add(normalized_question)
                     self._quiz_questions_cache.add(normalized_question)
                     added_count += 1
-                    logger.info(f"Added new quiz: {quiz['question'][:50]}...")
+                    logger.info(f"Added new quiz to {current_file}: {quiz['question'][:50]}...")
                 else:
                     logger.warning(f"Skipped duplicate quiz: {quiz['question'][:50]}...")
             
@@ -176,7 +258,7 @@ class GitHubStorage:
                 quiz_data["total"] = len(quiz_data["questions"])
                 quiz_data["last_updated"] = timestamp
                 
-                self._save_file("data/translated_quiz_pool.json", quiz_data, f"Added {added_count} new quizzes")
+                self._save_file(current_file, quiz_data, f"Added {added_count} new quizzes")
         
         current_time = datetime.now()
         for chat_id, chat_data in list(self._chat_save_queue.items()):
@@ -218,12 +300,13 @@ class GitHubStorage:
         if normalized in self._quiz_questions_cache:
             return True
         
-        # Nếu cache chưa đầy đủ, load từ file
+        # Nếu cache chưa đầy đủ, load từ tất cả file
         if not self._quiz_questions_cache:
-            quiz_data = self._get_file_content("data/translated_quiz_pool.json")
-            if quiz_data and "questions" in quiz_data:
-                for q in quiz_data["questions"]:
-                    self._quiz_questions_cache.add(self._normalize_question(q.get("question", "")))
+            for file_path in self._get_all_quiz_files():
+                quiz_data = self._get_file_content(file_path)
+                if quiz_data and "questions" in quiz_data:
+                    for q in quiz_data["questions"]:
+                        self._quiz_questions_cache.add(self._normalize_question(q.get("question", "")))
         
         return normalized in self._quiz_questions_cache
     
@@ -243,6 +326,15 @@ class GitHubStorage:
             "game_type": game_type
         })
     
+    def update_group_score(self, chat_id: int, user_id: int, username: str, amount: int):
+        """Cập nhật điểm theo nhóm"""
+        self.queue_update("group_scores", {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "username": username,
+            "amount": amount
+        })
+    
     def get_leaderboard_direct(self, limit: int = 10) -> List[tuple]:
         try:
             data = self._get_file_content("data/scores.json")
@@ -260,6 +352,27 @@ class GitHubStorage:
             return users[:limit]
         except Exception as e:
             logger.error(f"Failed to get leaderboard: {e}")
+            return []
+    
+    def get_group_leaderboard(self, chat_id: int, limit: int = 10) -> List[tuple]:
+        """Lấy bảng xếp hạng theo nhóm"""
+        try:
+            file_path = f"data/group_scores/{chat_id}.json"
+            data = self._get_file_content(file_path)
+            if not data or "users" not in data:
+                return []
+            
+            users = []
+            for user_data in data["users"].values():
+                username = user_data.get("username", "Unknown")
+                score = user_data.get("score", 0)
+                if score > 0:
+                    users.append((username, score))
+            
+            users.sort(key=lambda x: x[1], reverse=True)
+            return users[:limit]
+        except Exception as e:
+            logger.error(f"Failed to get group leaderboard: {e}")
             return []
     
     def get_user_stats_direct(self, user_id: int) -> dict:
@@ -287,11 +400,30 @@ class GitHubStorage:
                 'games_played': {}
             }
     
+    def get_user_group_stats(self, chat_id: int, user_id: int) -> dict:
+        """Lấy stats của user trong nhóm cụ thể"""
+        try:
+            file_path = f"data/group_scores/{chat_id}.json"
+            data = self._get_file_content(file_path)
+            if not data or "users" not in data:
+                return {'score': 0, 'games_won': 0}
+            
+            user_data = data["users"].get(str(user_id), {})
+            return {
+                'score': user_data.get("score", 0),
+                'games_won': user_data.get("games_won", 0)
+            }
+        except:
+            return {'score': 0, 'games_won': 0}
+    
     def get_translated_quiz_pool(self) -> List[dict]:
-        data = self._get_file_content("data/translated_quiz_pool.json")
-        if data and "questions" in data:
-            return data["questions"]
-        return []
+        """Lấy tất cả quiz từ nhiều file"""
+        all_quizzes = []
+        for file_path in self._get_all_quiz_files():
+            data = self._get_file_content(file_path)
+            if data and "questions" in data:
+                all_quizzes.extend(data["questions"])
+        return all_quizzes
     
     def add_translated_quiz(self, quiz: dict):
         self.queue_update("translated_quiz", quiz)
@@ -796,7 +928,8 @@ Bot tự động tạo quiz với Gemini AI!
 /quiz - Tạo quiz ngẫu nhiên
 
 📊 **Thông tin:**
-/top - Bảng xếp hạng
+/top - BXH toàn cầu
+/gtop - BXH nhóm này
 /bal - Xem số dư
 /stats - Thống kê cá nhân
 
@@ -805,7 +938,8 @@ Bot tự động tạo quiz với Gemini AI!
 /stopminigame - Dừng minigame trong nhóm
 
 📚 **Quiz pool:** {quiz_count} câu ({unique_count} unique)
-🔄 **Auto check duplicate questions**
+📁 **Auto split files at 3MB**
+🏆 **Mỗi nhóm có BXH riêng!**
 
 💬 Chat riêng với mình để trò chuyện!"""
         
@@ -819,6 +953,47 @@ Bot tự động tạo quiz với Gemini AI!
             "📊 /top - Bảng xếp hạng\n"
             "💰 /bal - Xem số dư"
         )
+
+async def gtop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bảng xếp hạng theo nhóm"""
+    try:
+        chat = update.effective_chat
+        
+        if chat.type == "private":
+            await update.message.reply_text("⚠️ Lệnh này chỉ dùng được trong nhóm!")
+            return
+        
+        if not storage:
+            await update.message.reply_text("📊 Hệ thống đang bảo trì")
+            return
+        
+        group_name = chat.title or "Nhóm này"
+        leaderboard = storage.get_group_leaderboard(chat.id)
+        
+        if not leaderboard:
+            await update.message.reply_text(f"📊 **BXH {group_name}**\n\nChưa có dữ liệu!\nHãy chơi quiz để lên bảng!")
+            return
+        
+        msg = f"🏆 **BXH {group_name}**\n"
+        msg += "────────────────\n"
+        
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (name, score) in enumerate(leaderboard):
+            medal = medals[i] if i < 3 else f"{i+1}."
+            msg += f"{medal} {name}: {_fmt_money(score)} điểm\n"
+        
+        # Thêm thống kê của người dùng
+        user = update.effective_user
+        user_stats = storage.get_user_group_stats(chat.id, user.id)
+        if user_stats['score'] > 0:
+            msg += f"\n📊 **Điểm của bạn:** {_fmt_money(user_stats['score'])}"
+            msg += f"\n🏅 **Số lần thắng:** {user_stats['games_won']}"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Error in gtop command: {e}", exc_info=True)
+        await update.message.reply_text("📊 Không thể tải bảng xếp hạng nhóm")
 
 async def stopminigame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -893,7 +1068,7 @@ async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("📊 Chưa có dữ liệu bảng xếp hạng\n\nHãy chơi game để lên bảng!")
             return
         
-        msg = "🏆 **BẢNG XẾP HẠNG**\n"
+        msg = "🏆 **BẢNG XẾP HẠNG TOÀN CẦU**\n"
         msg += "────────────────\n"
         
         medals = ["🥇", "🥈", "🥉"]
@@ -1063,7 +1238,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     result += f" - {correct_answer_text}"
                 result += f"\n💡 {quiz.get('explanation', '')}"
                 
+                # Update điểm toàn cục
                 update_user_balance(user.id, username, points, "quiz")
+                
+                # Update điểm nhóm nếu là nhóm
+                chat = update.effective_chat
+                if chat.type in ["group", "supergroup"] and storage:
+                    storage.update_group_score(chat.id, user.id, username, points)
+                    
             else:
                 result = f"❌ **{username}** - Chưa đúng!\n\n"
                 result += f"✅ Đáp án đúng: **{correct_option}**"
@@ -1223,7 +1405,7 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(cleanup_memory(application))
     asyncio.create_task(quiz_health_check(application))
     asyncio.create_task(load_minigame_groups(application))
-    logger.info("Bot started successfully - Gemini Quiz Generator with Extended Football Topics!")
+    logger.info("Bot started successfully - Auto split files & Group leaderboards!")
 
 async def post_shutdown(application: Application) -> None:
     for task in game_timeouts.values():
@@ -1246,6 +1428,7 @@ def main():
     application.add_handler(CommandHandler("quiz", quiz_cmd))
     application.add_handler(CommandHandler("bal", bal_cmd))
     application.add_handler(CommandHandler("top", top_cmd))
+    application.add_handler(CommandHandler("gtop", gtop_cmd))
     application.add_handler(CommandHandler("stats", stats_cmd))
     application.add_handler(CommandHandler("clean", clean_cmd))
     application.add_handler(CommandHandler("stopminigame", stopminigame_cmd))
@@ -1254,7 +1437,7 @@ def main():
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot - Gemini Quiz Generator with Extended Football Topics! 💕")
+    logger.info("Linh Bot - Auto split files & Group leaderboards! 💕")
     application.run_polling()
 
 if __name__ == "__main__":
