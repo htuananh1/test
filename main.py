@@ -31,7 +31,6 @@ MAX_GAME_MESSAGES = 5
 CHAT_SAVE_INTERVAL = 300
 QUIZ_CHECK_INTERVAL = 60
 
-# OpenTDB Categories và difficulties
 QUIZ_CATEGORIES = {
     9: "Kiến thức tổng quát",
     17: "Khoa học & Thiên nhiên", 
@@ -139,12 +138,10 @@ class GitHubStorage:
             
             self._save_file("data/scores.json", scores_data, f"Batch update scores at {timestamp}")
         
-        # CHỈ LƯU QUIZ ĐÃ DỊCH
         if "translated_quiz" in self._pending_updates:
             quiz_data = self._get_file_content("data/translated_quiz_pool.json") or {"questions": []}
             
             for quiz in self._pending_updates["translated_quiz"]:
-                # Kiểm tra trùng lặp dựa trên câu hỏi đã dịch
                 duplicate = False
                 for existing in quiz_data["questions"]:
                     if existing.get("question") == quiz.get("question"):
@@ -238,14 +235,12 @@ class GitHubStorage:
             }
     
     def get_translated_quiz_pool(self) -> List[dict]:
-        """Lấy pool quiz đã dịch"""
         data = self._get_file_content("data/translated_quiz_pool.json")
         if data and "questions" in data:
             return data["questions"]
         return []
     
     def add_translated_quiz(self, quiz: dict):
-        """Thêm quiz đã dịch vào queue"""
         self.queue_update("translated_quiz", quiz)
     
     def get_minigame_groups(self) -> Set[int]:
@@ -339,33 +334,75 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
         logger.error(f"API call error: {e}")
         return None
 
-async def translate_text(text: str) -> str:
-    """Dịch text sang tiếng Việt bằng Gemini"""
+async def translate_quiz_with_gemini(quiz_data: dict) -> Optional[dict]:
     try:
+        question = quiz_data.get("question", "")
+        correct_answer = quiz_data.get("correct_answer", "")
+        incorrect_answers = quiz_data.get("incorrect_answers", [])
+        category = quiz_data.get("category", "")
+        difficulty = quiz_data.get("difficulty", "medium")
+        
+        prompt = f"""Dịch quiz sau sang tiếng Việt và format theo JSON:
+
+Câu hỏi: {question}
+Đáp án đúng: {correct_answer}
+Đáp án sai: {', '.join(incorrect_answers)}
+Chủ đề: {category}
+
+Yêu cầu:
+1. Dịch tất cả sang tiếng Việt tự nhiên
+2. Trộn ngẫu nhiên 4 đáp án
+3. Gán nhãn A, B, C, D cho từng đáp án
+4. Trả về JSON với format:
+{{
+  "topic": "chủ đề đã dịch",
+  "question": "câu hỏi đã dịch",
+  "options": ["A. đáp án 1", "B. đáp án 2", "C. đáp án 3", "D. đáp án 4"],
+  "correct": "A/B/C/D",
+  "explanation": "giải thích ngắn gọn"
+}}"""
+
         messages = [
             {
-                "role": "system", 
-                "content": "You are a professional translator. Translate text to Vietnamese accurately. Only return the translation, no explanations."
+                "role": "system",
+                "content": "Bạn là chuyên gia dịch quiz. Chỉ trả về JSON, không giải thích thêm."
             },
             {
-                "role": "user", 
-                "content": f"Translate to Vietnamese: {text}"
+                "role": "user",
+                "content": prompt
             }
         ]
         
-        response = await call_api(messages, max_tokens=100)
-        if response:
-            translated = response.strip()
-            if translated.startswith('"') and translated.endswith('"'):
-                translated = translated[1:-1]
-            return translated
-        return text
+        response = await call_api(messages, max_tokens=400)
+        
+        if not response:
+            return None
+            
+        response = response.strip()
+        if response.startswith("```json"):
+            response = response[7:]
+        if response.endswith("```"):
+            response = response[:-3]
+        response = response.strip()
+        
+        translated = json.loads(response)
+        
+        difficulty_vn = "Trung bình" if difficulty == "medium" else "Khó"
+        translated["topic"] = f"{translated['topic']} ({difficulty_vn})"
+        translated["source"] = "OpenTDB + Gemini"
+        translated["original_question"] = question
+        translated["original_category"] = category
+        translated["difficulty"] = difficulty
+        translated["translated_at"] = datetime.now().isoformat()
+        translated["created_at"] = datetime.now().isoformat()
+        
+        return translated
+        
     except Exception as e:
-        logger.error(f"Translation error: {e}")
-        return text
+        logger.error(f"Error translating quiz with Gemini: {e}")
+        return None
 
 async def get_quiz_from_opentdb() -> Optional[dict]:
-    """Lấy quiz từ OpenTDB API, dịch và CHỈ LƯU KHI DỊCH THÀNH CÔNG"""
     try:
         category = random.choice(list(QUIZ_CATEGORIES.keys()))
         difficulty = random.choice(DIFFICULTIES)
@@ -380,78 +417,26 @@ async def get_quiz_from_opentdb() -> Optional[dict]:
             if data["response_code"] == 0 and data["results"]:
                 quiz_data = data["results"][0]
                 
-                # Decode HTML entities
-                question = html.unescape(quiz_data["question"])
-                correct_answer = html.unescape(quiz_data["correct_answer"])
-                incorrect_answers = [html.unescape(ans) for ans in quiz_data["incorrect_answers"]]
+                quiz_data["question"] = html.unescape(quiz_data["question"])
+                quiz_data["correct_answer"] = html.unescape(quiz_data["correct_answer"])
+                quiz_data["incorrect_answers"] = [html.unescape(ans) for ans in quiz_data["incorrect_answers"]]
                 
                 logger.info(f"Translating OpenTDB quiz with Gemini...")
                 
-                # Dịch câu hỏi
-                question_vn = await translate_text(question)
-                if question_vn == question:  # Dịch thất bại
-                    logger.warning("Failed to translate question")
+                translated_quiz = await translate_quiz_with_gemini(quiz_data)
+                
+                if translated_quiz:
+                    logger.info(f"Successfully translated quiz: {translated_quiz['question'][:50]}...")
+                    
+                    if storage:
+                        storage.add_translated_quiz(translated_quiz)
+                        logger.info("Quiz saved to translated pool")
+                    
+                    return translated_quiz
+                else:
+                    logger.warning("Failed to translate quiz")
                     return None
-                
-                # Dịch đáp án đúng
-                correct_answer_vn = await translate_text(correct_answer)
-                if correct_answer_vn == correct_answer:  # Dịch thất bại
-                    logger.warning("Failed to translate correct answer")
-                    return None
-                
-                # Dịch các đáp án sai
-                incorrect_answers_vn = []
-                for ans in incorrect_answers:
-                    translated = await translate_text(ans)
-                    if translated == ans:  # Dịch thất bại
-                        logger.warning(f"Failed to translate incorrect answer: {ans}")
-                        return None
-                    incorrect_answers_vn.append(translated)
-                    await asyncio.sleep(0.1)
-                
-                # Tạo list tất cả đáp án và đảo trộn
-                all_answers = [correct_answer_vn] + incorrect_answers_vn
-                random.shuffle(all_answers)
-                
-                # Tìm vị trí đáp án đúng sau khi đảo
-                correct_index = all_answers.index(correct_answer_vn)
-                correct_letter = ["A", "B", "C", "D"][correct_index]
-                
-                # Format options với A, B, C, D
-                options = []
-                for i, answer in enumerate(all_answers):
-                    letter = ["A", "B", "C", "D"][i]
-                    options.append(f"{letter}. {answer}")
-                
-                # Tạo giải thích
-                explanation = f"Đáp án đúng là {correct_letter}. {correct_answer_vn}"
-                
-                difficulty_vn = "Trung bình" if difficulty == "medium" else "Khó"
-                topic = QUIZ_CATEGORIES.get(category, "Tổng quát")
-                
-                quiz = {
-                    "topic": f"{topic} ({difficulty_vn})",
-                    "question": question_vn,
-                    "options": options,
-                    "correct": correct_letter,
-                    "explanation": explanation,
-                    "source": "OpenTDB + Gemini",
-                    "original_question": question,  # Lưu câu gốc để debug
-                    "original_category": quiz_data["category"],
-                    "difficulty": difficulty,
-                    "translated_at": datetime.now().isoformat(),
-                    "created_at": datetime.now().isoformat()
-                }
-                
-                logger.info(f"Successfully translated quiz: {question_vn[:50]}...")
-                
-                # CHỈ LƯU KHI DỊCH THÀNH CÔNG
-                if storage:
-                    storage.add_translated_quiz(quiz)
-                    logger.info("Quiz saved to translated pool")
-                
-                return quiz
-                
+                    
         return None
         
     except Exception as e:
@@ -465,13 +450,11 @@ class QuizGame:
         self.current_quiz = None
         
     async def generate_quiz(self) -> dict:
-        # Thử lấy từ OpenTDB và dịch mới
         quiz = await get_quiz_from_opentdb()
         
         if quiz:
             return quiz
         
-        # Fallback về pool quiz đã dịch
         if storage:
             translated_pool = storage.get_translated_quiz_pool()
             if translated_pool:
@@ -605,7 +588,6 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Hiển thị source nếu là quiz mới dịch
         source_text = ""
         if quiz.get("translated_at"):
             source_text = " (Mới dịch)"
@@ -651,7 +633,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if chat.id not in active_games:
                 asyncio.create_task(start_random_minigame(chat.id, context))
         
-        # Hiển thị số lượng quiz đã dịch
         translated_count = 0
         if storage:
             translated_pool = storage.get_translated_quiz_pool()
@@ -839,7 +820,6 @@ async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Hiển thị source
         source_text = ""
         if quiz.get("translated_at"):
             source_text = " (Mới dịch)"
