@@ -30,16 +30,20 @@ WRONG_ANSWER_COOLDOWN = 5
 MAX_GAME_MESSAGES = 5
 CHAT_SAVE_INTERVAL = 300
 QUIZ_CHECK_INTERVAL = 60
+MAX_QUIZ_RETRY = 3  # Số lần thử tạo quiz mới nếu trùng
 
-QUIZ_CATEGORIES = {
-    21: "Thể thao",
-    22: "Địa lý",
-    23: "Lịch sử", 
-    27: "Động vật",
-    31: "Anime & Manga",
-}
+# Các đề tài quiz
+QUIZ_TOPICS = [
+    "Bóng đá",
+    "Địa lý",
+    "Lịch sử",
+    "Kĩ năng sống",
+    "Động vật",
+    "Anime & Manga"
+]
 
-DIFFICULTIES = ["medium", "hard"]
+# Độ khó
+DIFFICULTIES = ["bình thường", "khó", "cực khó"]
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,6 +57,7 @@ class GitHubStorage:
             self._pending_updates = {}
             self._last_batch_save = datetime.now()
             self._chat_save_queue = {}
+            self._quiz_questions_cache = set()  # Cache câu hỏi để check nhanh
             logger.info("GitHub storage initialized successfully")
         except Exception as e:
             logger.error(f"Failed to init GitHub storage: {e}")
@@ -152,14 +157,16 @@ class GitHubStorage:
             quiz_data = self._get_file_content("data/translated_quiz_pool.json") or {"questions": []}
             
             # Tạo set các câu hỏi đã có để check nhanh
-            existing_questions = {q.get("question") for q in quiz_data["questions"]}
+            existing_questions = {self._normalize_question(q.get("question")) for q in quiz_data["questions"]}
             
             added_count = 0
             for quiz in self._pending_updates["translated_quiz"]:
-                # Check trùng lặp hiệu quả hơn
-                if quiz.get("question") not in existing_questions:
+                # Check trùng lặp với normalize
+                normalized_question = self._normalize_question(quiz.get("question"))
+                if normalized_question not in existing_questions:
                     quiz_data["questions"].append(quiz)
-                    existing_questions.add(quiz.get("question"))
+                    existing_questions.add(normalized_question)
+                    self._quiz_questions_cache.add(normalized_question)
                     added_count += 1
                     logger.info(f"Added new quiz: {quiz['question'][:50]}...")
                 else:
@@ -187,6 +194,38 @@ class GitHubStorage:
         self._pending_updates = {}
         self._last_batch_save = datetime.now()
         logger.info(f"Batch save completed at {timestamp}")
+    
+    def _normalize_question(self, question: str) -> str:
+        """Normalize câu hỏi để so sánh (loại bỏ dấu, chữ thường, khoảng trắng thừa)"""
+        if not question:
+            return ""
+        # Chuyển thành chữ thường
+        normalized = question.lower()
+        # Loại bỏ dấu tiếng Việt
+        normalized = unicodedata.normalize('NFD', normalized)
+        normalized = ''.join(char for char in normalized if unicodedata.category(char) != 'Mn')
+        # Loại bỏ các ký tự đặc biệt, chỉ giữ chữ và số
+        normalized = re.sub(r'[^a-z0-9\s]', '', normalized)
+        # Loại bỏ khoảng trắng thừa
+        normalized = ' '.join(normalized.split())
+        return normalized
+    
+    def is_duplicate_question(self, question: str) -> bool:
+        """Kiểm tra câu hỏi có trùng không"""
+        normalized = self._normalize_question(question)
+        
+        # Check trong cache trước
+        if normalized in self._quiz_questions_cache:
+            return True
+        
+        # Nếu cache chưa đầy đủ, load từ file
+        if not self._quiz_questions_cache:
+            quiz_data = self._get_file_content("data/translated_quiz_pool.json")
+            if quiz_data and "questions" in quiz_data:
+                for q in quiz_data["questions"]:
+                    self._quiz_questions_cache.add(self._normalize_question(q.get("question", "")))
+        
+        return normalized in self._quiz_questions_cache
     
     def get_user_balance(self, user_id: int) -> int:
         try:
@@ -331,7 +370,7 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
             "model": model or CHAT_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.1
+            "temperature": 0.7
         }
         
         response = requests.post(
@@ -348,40 +387,43 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
         logger.error(f"API call error: {e}")
         return None
 
-async def translate_quiz_with_gemini(quiz_data: dict) -> Optional[dict]:
+async def generate_quiz_with_gemini(topic: str, difficulty: str, retry_count: int = 0) -> Optional[dict]:
+    """Tạo quiz mới bằng Gemini với check trùng lặp"""
     try:
-        question = quiz_data.get("question", "")
-        correct_answer = quiz_data.get("correct_answer", "")
-        incorrect_answers = quiz_data.get("incorrect_answers", [])
-        category = quiz_data.get("category", "")
-        difficulty = quiz_data.get("difficulty", "medium")
+        # Điều chỉnh prompt theo độ khó
+        difficulty_guide = {
+            "bình thường": "phù hợp với kiến thức phổ thông, không quá chuyên sâu",
+            "khó": "đòi hỏi kiến thức sâu hơn, có thể là những chi tiết ít người biết",
+            "cực khó": "cực kỳ khó, chỉ người am hiểu sâu mới biết, có thể là những chi tiết rất cụ thể"
+        }
         
-        prompt = f"""Dịch quiz sau sang tiếng Việt và format theo JSON:
-
-Câu hỏi: {question}
-Đáp án đúng: {correct_answer}
-Đáp án sai: {', '.join(incorrect_answers)}
-Chủ đề: {category}
+        # Thêm hướng dẫn để tránh tạo câu hỏi trùng
+        avoid_duplicate = ""
+        if retry_count > 0:
+            avoid_duplicate = f"\nLưu ý: Đây là lần thử thứ {retry_count + 1}, hãy tạo câu hỏi HOÀN TOÀN MỚI và KHÁC BIỆT."
+        
+        prompt = f"""Tạo 1 câu hỏi trắc nghiệm về chủ đề "{topic}" với độ khó "{difficulty}" ({difficulty_guide[difficulty]}).{avoid_duplicate}
 
 Yêu cầu:
-1. Dịch tất cả sang tiếng Việt tự nhiên
-2. Trộn ngẫu nhiên 4 đáp án
-3. Gán nhãn A, B, C, D cho từng đáp án
-4. Tạo giải thích chi tiết về đáp án đúng
-5. Trả về JSON với format:
+1. Câu hỏi phải thú vị, có giá trị kiến thức
+2. 4 đáp án phải hợp lý, không quá dễ loại trừ
+3. Giải thích phải chi tiết, có thông tin bổ ích
+4. Hoàn toàn bằng tiếng Việt
+5. Câu hỏi phải CỤ THỂ và ĐỘC ĐÁO
+
+Trả về JSON với format:
 {{
-  "topic": "chủ đề đã dịch",
-  "question": "câu hỏi đã dịch",
+  "question": "câu hỏi",
   "options": ["A. đáp án 1", "B. đáp án 2", "C. đáp án 3", "D. đáp án 4"],
   "correct": "A/B/C/D",
-  "correct_answer": "nội dung đáp án đúng đã dịch",
-  "explanation": "giải thích chi tiết về đáp án đúng"
+  "correct_answer": "nội dung đáp án đúng",
+  "explanation": "giải thích chi tiết về đáp án đúng và thông tin thêm"
 }}"""
 
         messages = [
             {
                 "role": "system",
-                "content": "Bạn là chuyên gia dịch quiz. Chỉ trả về JSON, không giải thích thêm."
+                "content": "Bạn là chuyên gia tạo câu hỏi trắc nghiệm chất lượng cao. Luôn tạo câu hỏi mới và độc đáo. Chỉ trả về JSON, không giải thích thêm."
             },
             {
                 "role": "user",
@@ -389,11 +431,12 @@ Yêu cầu:
             }
         ]
         
-        response = await call_api(messages, max_tokens=500)
+        response = await call_api(messages, max_tokens=600)
         
         if not response:
             return None
             
+        # Parse response
         response = response.strip()
         if response.startswith("```json"):
             response = response[7:]
@@ -401,61 +444,29 @@ Yêu cầu:
             response = response[:-3]
         response = response.strip()
         
-        translated = json.loads(response)
+        quiz = json.loads(response)
         
-        # Chỉ thêm các thông tin cần thiết
-        difficulty_vn = "Trung bình" if difficulty == "medium" else "Khó"
-        translated["topic"] = f"{translated['topic']} ({difficulty_vn})"
-        translated["source"] = "OpenTDB + Gemini"
-        translated["difficulty"] = difficulty
-        translated["translated_at"] = datetime.now().isoformat()
-        translated["created_at"] = datetime.now().isoformat()
+        # Kiểm tra trùng lặp
+        if storage and storage.is_duplicate_question(quiz["question"]):
+            logger.warning(f"Duplicate question detected: {quiz['question'][:50]}...")
+            if retry_count < MAX_QUIZ_RETRY:
+                logger.info(f"Retrying to generate new quiz (attempt {retry_count + 2}/{MAX_QUIZ_RETRY + 1})")
+                await asyncio.sleep(1)  # Delay nhỏ trước khi retry
+                return await generate_quiz_with_gemini(topic, difficulty, retry_count + 1)
+            else:
+                logger.error(f"Max retries reached, using duplicate quiz")
         
-        return translated
+        # Thêm metadata
+        quiz["topic"] = f"{topic} ({difficulty.title()})"
+        quiz["source"] = "Gemini AI"
+        quiz["difficulty"] = difficulty
+        quiz["created_at"] = datetime.now().isoformat()
+        quiz["generated"] = True  # Đánh dấu là quiz mới tạo
         
-    except Exception as e:
-        logger.error(f"Error translating quiz with Gemini: {e}")
-        return None
-
-async def get_quiz_from_opentdb() -> Optional[dict]:
-    try:
-        category = random.choice(list(QUIZ_CATEGORIES.keys()))
-        difficulty = random.choice(DIFFICULTIES)
-        
-        url = f"https://opentdb.com/api.php?amount=1&category={category}&difficulty={difficulty}&type=multiple"
-        
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            if data["response_code"] == 0 and data["results"]:
-                quiz_data = data["results"][0]
-                
-                quiz_data["question"] = html.unescape(quiz_data["question"])
-                quiz_data["correct_answer"] = html.unescape(quiz_data["correct_answer"])
-                quiz_data["incorrect_answers"] = [html.unescape(ans) for ans in quiz_data["incorrect_answers"]]
-                
-                logger.info(f"Translating OpenTDB quiz with Gemini...")
-                
-                translated_quiz = await translate_quiz_with_gemini(quiz_data)
-                
-                if translated_quiz:
-                    logger.info(f"Successfully translated quiz: {translated_quiz['question'][:50]}...")
-                    
-                    if storage:
-                        storage.add_translated_quiz(translated_quiz)
-                        logger.info("Quiz saved to translated pool")
-                    
-                    return translated_quiz
-                else:
-                    logger.warning("Failed to translate quiz")
-                    return None
-                    
-        return None
+        return quiz
         
     except Exception as e:
-        logger.error(f"Error getting quiz from OpenTDB: {e}")
+        logger.error(f"Error generating quiz with Gemini: {e}")
         return None
 
 class QuizGame:
@@ -465,19 +476,38 @@ class QuizGame:
         self.current_quiz = None
         
     async def generate_quiz(self) -> dict:
-        # Thử lấy quiz mới từ OpenTDB
-        quiz = await get_quiz_from_opentdb()
+        # Random topic và difficulty
+        topic = random.choice(QUIZ_TOPICS)
+        difficulty = random.choice(DIFFICULTIES)
+        
+        # Thử tạo quiz mới bằng Gemini
+        logger.info(f"Generating new quiz: {topic} - {difficulty}")
+        quiz = await generate_quiz_with_gemini(topic, difficulty)
         
         if quiz:
+            # Lưu quiz mới vào pool
+            if storage:
+                storage.add_translated_quiz(quiz)
             return quiz
         
-        # Fallback về pool quiz đã dịch
+        # Fallback về pool quiz cũ nếu lỗi
         if storage:
-            translated_pool = storage.get_translated_quiz_pool()
-            if translated_pool:
-                fallback_quiz = random.choice(translated_pool)
-                logger.info(f"Using quiz from pool (total: {len(translated_pool)} quizzes)")
-                return fallback_quiz
+            quiz_pool = storage.get_translated_quiz_pool()
+            if quiz_pool:
+                # Lọc theo topic và difficulty nếu có
+                filtered_pool = [
+                    q for q in quiz_pool 
+                    if topic in q.get('topic', '') and difficulty in q.get('topic', '')
+                ]
+                
+                # Nếu không có quiz phù hợp, dùng toàn bộ pool
+                if not filtered_pool:
+                    filtered_pool = quiz_pool
+                
+                if filtered_pool:
+                    fallback_quiz = random.choice(filtered_pool)
+                    logger.info(f"Using quiz from pool (filtered: {len(filtered_pool)}, total: {len(quiz_pool)})")
+                    return fallback_quiz
         
         logger.error("Failed to generate or find any quiz")
         return None
@@ -583,7 +613,7 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             f"🎲 **MINIGAME**\n"
             f"🎮 📝 Quiz Trắc Nghiệm\n"
             f"⏰ Tự đổi câu mới sau 10 phút\n\n"
-            f"⏳ Đang dịch quiz mới với Gemini...",
+            f"⏳ Đang tạo quiz mới với Gemini...",
             parse_mode="Markdown"
         )
         await add_game_message(chat_id, loading_msg.message_id, context)
@@ -610,9 +640,10 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
+        # Hiển thị source
         source_text = ""
-        if quiz.get("translated_at"):
-            source_text = " (Mới dịch)"
+        if quiz.get("generated"):
+            source_text = " ✨"  # Icon cho quiz mới tạo
         
         quiz_msg = await context.bot.send_message(
             chat_id,
@@ -655,20 +686,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if chat.id not in active_games:
                 asyncio.create_task(start_random_minigame(chat.id, context))
         
-        translated_count = 0
+        quiz_count = 0
+        unique_count = 0
         if storage:
-            translated_pool = storage.get_translated_quiz_pool()
-            translated_count = len(translated_pool)
+            quiz_pool = storage.get_translated_quiz_pool()
+            quiz_count = len(quiz_pool)
+            # Đếm số câu hỏi unique
+            unique_questions = set()
+            for q in quiz_pool:
+                unique_questions.add(storage._normalize_question(q.get("question", "")))
+            unique_count = len(unique_questions)
         
         message = f"""👋 Xin chào {username}! Mình là Linh Bot!
 
 💰 Số dư của bạn: {_fmt_money(balance)}
 
 🎮 **Minigame tự động trong nhóm**
-Bot sẽ tự động tạo quiz từ OpenTDB + Gemini dịch!
+Bot tự động tạo quiz với Gemini AI!
+
+📚 **Các chủ đề:**
+{', '.join(QUIZ_TOPICS)}
+
+⚡ **Độ khó:** Bình thường, Khó, Cực khó
 
 📝 **Chơi riêng lẻ:**
-/quiz - Quiz trắc nghiệm từ OpenTDB
+/quiz - Tạo quiz ngẫu nhiên
 
 📊 **Thông tin:**
 /top - Bảng xếp hạng
@@ -679,7 +721,8 @@ Bot sẽ tự động tạo quiz từ OpenTDB + Gemini dịch!
 /clean - Dọn dẹp bot (chỉ admin)
 /stopminigame - Dừng minigame trong nhóm
 
-📚 **Quiz pool:** {translated_count} câu đã dịch
+📚 **Quiz pool:** {quiz_count} câu ({unique_count} unique)
+🔄 **Auto check duplicate questions**
 
 💬 Chat riêng với mình để trò chuyện!"""
         
@@ -824,7 +867,7 @@ async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Đang có game khác!")
             return
         
-        loading_msg = await update.message.reply_text("⏳ Đang dịch quiz mới với Gemini...")
+        loading_msg = await update.message.reply_text("⏳ Đang tạo quiz mới với Gemini...")
         
         game = QuizGame(chat_id)
         quiz = await game.generate_quiz()
@@ -843,8 +886,8 @@ async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         source_text = ""
-        if quiz.get("translated_at"):
-            source_text = " (Mới dịch)"
+        if quiz.get("generated"):
+            source_text = " ✨"
         
         await loading_msg.edit_text(
             f"❓ **{quiz['topic']}{source_text}**\n\n{quiz['question']}",
@@ -1028,7 +1071,7 @@ async def load_minigame_groups(application: Application):
         for i, chat_id in enumerate(minigame_groups):
             try:
                 await start_random_minigame(chat_id, application)
-                await asyncio.sleep(5)  # Tăng delay giữa các group khi khởi động
+                await asyncio.sleep(5)
             except Exception as e:
                 logger.error(f"Error starting minigame for {chat_id}: {e}")
 
@@ -1037,7 +1080,7 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(cleanup_memory(application))
     asyncio.create_task(quiz_health_check(application))
     asyncio.create_task(load_minigame_groups(application))
-    logger.info("Bot started successfully - Unlimited quiz storage!")
+    logger.info("Bot started successfully - Gemini Quiz Generator with Duplicate Check!")
 
 async def post_shutdown(application: Application) -> None:
     for task in game_timeouts.values():
@@ -1068,7 +1111,7 @@ def main():
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot - Unlimited quiz storage! 💕")
+    logger.info("Linh Bot - Gemini Quiz Generator with Duplicate Check! 💕")
     application.run_polling()
 
 if __name__ == "__main__":
