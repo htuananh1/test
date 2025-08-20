@@ -8,7 +8,7 @@ import base64
 import unicodedata
 import re
 import html
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple, Set
 from collections import deque
 from github import Github
@@ -31,10 +31,10 @@ MAX_GAME_MESSAGES = 5
 CHAT_SAVE_INTERVAL = 300
 QUIZ_CHECK_INTERVAL = 60
 MAX_QUIZ_RETRY = 3
-MAX_FILE_SIZE = 3 * 1024 * 1024  # 3MB
-ADMIN_ID = 2026797305  # Admin ID
+MAX_FILE_SIZE = 3 * 1024 * 1024
+ADMIN_ID = 2026797305
+VIETNAM_TZ = timezone(timedelta(hours=7))
 
-# Các đề tài quiz
 QUIZ_TOPICS = [
     "Bóng đá",
     "Địa lý",
@@ -44,11 +44,13 @@ QUIZ_TOPICS = [
     "Anime & Manga"
 ]
 
-# Độ khó
 DIFFICULTIES = ["bình thường", "khó", "cực khó"]
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def get_vietnam_time():
+    return datetime.now(VIETNAM_TZ)
 
 class GitHubStorage:
     def __init__(self, token: str, repo_name: str):
@@ -57,10 +59,11 @@ class GitHubStorage:
             self.repo = self.g.get_repo(repo_name)
             self.branch = "main"
             self._pending_updates = {}
-            self._last_batch_save = datetime.now()
+            self._last_batch_save = get_vietnam_time()
             self._chat_save_queue = {}
-            self._quiz_questions_cache = set()  # Cache câu hỏi để check nhanh
-            self._quiz_file_index = 0  # Track file index hiện tại
+            self._quiz_questions_cache = set()
+            self._quiz_file_index = 0
+            self._current_file_cache = None
             logger.info("GitHub storage initialized successfully")
         except Exception as e:
             logger.error(f"Failed to init GitHub storage: {e}")
@@ -77,7 +80,6 @@ class GitHubStorage:
             return None
     
     def _get_file_size(self, path: str) -> int:
-        """Lấy kích thước file trên GitHub"""
         try:
             file = self.repo.get_contents(path, ref=self.branch)
             return file.size
@@ -85,34 +87,36 @@ class GitHubStorage:
             return 0
     
     def _get_current_quiz_file(self) -> str:
-        """Tìm file quiz pool hiện tại (chưa đầy)"""
+        if self._current_file_cache:
+            cache_time, file_path = self._current_file_cache
+            if (get_vietnam_time() - cache_time).seconds < 60:
+                if self._get_file_size(file_path) < MAX_FILE_SIZE:
+                    return file_path
+        
         base_path = "data/translated_quiz_pool"
         
-        # Check file gốc
         if self._get_file_size(f"{base_path}.json") < MAX_FILE_SIZE:
-            return f"{base_path}.json"
+            result = f"{base_path}.json"
+        else:
+            index = 1
+            while True:
+                file_path = f"{base_path}_{index}.json"
+                size = self._get_file_size(file_path)
+                if size == 0 or size < MAX_FILE_SIZE:
+                    result = file_path
+                    break
+                index += 1
         
-        # Check các file đánh số
-        index = 1
-        while True:
-            file_path = f"{base_path}_{index}.json"
-            size = self._get_file_size(file_path)
-            if size == 0:  # File chưa tồn tại
-                return file_path
-            elif size < MAX_FILE_SIZE:  # File còn chỗ
-                return file_path
-            index += 1
+        self._current_file_cache = (get_vietnam_time(), result)
+        return result
     
     def _get_all_quiz_files(self) -> List[str]:
-        """Lấy danh sách tất cả file quiz"""
         files = []
         base_path = "data/translated_quiz_pool"
         
-        # File gốc
         if self._get_file_size(f"{base_path}.json") > 0:
             files.append(f"{base_path}.json")
         
-        # Các file đánh số
         index = 1
         while True:
             file_path = f"{base_path}_{index}.json"
@@ -125,22 +129,18 @@ class GitHubStorage:
     
     def _save_file(self, path: str, data: dict, message: str):
         try:
-            # Format đặc biệt cho translated_quiz_pool.json
             if "translated_quiz_pool" in path and "questions" in data:
-                # Tạo JSON với mỗi quiz trên 1 dòng
                 content = '{\n  "questions": [\n'
                 questions = []
                 for quiz in data["questions"]:
-                    # Mỗi quiz thành 1 dòng JSON compact
                     quiz_json = json.dumps(quiz, ensure_ascii=False, separators=(',', ':'))
                     questions.append(f'    {quiz_json}')
                 content += ',\n'.join(questions)
                 content += '\n  ],\n'
                 content += f'  "total": {data.get("total", len(data["questions"]))},\n'
-                content += f'  "last_updated": "{data.get("last_updated", datetime.now().isoformat())}"\n'
+                content += f'  "last_updated": "{data.get("last_updated", get_vietnam_time().isoformat())}"\n'
                 content += '}'
             else:
-                # Format bình thường cho các file khác
                 content = json.dumps(data, ensure_ascii=False, indent=2)
             
             try:
@@ -162,16 +162,15 @@ class GitHubStorage:
     def queue_chat_save(self, chat_id: int, messages: List[dict]):
         self._chat_save_queue[chat_id] = {
             "messages": messages,
-            "timestamp": datetime.now()
+            "timestamp": get_vietnam_time()
         }
     
     async def batch_save(self):
         if not self._pending_updates and not self._chat_save_queue:
             return
             
-        timestamp = datetime.now().isoformat()
+        timestamp = get_vietnam_time().isoformat()
         
-        # Lưu scores toàn cục
         if "scores" in self._pending_updates:
             scores_data = self._get_file_content("data/scores.json") or {"users": {}}
             
@@ -204,7 +203,6 @@ class GitHubStorage:
             
             self._save_file("data/scores.json", scores_data, f"Batch update scores at {timestamp}")
         
-        # Lưu scores theo nhóm
         if "group_scores" in self._pending_updates:
             for update in self._pending_updates["group_scores"]:
                 chat_id = update["chat_id"]
@@ -233,18 +231,14 @@ class GitHubStorage:
                 group_data["last_updated"] = timestamp
                 self._save_file(file_path, group_data, f"Update group {chat_id} scores")
         
-        # Lưu quiz với file splitting
         if "translated_quiz" in self._pending_updates:
-            # Tìm file hiện tại
             current_file = self._get_current_quiz_file()
             quiz_data = self._get_file_content(current_file) or {"questions": []}
             
-            # Tạo set các câu hỏi đã có để check nhanh
             existing_questions = {self._normalize_question(q.get("question")) for q in quiz_data["questions"]}
             
             added_count = 0
             for quiz in self._pending_updates["translated_quiz"]:
-                # Check trùng lặp với normalize
                 normalized_question = self._normalize_question(quiz.get("question"))
                 if normalized_question not in existing_questions:
                     quiz_data["questions"].append(quiz)
@@ -261,7 +255,7 @@ class GitHubStorage:
                 
                 self._save_file(current_file, quiz_data, f"Added {added_count} new quizzes")
         
-        current_time = datetime.now()
+        current_time = get_vietnam_time()
         for chat_id, chat_data in list(self._chat_save_queue.items()):
             if (current_time - chat_data["timestamp"]).total_seconds() < CHAT_SAVE_INTERVAL:
                 continue
@@ -275,33 +269,25 @@ class GitHubStorage:
             del self._chat_save_queue[chat_id]
         
         self._pending_updates = {}
-        self._last_batch_save = datetime.now()
+        self._last_batch_save = get_vietnam_time()
         logger.info(f"Batch save completed at {timestamp}")
     
     def _normalize_question(self, question: str) -> str:
-        """Normalize câu hỏi để so sánh (loại bỏ dấu, chữ thường, khoảng trắng thừa)"""
         if not question:
             return ""
-        # Chuyển thành chữ thường
         normalized = question.lower()
-        # Loại bỏ dấu tiếng Việt
         normalized = unicodedata.normalize('NFD', normalized)
         normalized = ''.join(char for char in normalized if unicodedata.category(char) != 'Mn')
-        # Loại bỏ các ký tự đặc biệt, chỉ giữ chữ và số
         normalized = re.sub(r'[^a-z0-9\s]', '', normalized)
-        # Loại bỏ khoảng trắng thừa
         normalized = ' '.join(normalized.split())
         return normalized
     
     def is_duplicate_question(self, question: str) -> bool:
-        """Kiểm tra câu hỏi có trùng không"""
         normalized = self._normalize_question(question)
         
-        # Check trong cache trước
         if normalized in self._quiz_questions_cache:
             return True
         
-        # Nếu cache chưa đầy đủ, load từ tất cả file
         if not self._quiz_questions_cache:
             for file_path in self._get_all_quiz_files():
                 quiz_data = self._get_file_content(file_path)
@@ -328,7 +314,6 @@ class GitHubStorage:
         })
     
     def update_group_score(self, chat_id: int, user_id: int, username: str, amount: int):
-        """Cập nhật điểm theo nhóm"""
         self.queue_update("group_scores", {
             "chat_id": chat_id,
             "user_id": user_id,
@@ -356,7 +341,6 @@ class GitHubStorage:
             return []
     
     def get_group_leaderboard(self, chat_id: int, limit: int = 10) -> List[tuple]:
-        """Lấy bảng xếp hạng theo nhóm"""
         try:
             file_path = f"data/group_scores/{chat_id}.json"
             data = self._get_file_content(file_path)
@@ -402,7 +386,6 @@ class GitHubStorage:
             }
     
     def get_user_group_stats(self, chat_id: int, user_id: int) -> dict:
-        """Lấy stats của user trong nhóm cụ thể"""
         try:
             file_path = f"data/group_scores/{chat_id}.json"
             data = self._get_file_content(file_path)
@@ -418,7 +401,6 @@ class GitHubStorage:
             return {'score': 0, 'games_won': 0}
     
     def get_translated_quiz_pool(self) -> List[dict]:
-        """Lấy tất cả quiz từ nhiều file"""
         all_quizzes = []
         for file_path in self._get_all_quiz_files():
             data = self._get_file_content(file_path)
@@ -438,7 +420,7 @@ class GitHubStorage:
     def save_minigame_groups(self, groups: Set[int]):
         data = {
             "groups": list(groups),
-            "updated": datetime.now().isoformat()
+            "updated": get_vietnam_time().isoformat()
         }
         self._save_file("data/minigame_groups.json", data, "Update minigame groups")
     
@@ -455,8 +437,8 @@ class GitHubStorage:
     def get_chat_history(self, chat_id: int) -> List[dict]:
         data = self._get_file_content(f"data/chat_history/{chat_id}.json")
         if data:
-            saved_at = datetime.fromisoformat(data.get("saved_at", datetime.now().isoformat()))
-            if datetime.now() - saved_at > timedelta(hours=24):
+            saved_at = datetime.fromisoformat(data.get("saved_at", get_vietnam_time().isoformat()))
+            if get_vietnam_time() - saved_at > timedelta(hours=24):
                 return []
             return data.get("messages", [])
         return []
@@ -475,8 +457,8 @@ game_start_times: Dict[int, datetime] = {}
 wrong_answer_cooldowns: Dict[Tuple[int, int], datetime] = {}
 minigame_groups: Set[int] = set()
 user_answered: Dict[Tuple[int, int], bool] = {}
-quiz_scheduling: Dict[int, datetime] = {}  # Track quiz scheduling
-quiz_creation_locks: Dict[int, asyncio.Lock] = {}  # Lock cho việc tạo quiz
+quiz_scheduling: Dict[int, datetime] = {}
+quiz_creation_locks: Dict[int, asyncio.Lock] = {}
 
 def _fmt_money(x: int) -> str:
     return f"{x:,}".replace(",", ".")
@@ -494,45 +476,53 @@ def update_user_balance(user_id: int, username: str, amount: int, game_type: str
     except Exception as e:
         logger.error(f"Update balance error: {e}")
 
-async def call_api(messages: List[dict], model: str = None, max_tokens: int = 400) -> str:
-    try:
-        headers = {
-            "Authorization": f"Bearer {VERCEL_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        data = {
-            "model": model or CHAT_MODEL,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": 0.7
-        }
-        
-        response = requests.post(
-            f"{BASE_URL}/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            return response.json()['choices'][0]['message']['content']
-        return None
-    except Exception as e:
-        logger.error(f"API call error: {e}")
-        return None
+async def call_api(messages: List[dict], model: str = None, max_tokens: int = 400, retry: int = 3) -> str:
+    for attempt in range(retry):
+        try:
+            headers = {
+                "Authorization": f"Bearer {VERCEL_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            data = {
+                "model": model or CHAT_MODEL,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": 0.7
+            }
+            
+            response = requests.post(
+                f"{BASE_URL}/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=10
+            )
+            
+            if response.status_code == 429:
+                wait_time = min(2 ** attempt, 10)
+                await asyncio.sleep(wait_time)
+                continue
+                
+            if response.status_code == 200:
+                return response.json()['choices'][0]['message']['content']
+                
+        except requests.Timeout:
+            if attempt < retry - 1:
+                await asyncio.sleep(1)
+                continue
+        except Exception as e:
+            logger.error(f"API call error attempt {attempt + 1}: {e}")
+            
+    return None
 
 async def generate_quiz_with_gemini(topic: str, difficulty: str, retry_count: int = 0) -> Optional[dict]:
-    """Tạo quiz mới bằng Gemini với check trùng lặp"""
     try:
-        # Điều chỉnh prompt theo độ khó
         difficulty_guide = {
             "bình thường": "phù hợp với kiến thức phổ thông, không quá chuyên sâu",
             "khó": "đòi hỏi kiến thức sâu hơn, có thể là những chi tiết ít người biết",
             "cực khó": "cực kỳ khó, chỉ người am hiểu sâu mới biết, có thể là những chi tiết rất cụ thể"
         }
         
-        # Hướng dẫn đặc biệt cho từng chủ đề
         topic_guide = {
             "Bóng đá": """về bóng đá thế giới bao gồm:
 - Các giải đấu: World Cup, Euro, Copa America, Champions League, Europa League, Premier League, La Liga, Serie A, Bundesliga, Ligue 1
@@ -549,35 +539,23 @@ async def generate_quiz_with_gemini(topic: str, difficulty: str, retry_count: in
             "Anime & Manga": "về anime và manga Nhật Bản, các series nổi tiếng, nhân vật, tác giả, studio"
         }
         
-        # Thêm hướng dẫn để tránh tạo câu hỏi trùng
-        avoid_duplicate = ""
-        if retry_count > 0:
-            avoid_duplicate = f"\nLưu ý: Đây là lần thử thứ {retry_count + 1}, hãy tạo câu hỏi HOÀN TOÀN MỚI và KHÁC BIỆT."
+        variation_prompts = [
+            "Tạo câu hỏi mới lạ, chưa từng thấy",
+            "Tạo câu hỏi với góc nhìn độc đáo", 
+            "Tạo câu hỏi về chi tiết thú vị ít ai biết",
+            "Tạo câu hỏi với fact bất ngờ"
+        ]
         
-        # Nhấn mạnh phạm vi toàn cầu cho lịch sử và địa lý
+        variation = random.choice(variation_prompts) if retry_count > 0 else ""
+        avoid_duplicate = f"\n{variation}" if retry_count > 0 else ""
+        
         global_emphasis = ""
         if topic in ["Địa lý", "Lịch sử"]:
             global_emphasis = "\n\n⚠️ QUAN TRỌNG: Câu hỏi PHẢI về phạm vi THẾ GIỚI/QUỐC TẾ, KHÔNG chỉ riêng về Việt Nam!"
         
-        # Thêm hướng dẫn đa dạng cho bóng đá
         football_variety = ""
         if topic == "Bóng đá":
             football_variety = "\n\n⚠️ QUAN TRỌNG: Tạo câu hỏi ĐA DẠNG về nhiều khía cạnh của bóng đá, KHÔNG CHỈ về World Cup!"
-        
-        # Ví dụ cụ thể cho bóng đá
-        football_examples = ""
-        if topic == "Bóng đá":
-            football_examples = """
-
-Ví dụ câu hỏi tốt về Bóng đá:
-- Câu lạc bộ nào vô địch Champions League nhiều nhất?
-- Ai là cầu thủ ghi nhiều bàn nhất lịch sử Premier League?
-- Derby nào được gọi là "El Clasico"?
-- Sân vận động nào có sức chứa lớn nhất châu Âu?
-- Cầu thủ nào giữ kỷ lục chuyển nhượng đắt nhất?
-- Đội tuyển nào vô địch Euro 2020?
-- Ai được mệnh danh là "The Special One"?
-- Luật việt vị được thay đổi như thế nào năm 2022?"""
         
         prompt = f"""Tạo 1 câu hỏi trắc nghiệm về chủ đề "{topic}" với độ khó "{difficulty}" ({difficulty_guide[difficulty]}).
 
@@ -589,18 +567,6 @@ Yêu cầu:
 3. Giải thích phải chi tiết, có thông tin bổ ích
 4. Hoàn toàn bằng tiếng Việt
 5. Câu hỏi phải CỤ THỂ và ĐỘC ĐÁO
-6. Với Địa lý và Lịch sử: tập trung vào các quốc gia, sự kiện, địa điểm TRÊN TOÀN THẾ GIỚI
-7. Với Bóng đá: ĐA DẠNG các khía cạnh - giải đấu, CLB, cầu thủ, HLV, kỷ lục, luật, sân vận động, v.v.{football_examples}
-
-Ví dụ câu hỏi tốt về Địa lý thế giới:
-- Eo biển nào ngăn cách châu Âu và châu Phi?
-- Thành phố nào là thủ đô của Argentina?
-- Sa mạc Sahara nằm ở châu lục nào?
-
-Ví dụ câu hỏi tốt về Lịch sử thế giới:
-- Ai là hoàng đế đầu tiên của đế chế La Mã?
-- Chiến tranh thế giới thứ nhất bắt đầu năm nào?
-- Nền văn minh Maya phát triển ở khu vực nào?
 
 Trả về JSON với format:
 {{
@@ -614,7 +580,7 @@ Trả về JSON với format:
         messages = [
             {
                 "role": "system",
-                "content": "Bạn là chuyên gia tạo câu hỏi trắc nghiệm chất lượng cao về các chủ đề toàn cầu. Với Bóng đá, hãy tạo câu hỏi ĐA DẠNG về mọi khía cạnh: các giải đấu khác nhau, CLB, cầu thủ, HLV, lịch sử, kỷ lục, luật, công nghệ, sân vận động - KHÔNG CHỈ World Cup. Chỉ trả về JSON, không giải thích thêm."
+                "content": "Bạn là chuyên gia tạo câu hỏi trắc nghiệm chất lượng cao về các chủ đề toàn cầu. Chỉ trả về JSON, không giải thích thêm."
             },
             {
                 "role": "user",
@@ -627,7 +593,6 @@ Trả về JSON với format:
         if not response:
             return None
             
-        # Parse response
         response = response.strip()
         if response.startswith("```json"):
             response = response[7:]
@@ -637,22 +602,20 @@ Trả về JSON với format:
         
         quiz = json.loads(response)
         
-        # Kiểm tra trùng lặp
         if storage and storage.is_duplicate_question(quiz["question"]):
             logger.warning(f"Duplicate question detected: {quiz['question'][:50]}...")
             if retry_count < MAX_QUIZ_RETRY:
                 logger.info(f"Retrying to generate new quiz (attempt {retry_count + 2}/{MAX_QUIZ_RETRY + 1})")
-                await asyncio.sleep(1)  # Delay nhỏ trước khi retry
+                await asyncio.sleep(1)
                 return await generate_quiz_with_gemini(topic, difficulty, retry_count + 1)
             else:
                 logger.error(f"Max retries reached, using duplicate quiz")
         
-        # Thêm metadata
         quiz["topic"] = f"{topic} ({difficulty.title()})"
         quiz["source"] = "Gemini AI"
         quiz["difficulty"] = difficulty
-        quiz["created_at"] = datetime.now().isoformat()
-        quiz["generated"] = True  # Đánh dấu là quiz mới tạo
+        quiz["created_at"] = get_vietnam_time().isoformat()
+        quiz["generated"] = True
         
         return quiz
         
@@ -667,31 +630,25 @@ class QuizGame:
         self.current_quiz = None
         
     async def generate_quiz(self) -> dict:
-        # Random topic và difficulty
         topic = random.choice(QUIZ_TOPICS)
         difficulty = random.choice(DIFFICULTIES)
         
-        # Thử tạo quiz mới bằng Gemini
         logger.info(f"Generating new quiz: {topic} - {difficulty}")
         quiz = await generate_quiz_with_gemini(topic, difficulty)
         
         if quiz:
-            # Lưu quiz mới vào pool
             if storage:
                 storage.add_translated_quiz(quiz)
             return quiz
         
-        # Fallback về pool quiz cũ nếu lỗi
         if storage:
             quiz_pool = storage.get_translated_quiz_pool()
             if quiz_pool:
-                # Lọc theo topic và difficulty nếu có
                 filtered_pool = [
                     q for q in quiz_pool 
                     if topic in q.get('topic', '') and difficulty in q.get('topic', '')
                 ]
                 
-                # Nếu không có quiz phù hợp, dùng toàn bộ pool
                 if not filtered_pool:
                     filtered_pool = quiz_pool
                 
@@ -708,14 +665,12 @@ async def delete_old_messages(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         return
         
     messages = game_messages[chat_id]
-    if len(messages) > MAX_GAME_MESSAGES:
-        to_delete = messages[:-MAX_GAME_MESSAGES]
-        for msg_id in to_delete:
-            try:
-                await context.bot.delete_message(chat_id, msg_id)
-            except:
-                pass
-        game_messages[chat_id] = messages[-MAX_GAME_MESSAGES:]
+    for msg_id in messages[:-MAX_GAME_MESSAGES]:
+        try:
+            await context.bot.delete_message(chat_id, msg_id)
+        except:
+            pass
+    game_messages[chat_id] = messages[-MAX_GAME_MESSAGES:] if len(messages) > MAX_GAME_MESSAGES else messages
 
 async def add_game_message(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in game_messages:
@@ -737,9 +692,11 @@ async def cleanup_game(chat_id: int, keep_active: bool = False):
     if chat_id in game_start_times:
         del game_start_times[chat_id]
     
-    # Cleanup quiz scheduling tracker
     if chat_id in quiz_scheduling:
         del quiz_scheduling[chat_id]
+    
+    if chat_id in game_messages and len(game_messages[chat_id]) > MAX_GAME_MESSAGES:
+        game_messages[chat_id] = game_messages[chat_id][-MAX_GAME_MESSAGES:]
     
     keys_to_remove = [key for key in user_answered.keys() if key[0] == chat_id]
     for key in keys_to_remove:
@@ -747,19 +704,17 @@ async def cleanup_game(chat_id: int, keep_active: bool = False):
 
 async def schedule_next_quiz(chat_id: int, context: ContextTypes.DEFAULT_TYPE, delay: int = 5):
     try:
-        # Check xem có đang schedule quiz không
         if chat_id in quiz_scheduling:
             last_schedule = quiz_scheduling[chat_id]
-            if (datetime.now() - last_schedule).total_seconds() < delay + 2:  # Thêm buffer 2s
+            if (get_vietnam_time() - last_schedule).total_seconds() < delay + 2:
                 logger.warning(f"Quiz already scheduled recently for chat {chat_id}, skipping")
                 return
         
-        quiz_scheduling[chat_id] = datetime.now()
+        quiz_scheduling[chat_id] = get_vietnam_time()
         logger.info(f"Scheduled next quiz for chat {chat_id} after {delay}s delay")
         
         await asyncio.sleep(delay)
         
-        # Double check sau khi sleep
         if chat_id not in minigame_groups:
             logger.info(f"Chat {chat_id} no longer in minigame groups")
             return
@@ -774,7 +729,6 @@ async def schedule_next_quiz(chat_id: int, context: ContextTypes.DEFAULT_TYPE, d
     except Exception as e:
         logger.error(f"Error scheduling next quiz for {chat_id}: {e}")
     finally:
-        # Cleanup scheduling tracker
         if chat_id in quiz_scheduling:
             del quiz_scheduling[chat_id]
 
@@ -786,11 +740,11 @@ async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
         
         if chat_id in active_games:
             game_info = active_games[chat_id]
-            game = game_info["game"]
+            game = game_info.get("game")
             
             try:
                 msg = f"⏰ **Hết 10 phút! Chuyển câu mới...**\n\n"
-                if game_info["type"] == "quiz" and game.current_quiz:
+                if game_info["type"] == "quiz" and game and game.current_quiz:
                     msg += f"✅ Đáp án: **{game.current_quiz['correct']}**\n"
                     msg += f"💡 {game.current_quiz.get('explanation', '')}"
                 
@@ -813,11 +767,13 @@ async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
             asyncio.create_task(schedule_next_quiz(chat_id, context, 5))
 
 async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    # Tạo lock nếu chưa có
     if chat_id not in quiz_creation_locks:
         quiz_creation_locks[chat_id] = asyncio.Lock()
     
-    # Acquire lock để đảm bảo chỉ 1 quiz được tạo
+    if chat_id in active_games or chat_id in quiz_scheduling:
+        logger.warning(f"Game already active/scheduling for chat {chat_id}")
+        return
+    
     async with quiz_creation_locks[chat_id]:
         try:
             logger.info(f"Starting minigame for chat {chat_id}")
@@ -826,20 +782,14 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
                 logger.info(f"Chat {chat_id} not in minigame groups")
                 return
             
-            # Double check xem có đang có game không
             if chat_id in active_games:
                 logger.warning(f"Game already active for chat {chat_id}, skipping")
                 return
             
-            # Check scheduling
-            if chat_id in quiz_scheduling:
-                logger.warning(f"Quiz is being scheduled for chat {chat_id}, skipping")
-                return
-            
-            # Set active game NGAY LẬP TỨC để prevent race condition
             active_games[chat_id] = {"type": "quiz", "game": None, "minigame": True, "creating": True}
+            quiz_scheduling[chat_id] = get_vietnam_time()
             
-            await cleanup_game(chat_id, keep_active=True)  # Cleanup nhưng giữ active flag
+            await cleanup_game(chat_id, keep_active=True)
             
             loading_msg = await context.bot.send_message(
                 chat_id, 
@@ -861,17 +811,17 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
                 error_msg = await context.bot.send_message(chat_id, "❌ Lỗi! Thử lại sau...")
                 await add_game_message(chat_id, error_msg.message_id, context)
                 
-                # Cleanup active games
                 if chat_id in active_games:
                     del active_games[chat_id]
+                if chat_id in quiz_scheduling:
+                    del quiz_scheduling[chat_id]
                 
                 asyncio.create_task(schedule_next_quiz(chat_id, context, 30))
                 return
             
-            # Update active game với game object thật
             game.current_quiz = quiz
             active_games[chat_id] = {"type": "quiz", "game": game, "minigame": True}
-            game_start_times[chat_id] = datetime.now()
+            game_start_times[chat_id] = get_vietnam_time()
             
             keyboard = []
             for option in quiz["options"]:
@@ -879,10 +829,9 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Hiển thị source
             source_text = ""
             if quiz.get("generated"):
-                source_text = " ✨"  # Icon cho quiz mới tạo
+                source_text = " ✨"
             
             quiz_msg = await context.bot.send_message(
                 chat_id,
@@ -900,14 +849,18 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             except:
                 pass
             
+            if chat_id in quiz_scheduling:
+                del quiz_scheduling[chat_id]
+                
             game_timeouts[chat_id] = asyncio.create_task(game_timeout_handler(chat_id, context))
             logger.info(f"Quiz created successfully for chat {chat_id}")
             
         except Exception as e:
             logger.error(f"Error in start_random_minigame for {chat_id}: {e}")
-            # Cleanup active games nếu lỗi
             if chat_id in active_games:
                 del active_games[chat_id]
+            if chat_id in quiz_scheduling:
+                del quiz_scheduling[chat_id]
             await cleanup_game(chat_id)
             if chat_id in minigame_groups:
                 asyncio.create_task(schedule_next_quiz(chat_id, context, 60))
@@ -933,7 +886,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if storage:
             quiz_pool = storage.get_translated_quiz_pool()
             quiz_count = len(quiz_pool)
-            # Đếm số câu hỏi unique
             unique_questions = set()
             for q in quiz_pool:
                 unique_questions.add(storage._normalize_question(q.get("question", "")))
@@ -987,7 +939,6 @@ Bot tự động tạo quiz với Gemini AI!
         )
 
 async def gtop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Bảng xếp hạng theo nhóm"""
     try:
         chat = update.effective_chat
         
@@ -1014,7 +965,6 @@ async def gtop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             medal = medals[i] if i < 3 else f"{i+1}."
             msg += f"{medal} {name}: {_fmt_money(score)} điểm\n"
         
-        # Thêm thống kê của người dùng
         user = update.effective_user
         user_stats = storage.get_user_group_stats(chat.id, user.id)
         if user_stats['score'] > 0:
@@ -1192,7 +1142,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         
-        # Answer với cache_time để tránh spam click
         await query.answer(cache_time=5)
         
         data = query.data
@@ -1200,12 +1149,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         username = user.username or user.first_name
         
-        # Check game còn active không
         if chat_id not in active_games:
             await query.answer("⏰ Quiz đã kết thúc!", show_alert=True)
             return
         
-        # Check user đã trả lời chưa
         user_key = (chat_id, user.id)
         if user_key in user_answered:
             await query.answer("⚠️ Bạn đã trả lời rồi!", show_alert=True)
@@ -1213,14 +1160,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         game_info = active_games[chat_id]
         
-        # Check nếu game đang được tạo
         if game_info.get("creating"):
             await query.answer("⏳ Quiz đang được tạo...", show_alert=True)
             return
             
         game = game_info["game"]
         
-        # Đánh dấu user đã trả lời NGAY LẬP TỨC
         user_answered[user_key] = True
         
         if data.startswith("quiz_") and game_info["type"] == "quiz":
@@ -1230,44 +1175,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             correct_option = quiz['correct']
             correct_answer_text = quiz.get('correct_answer', '')
             
-            # Disable tất cả buttons ngay lập tức cho user này
-            try:
-                # Edit message để disable buttons
-                keyboard = []
-                for option in quiz["options"]:
-                    # Thêm emoji cho option user chọn
-                    if option[0] == answer:
-                        if answer == correct_option:
-                            text = f"✅ {option}"
-                        else:
-                            text = f"❌ {option}"
-                    else:
-                        text = option
-                    keyboard.append([InlineKeyboardButton(text, callback_data=f"disabled_{option[0]}")])
-                
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                # Update message với buttons đã disable cho user này
-                source_text = ""
-                if quiz.get("generated"):
-                    source_text = " ✨"
-                
-                await query.edit_message_text(
-                    f"❓ **{quiz['topic']}{source_text}**\n\n"
-                    f"{quiz['question']}\n\n"
-                    f"🏆 Ai trả lời đúng sẽ được 300 điểm!\n"
-                    f"⚠️ Mỗi người chỉ được chọn 1 lần!\n\n"
-                    f"👤 **{username}** đã chọn: {answer}",
-                    reply_markup=reply_markup,
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.warning(f"Cannot edit message for user {user.id}: {e}")
-            
-            # Delay nhỏ để tránh spam
-            await asyncio.sleep(0.5)
-            
-            # Tạo kết quả
             if answer == correct_option:
                 points = 300
                 result = f"🎉 **{username}** trả lời chính xác! (+{points}đ)\n\n"
@@ -1276,10 +1183,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     result += f" - {correct_answer_text}"
                 result += f"\n💡 {quiz.get('explanation', '')}"
                 
-                # Update điểm toàn cục
                 update_user_balance(user.id, username, points, "quiz")
                 
-                # Update điểm nhóm nếu là nhóm
                 chat = update.effective_chat
                 if chat.type in ["group", "supergroup"] and storage:
                     storage.update_group_score(chat.id, user.id, username, points)
@@ -1291,22 +1196,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     result += f" - {correct_answer_text}"
                 result += f"\n💡 {quiz.get('explanation', '')}"
             
+            try:
+                await query.delete_message()
+            except:
+                pass
+            
             msg = await context.bot.send_message(chat_id, result, parse_mode="Markdown")
             
             if game_info.get("minigame"):
                 await add_game_message(chat_id, msg.message_id, context)
             
-            # Đợi 1 chút trước khi cleanup để tránh race condition
             await asyncio.sleep(1)
             
-            # Cleanup game
             await cleanup_game(chat_id)
             
-            # Schedule next quiz nếu là minigame - CHỈ SCHEDULE 1 LẦN
             if chat_id in minigame_groups and chat_id not in quiz_scheduling:
                 asyncio.create_task(schedule_next_quiz(chat_id, context, 5))
         
-        # Handle disabled buttons
         elif data.startswith("disabled_"):
             await query.answer("⚠️ Bạn đã trả lời rồi!", show_alert=True)
             return
@@ -1379,24 +1285,36 @@ async def quiz_health_check(application: Application):
     while True:
         await asyncio.sleep(QUIZ_CHECK_INTERVAL)
         try:
-            current_time = datetime.now()
+            stuck_games = []
+            current_time = get_vietnam_time()
             
             for chat_id in list(minigame_groups):
                 try:
-                    if chat_id not in active_games:
-                        logger.warning(f"No active game for minigame group {chat_id}, creating new quiz")
-                        asyncio.create_task(start_random_minigame(chat_id, application))
-                        continue
+                    should_restart = False
                     
-                    if chat_id in game_start_times:
-                        game_duration = (current_time - game_start_times[chat_id]).total_seconds()
-                        if game_duration > GAME_TIMEOUT + 60:
-                            logger.warning(f"Game stuck for chat {chat_id}, restarting...")
-                            await cleanup_game(chat_id)
-                            asyncio.create_task(start_random_minigame(chat_id, application))
-                            
+                    if chat_id not in active_games:
+                        should_restart = True
+                    elif chat_id in game_start_times:
+                        duration = (current_time - game_start_times[chat_id]).total_seconds()
+                        if duration > GAME_TIMEOUT + 60:
+                            should_restart = True
+                    
+                    if chat_id in active_games:
+                        game = active_games[chat_id]
+                        if game.get("creating") and not game.get("game"):
+                            should_restart = True
+                    
+                    if should_restart:
+                        stuck_games.append(chat_id)
+                        
                 except Exception as e:
-                    logger.error(f"Error in health check for chat {chat_id}: {e}")
+                    logger.error(f"Check failed for {chat_id}: {e}")
+            
+            for chat_id in stuck_games:
+                logger.warning(f"Restarting stuck game for chat {chat_id}")
+                await cleanup_game(chat_id)
+                await asyncio.sleep(2)
+                asyncio.create_task(start_random_minigame(chat_id, application))
                     
         except Exception as e:
             logger.error(f"Error in quiz health check: {e}")
@@ -1412,7 +1330,6 @@ async def cleanup_memory(application: Application):
             for key in keys_to_remove:
                 del user_answered[key]
             
-            # Cleanup locks cho các chat không active
             inactive_chats = []
             for chat_id in list(quiz_creation_locks.keys()):
                 if chat_id not in minigame_groups and chat_id not in active_games:
@@ -1452,7 +1369,7 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(cleanup_memory(application))
     asyncio.create_task(quiz_health_check(application))
     asyncio.create_task(load_minigame_groups(application))
-    logger.info("Bot started successfully - Fixed duplicate quiz issue!")
+    logger.info("Bot started successfully - Optimized version!")
 
 async def post_shutdown(application: Application) -> None:
     for task in game_timeouts.values():
@@ -1484,7 +1401,7 @@ def main():
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot - Fixed duplicate quiz issue! 💕")
+    logger.info("Linh Bot - Optimized Version! 💕")
     application.run_polling()
 
 if __name__ == "__main__":
