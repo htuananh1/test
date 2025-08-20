@@ -26,14 +26,15 @@ GITHUB_REPO = "htuananh1/Data-manager"
 START_BALANCE = 1000
 CHAT_HISTORY_LIMIT = 6
 GAME_TIMEOUT = 600
-WRONG_ANSWER_COOLDOWN = 5
 MAX_GAME_MESSAGES = 5
 CHAT_SAVE_INTERVAL = 300
 QUIZ_CHECK_INTERVAL = 60
-MAX_QUIZ_RETRY = 3
+MAX_QUIZ_RETRY = 2
 MAX_FILE_SIZE = 3 * 1024 * 1024
 ADMIN_ID = 2026797305
 VIETNAM_TZ = timezone(timedelta(hours=7))
+NEXT_QUIZ_DELAY = 0  # Không delay, tạo quiz ngay
+QUIZ_CREATION_TIMEOUT = 5
 
 QUIZ_TOPICS = [
     "Bóng đá",
@@ -454,7 +455,6 @@ chat_history: Dict[int, deque] = {}
 game_messages: Dict[int, List[int]] = {}
 game_timeouts: Dict[int, asyncio.Task] = {}
 game_start_times: Dict[int, datetime] = {}
-wrong_answer_cooldowns: Dict[Tuple[int, int], datetime] = {}
 minigame_groups: Set[int] = set()
 user_answered: Dict[Tuple[int, int], bool] = {}
 quiz_scheduling: Dict[int, datetime] = {}
@@ -518,77 +518,29 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
 async def generate_quiz_with_gemini(topic: str, difficulty: str, retry_count: int = 0) -> Optional[dict]:
     try:
         difficulty_guide = {
-            "bình thường": "phù hợp với kiến thức phổ thông, không quá chuyên sâu",
-            "khó": "đòi hỏi kiến thức sâu hơn, có thể là những chi tiết ít người biết",
-            "cực khó": "cực kỳ khó, chỉ người am hiểu sâu mới biết, có thể là những chi tiết rất cụ thể"
+            "bình thường": "dễ, phù hợp kiến thức phổ thông",
+            "khó": "khó hơn, cần kiến thức sâu", 
+            "cực khó": "rất khó, chỉ người am hiểu mới biết"
         }
         
-        topic_guide = {
-            "Bóng đá": """về bóng đá thế giới bao gồm:
-- Các giải đấu: World Cup, Euro, Copa America, Champions League, Europa League, Premier League, La Liga, Serie A, Bundesliga, Ligue 1
-- Câu lạc bộ nổi tiếng: Real Madrid, Barcelona, Manchester United, Liverpool, Bayern Munich, Juventus, PSG, v.v.
-- Cầu thủ huyền thoại và hiện tại: Pele, Maradona, Messi, Ronaldo, Neymar, Mbappe, Haaland, v.v.
-- Huấn luyện viên nổi tiếng: Pep Guardiola, Jurgen Klopp, Jose Mourinho, Carlo Ancelotti, v.v.
-- Lịch sử bóng đá: các kỷ lục, thành tích, sự kiện quan trọng
-- Luật bóng đá, công nghệ VAR, các vị trí trong sân
-- Chuyển nhượng kỷ lục, derby nổi tiếng, sân vận động lớn""",
-            "Địa lý": "về địa lý THẾ GIỚI - các quốc gia, thủ đô, dãy núi, sông ngòi, đại dương, sa mạc, hồ, eo biển, quần đảo trên TOÀN THẾ GIỚI",
-            "Lịch sử": "về lịch sử THẾ GIỚI - các nền văn minh cổ đại, đế chế, chiến tranh, nhân vật lịch sử, sự kiện quan trọng của TOÀN THẾ GIỚI",
-            "Kĩ năng sống": "về kỹ năng sống, tâm lý học, giao tiếp, phát triển bản thân, sức khỏe tinh thần",
-            "Động vật": "về động vật trên khắp thế giới, đặc điểm sinh học, môi trường sống, hành vi, các loài quý hiếm",
-            "Anime & Manga": "về anime và manga Nhật Bản, các series nổi tiếng, nhân vật, tác giả, studio"
-        }
-        
-        variation_prompts = [
-            "Tạo câu hỏi mới lạ, chưa từng thấy",
-            "Tạo câu hỏi với góc nhìn độc đáo", 
-            "Tạo câu hỏi về chi tiết thú vị ít ai biết",
-            "Tạo câu hỏi với fact bất ngờ"
-        ]
-        
-        variation = random.choice(variation_prompts) if retry_count > 0 else ""
-        avoid_duplicate = f"\n{variation}" if retry_count > 0 else ""
-        
-        global_emphasis = ""
-        if topic in ["Địa lý", "Lịch sử"]:
-            global_emphasis = "\n\n⚠️ QUAN TRỌNG: Câu hỏi PHẢI về phạm vi THẾ GIỚI/QUỐC TẾ, KHÔNG chỉ riêng về Việt Nam!"
-        
-        football_variety = ""
-        if topic == "Bóng đá":
-            football_variety = "\n\n⚠️ QUAN TRỌNG: Tạo câu hỏi ĐA DẠNG về nhiều khía cạnh của bóng đá, KHÔNG CHỈ về World Cup!"
-        
-        prompt = f"""Tạo 1 câu hỏi trắc nghiệm về chủ đề "{topic}" với độ khó "{difficulty}" ({difficulty_guide[difficulty]}).
+        prompt = f"""Tạo 1 câu hỏi trắc nghiệm {difficulty_guide[difficulty]} về {topic}.
 
-Chủ đề cụ thể: {topic_guide.get(topic, topic)}{global_emphasis}{football_variety}{avoid_duplicate}
-
-Yêu cầu:
-1. Câu hỏi phải thú vị, có giá trị kiến thức
-2. 4 đáp án phải hợp lý, không quá dễ loại trừ
-3. Giải thích phải chi tiết, có thông tin bổ ích
-4. Hoàn toàn bằng tiếng Việt
-5. Câu hỏi phải CỤ THỂ và ĐỘC ĐÁO
-
-Trả về JSON với format:
+Format JSON:
 {{
-  "question": "câu hỏi",
+  "question": "câu hỏi hay và thú vị",
   "options": ["A. đáp án 1", "B. đáp án 2", "C. đáp án 3", "D. đáp án 4"],
-  "correct": "A/B/C/D",
+  "correct": "A hoặc B hoặc C hoặc D",
   "correct_answer": "nội dung đáp án đúng",
-  "explanation": "giải thích chi tiết về đáp án đúng và thông tin thêm"
-}}"""
+  "explanation": "giải thích ngắn gọn"
+}}
+
+Chỉ trả về JSON."""
 
         messages = [
-            {
-                "role": "system",
-                "content": "Bạn là chuyên gia tạo câu hỏi trắc nghiệm chất lượng cao về các chủ đề toàn cầu. Chỉ trả về JSON, không giải thích thêm."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "user", "content": prompt}
         ]
         
-        response = await call_api(messages, max_tokens=600)
+        response = await call_api(messages, max_tokens=400)
         
         if not response:
             return None
@@ -603,13 +555,9 @@ Trả về JSON với format:
         quiz = json.loads(response)
         
         if storage and storage.is_duplicate_question(quiz["question"]):
-            logger.warning(f"Duplicate question detected: {quiz['question'][:50]}...")
             if retry_count < MAX_QUIZ_RETRY:
-                logger.info(f"Retrying to generate new quiz (attempt {retry_count + 2}/{MAX_QUIZ_RETRY + 1})")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 return await generate_quiz_with_gemini(topic, difficulty, retry_count + 1)
-            else:
-                logger.error(f"Max retries reached, using duplicate quiz")
         
         quiz["topic"] = f"{topic} ({difficulty.title()})"
         quiz["source"] = "Gemini AI"
@@ -620,7 +568,7 @@ Trả về JSON với format:
         return quiz
         
     except Exception as e:
-        logger.error(f"Error generating quiz with Gemini: {e}")
+        logger.error(f"Error generating quiz: {e}")
         return None
 
 class QuizGame:
@@ -654,7 +602,7 @@ class QuizGame:
                 
                 if filtered_pool:
                     fallback_quiz = random.choice(filtered_pool)
-                    logger.info(f"Using quiz from pool (filtered: {len(filtered_pool)}, total: {len(quiz_pool)})")
+                    logger.info(f"Using quiz from pool")
                     return fallback_quiz
         
         logger.error("Failed to generate or find any quiz")
@@ -702,71 +650,7 @@ async def cleanup_game(chat_id: int, keep_active: bool = False):
     for key in keys_to_remove:
         del user_answered[key]
 
-async def schedule_next_quiz(chat_id: int, context: ContextTypes.DEFAULT_TYPE, delay: int = 5):
-    try:
-        if chat_id in quiz_scheduling:
-            last_schedule = quiz_scheduling[chat_id]
-            if (get_vietnam_time() - last_schedule).total_seconds() < delay + 2:
-                logger.warning(f"Quiz already scheduled recently for chat {chat_id}, skipping")
-                return
-        
-        quiz_scheduling[chat_id] = get_vietnam_time()
-        logger.info(f"Scheduled next quiz for chat {chat_id} after {delay}s delay")
-        
-        await asyncio.sleep(delay)
-        
-        if chat_id not in minigame_groups:
-            logger.info(f"Chat {chat_id} no longer in minigame groups")
-            return
-            
-        if chat_id in active_games:
-            logger.warning(f"Game already active for chat {chat_id} after delay")
-            return
-        
-        logger.info(f"Creating new quiz for chat {chat_id}")
-        await start_random_minigame(chat_id, context)
-        
-    except Exception as e:
-        logger.error(f"Error scheduling next quiz for {chat_id}: {e}")
-    finally:
-        if chat_id in quiz_scheduling:
-            del quiz_scheduling[chat_id]
-
-async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await asyncio.sleep(GAME_TIMEOUT)
-        
-        logger.info(f"Game timeout for chat {chat_id}")
-        
-        if chat_id in active_games:
-            game_info = active_games[chat_id]
-            game = game_info.get("game")
-            
-            try:
-                msg = f"⏰ **Hết 10 phút! Chuyển câu mới...**\n\n"
-                if game_info["type"] == "quiz" and game and game.current_quiz:
-                    msg += f"✅ Đáp án: **{game.current_quiz['correct']}**\n"
-                    msg += f"💡 {game.current_quiz.get('explanation', '')}"
-                
-                timeout_msg = await context.bot.send_message(chat_id, msg, parse_mode="Markdown")
-                await add_game_message(chat_id, timeout_msg.message_id, context)
-            except Exception as e:
-                logger.error(f"Error sending timeout message to {chat_id}: {e}")
-        
-        await cleanup_game(chat_id)
-        
-        if chat_id in minigame_groups:
-            asyncio.create_task(schedule_next_quiz(chat_id, context))
-            
-    except asyncio.CancelledError:
-        logger.info(f"Timeout handler cancelled for chat {chat_id}")
-    except Exception as e:
-        logger.error(f"Error in timeout handler for {chat_id}: {e}")
-        await cleanup_game(chat_id)
-        if chat_id in minigame_groups:
-            asyncio.create_task(schedule_next_quiz(chat_id, context, 5))
-
-async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE, show_loading: bool = True):
     if chat_id not in quiz_creation_locks:
         quiz_creation_locks[chat_id] = asyncio.Lock()
     
@@ -791,24 +675,33 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             
             await cleanup_game(chat_id, keep_active=True)
             
-            loading_msg = await context.bot.send_message(
-                chat_id, 
-                f"🎲 **MINIGAME**\n"
-                f"🎮 📝 Quiz Trắc Nghiệm\n"
-                f"⏰ Tự đổi câu mới sau 10 phút\n\n"
-                f"⏳ Đang tạo quiz mới với Gemini...",
-                parse_mode="Markdown"
-            )
-            await add_game_message(chat_id, loading_msg.message_id, context)
-            
-            await asyncio.sleep(1)
+            loading_msg = None
+            if show_loading:
+                loading_msg = await context.bot.send_message(
+                    chat_id,
+                    "🎲 **Đang tạo quiz mới...**",
+                    parse_mode="Markdown"
+                )
             
             game = QuizGame(chat_id)
-            quiz = await game.generate_quiz()
+            
+            try:
+                quiz = await asyncio.wait_for(
+                    game.generate_quiz(), 
+                    timeout=QUIZ_CREATION_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Quiz creation timeout for chat {chat_id}")
+                quiz = None
             
             if not quiz:
                 logger.error(f"Failed to generate quiz for chat {chat_id}")
-                error_msg = await context.bot.send_message(chat_id, "❌ Lỗi! Thử lại sau...")
+                if loading_msg:
+                    try:
+                        await loading_msg.delete()
+                    except:
+                        pass
+                error_msg = await context.bot.send_message(chat_id, "❌ Lỗi tạo quiz! Thử lại sau...")
                 await add_game_message(chat_id, error_msg.message_id, context)
                 
                 if chat_id in active_games:
@@ -816,7 +709,8 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
                 if chat_id in quiz_scheduling:
                     del quiz_scheduling[chat_id]
                 
-                asyncio.create_task(schedule_next_quiz(chat_id, context, 30))
+                await asyncio.sleep(5)
+                asyncio.create_task(start_random_minigame(chat_id, context, False))
                 return
             
             game.current_quiz = quiz
@@ -844,10 +738,11 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             )
             await add_game_message(chat_id, quiz_msg.message_id, context)
             
-            try:
-                await context.bot.delete_message(chat_id, loading_msg.message_id)
-            except:
-                pass
+            if loading_msg:
+                try:
+                    await loading_msg.delete()
+                except:
+                    pass
             
             if chat_id in quiz_scheduling:
                 del quiz_scheduling[chat_id]
@@ -863,7 +758,127 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
                 del quiz_scheduling[chat_id]
             await cleanup_game(chat_id)
             if chat_id in minigame_groups:
-                asyncio.create_task(schedule_next_quiz(chat_id, context, 60))
+                await asyncio.sleep(10)
+                asyncio.create_task(start_random_minigame(chat_id, context, False))
+
+async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await asyncio.sleep(GAME_TIMEOUT)
+        
+        logger.info(f"Game timeout for chat {chat_id}")
+        
+        if chat_id in active_games:
+            game_info = active_games[chat_id]
+            game = game_info.get("game")
+            
+            try:
+                msg = f"⏰ **Hết 10 phút! Chuyển câu mới...**\n\n"
+                if game_info["type"] == "quiz" and game and game.current_quiz:
+                    msg += f"✅ Đáp án: **{game.current_quiz['correct']}**\n"
+                    msg += f"💡 {game.current_quiz.get('explanation', '')}"
+                
+                timeout_msg = await context.bot.send_message(chat_id, msg, parse_mode="Markdown")
+                await add_game_message(chat_id, timeout_msg.message_id, context)
+            except Exception as e:
+                logger.error(f"Error sending timeout message to {chat_id}: {e}")
+        
+        await cleanup_game(chat_id)
+        
+        if chat_id in minigame_groups:
+            asyncio.create_task(start_random_minigame(chat_id, context, True))
+            
+    except asyncio.CancelledError:
+        logger.info(f"Timeout handler cancelled for chat {chat_id}")
+    except Exception as e:
+        logger.error(f"Error in timeout handler for {chat_id}: {e}")
+        await cleanup_game(chat_id)
+        if chat_id in minigame_groups:
+            await asyncio.sleep(5)
+            asyncio.create_task(start_random_minigame(chat_id, context, True))
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        query = update.callback_query
+        await query.answer(cache_time=1)
+        
+        data = query.data
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+        username = user.username or user.first_name
+        
+        if chat_id not in active_games:
+            await query.answer("⏰ Quiz đã kết thúc!", show_alert=True)
+            return
+        
+        user_key = (chat_id, user.id)
+        if user_key in user_answered:
+            await query.answer("⚠️ Bạn đã trả lời rồi!", show_alert=True)
+            return
+        
+        game_info = active_games[chat_id]
+        
+        if game_info.get("creating"):
+            await query.answer("⏳ Quiz đang được tạo...", show_alert=True)
+            return
+            
+        game = game_info["game"]
+        user_answered[user_key] = True
+        
+        if data.startswith("quiz_") and game_info["type"] == "quiz":
+            quiz = game.current_quiz
+            answer = data.split("_")[1]
+            
+            correct_option = quiz['correct']
+            correct_answer_text = quiz.get('correct_answer', '')
+            
+            try:
+                await query.delete_message()
+            except:
+                pass
+            
+            if answer == correct_option:
+                points = 300
+                result = f"🎉 **{username}** trả lời chính xác! (+{points}đ)\n\n"
+                result += f"✅ Đáp án: **{correct_option}**"
+                if correct_answer_text:
+                    result += f" - {correct_answer_text}"
+                result += f"\n💡 {quiz.get('explanation', '')}"
+                
+                update_user_balance(user.id, username, points, "quiz")
+                
+                chat = update.effective_chat
+                if chat.type in ["group", "supergroup"] and storage:
+                    storage.update_group_score(chat.id, user.id, username, points)
+                    
+            else:
+                result = f"❌ **{username}** - Chưa đúng!\n\n"
+                result += f"✅ Đáp án đúng: **{correct_option}**"
+                if correct_answer_text:
+                    result += f" - {correct_answer_text}"
+                result += f"\n💡 {quiz.get('explanation', '')}"
+            
+            result += f"\n\n⏳ **Quiz mới đang được tạo...**"
+            
+            msg = await context.bot.send_message(chat_id, result, parse_mode="Markdown")
+            
+            if game_info.get("minigame"):
+                await add_game_message(chat_id, msg.message_id, context)
+            
+            await cleanup_game(chat_id)
+            
+            if chat_id in minigame_groups and chat_id not in quiz_scheduling:
+                asyncio.create_task(start_random_minigame(chat_id, context, False))
+        
+        elif data.startswith("disabled_"):
+            await query.answer("⚠️ Bạn đã trả lời rồi!", show_alert=True)
+            return
+                        
+    except Exception as e:
+        logger.error(f"Error in button callback: {e}")
+        try:
+            await query.answer("❌ Có lỗi xảy ra!", show_alert=True)
+        except:
+            pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -897,14 +912,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🎮 **Minigame tự động trong nhóm**
 Bot tự động tạo quiz với Gemini AI!
+Quiz mới xuất hiện ngay sau khi có người trả lời!
 
 📚 **Các chủ đề:**
-⚽ Bóng đá - Giải đấu, CLB, cầu thủ, HLV, kỷ lục
-🌍 Địa lý thế giới - Các quốc gia, thủ đô, địa hình toàn cầu
-📜 Lịch sử thế giới - Sự kiện, nhân vật lịch sử toàn cầu  
-💡 Kĩ năng sống - Phát triển bản thân, tâm lý
-🦁 Động vật - Các loài động vật trên thế giới
-🎌 Anime & Manga - Văn hóa Nhật Bản
+⚽ Bóng đá | 🌍 Địa lý | 📜 Lịch sử
+💡 Kĩ năng sống | 🦁 Động vật | 🎌 Anime & Manga
 
 ⚡ **Độ khó:** Bình thường, Khó, Cực khó
 
@@ -922,7 +934,6 @@ Bot tự động tạo quiz với Gemini AI!
 /stopminigame - Dừng minigame trong nhóm
 
 📚 **Quiz pool:** {quiz_count} câu ({unique_count} unique)
-📁 **Auto split files at 3MB**
 🏆 **Mỗi nhóm có BXH riêng!**
 
 💬 Chat riêng với mình để trò chuyện!"""
@@ -1019,7 +1030,6 @@ async def clean_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await cleanup_game(chat_id)
         
         game_messages.clear()
-        wrong_answer_cooldowns.clear()
         chat_history.clear()
         
         await update.message.reply_text("✅ Đã dọn dẹp xong! Bot đã được làm mới.")
@@ -1138,92 +1148,6 @@ async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in quiz: {e}")
         await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        query = update.callback_query
-        
-        await query.answer(cache_time=5)
-        
-        data = query.data
-        chat_id = update.effective_chat.id
-        user = update.effective_user
-        username = user.username or user.first_name
-        
-        if chat_id not in active_games:
-            await query.answer("⏰ Quiz đã kết thúc!", show_alert=True)
-            return
-        
-        user_key = (chat_id, user.id)
-        if user_key in user_answered:
-            await query.answer("⚠️ Bạn đã trả lời rồi!", show_alert=True)
-            return
-        
-        game_info = active_games[chat_id]
-        
-        if game_info.get("creating"):
-            await query.answer("⏳ Quiz đang được tạo...", show_alert=True)
-            return
-            
-        game = game_info["game"]
-        
-        user_answered[user_key] = True
-        
-        if data.startswith("quiz_") and game_info["type"] == "quiz":
-            quiz = game.current_quiz
-            answer = data.split("_")[1]
-            
-            correct_option = quiz['correct']
-            correct_answer_text = quiz.get('correct_answer', '')
-            
-            if answer == correct_option:
-                points = 300
-                result = f"🎉 **{username}** trả lời chính xác! (+{points}đ)\n\n"
-                result += f"✅ Đáp án: **{correct_option}**"
-                if correct_answer_text:
-                    result += f" - {correct_answer_text}"
-                result += f"\n💡 {quiz.get('explanation', '')}"
-                
-                update_user_balance(user.id, username, points, "quiz")
-                
-                chat = update.effective_chat
-                if chat.type in ["group", "supergroup"] and storage:
-                    storage.update_group_score(chat.id, user.id, username, points)
-                    
-            else:
-                result = f"❌ **{username}** - Chưa đúng!\n\n"
-                result += f"✅ Đáp án đúng: **{correct_option}**"
-                if correct_answer_text:
-                    result += f" - {correct_answer_text}"
-                result += f"\n💡 {quiz.get('explanation', '')}"
-            
-            try:
-                await query.delete_message()
-            except:
-                pass
-            
-            msg = await context.bot.send_message(chat_id, result, parse_mode="Markdown")
-            
-            if game_info.get("minigame"):
-                await add_game_message(chat_id, msg.message_id, context)
-            
-            await asyncio.sleep(1)
-            
-            await cleanup_game(chat_id)
-            
-            if chat_id in minigame_groups and chat_id not in quiz_scheduling:
-                asyncio.create_task(schedule_next_quiz(chat_id, context, 5))
-        
-        elif data.startswith("disabled_"):
-            await query.answer("⚠️ Bạn đã trả lời rồi!", show_alert=True)
-            return
-                        
-    except Exception as e:
-        logger.error(f"Error in button callback: {e}")
-        try:
-            await query.answer("❌ Có lỗi xảy ra!", show_alert=True)
-        except:
-            pass
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = update.message.text
@@ -1302,7 +1226,9 @@ async def quiz_health_check(application: Application):
                     if chat_id in active_games:
                         game = active_games[chat_id]
                         if game.get("creating") and not game.get("game"):
-                            should_restart = True
+                            create_time = quiz_scheduling.get(chat_id)
+                            if create_time and (current_time - create_time).total_seconds() > 30:
+                                should_restart = True
                     
                     if should_restart:
                         stuck_games.append(chat_id)
@@ -1323,8 +1249,6 @@ async def cleanup_memory(application: Application):
     while True:
         await asyncio.sleep(1800)
         try:
-            wrong_answer_cooldowns.clear()
-            
             current_games = set(active_games.keys())
             keys_to_remove = [key for key in user_answered.keys() if key[0] not in current_games]
             for key in keys_to_remove:
@@ -1346,7 +1270,7 @@ async def cleanup_memory(application: Application):
             for user_id in inactive_users:
                 del chat_history[user_id]
             
-            logger.info(f"Memory cleanup completed. Active chats: {len(chat_history)}, Active games: {len(active_games)}, Locks: {len(quiz_creation_locks)}")
+            logger.info(f"Memory cleanup completed. Active chats: {len(chat_history)}, Active games: {len(active_games)}")
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
 
@@ -1360,7 +1284,7 @@ async def load_minigame_groups(application: Application):
         for i, chat_id in enumerate(minigame_groups):
             try:
                 await start_random_minigame(chat_id, application)
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
             except Exception as e:
                 logger.error(f"Error starting minigame for {chat_id}: {e}")
 
@@ -1369,7 +1293,7 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(cleanup_memory(application))
     asyncio.create_task(quiz_health_check(application))
     asyncio.create_task(load_minigame_groups(application))
-    logger.info("Bot started successfully - Optimized version!")
+    logger.info("Bot started successfully - Fast Quiz Version!")
 
 async def post_shutdown(application: Application) -> None:
     for task in game_timeouts.values():
@@ -1401,7 +1325,7 @@ def main():
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot - Optimized Version! 💕")
+    logger.info("Linh Bot - Fast Quiz Version! 💕")
     application.run_polling()
 
 if __name__ == "__main__":
