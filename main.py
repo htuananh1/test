@@ -512,7 +512,7 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
             f"{BASE_URL}/chat/completions",
             headers=headers,
             json=data,
-            timeout=30
+            timeout=10
         )
         
         if response.status_code == 200:
