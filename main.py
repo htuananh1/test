@@ -19,6 +19,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
 BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
 CHAT_MODEL = "google/gemini-2.5-flash-lite"
+QUIZ_GEN_MODEL = "alibaba/qwen-3-235b"
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 GITHUB_REPO = "htuananh1/Data-manager"
@@ -33,8 +34,10 @@ MAX_QUIZ_RETRY = 2
 MAX_FILE_SIZE = 3 * 1024 * 1024
 ADMIN_ID = 2026797305
 VIETNAM_TZ = timezone(timedelta(hours=7))
-NEXT_QUIZ_DELAY = 0  # Không delay, tạo quiz ngay
-QUIZ_CREATION_TIMEOUT = 5
+NEXT_QUIZ_DELAY = 0
+QUIZ_CREATION_TIMEOUT = 8
+QUIZ_GEN_BATCH_SIZE = 10  # Số quiz tạo mỗi batch
+QUIZ_GEN_DELAY = 2  # Delay giữa mỗi quiz
 
 QUIZ_TOPICS = [
     "Bóng đá",
@@ -49,6 +52,11 @@ DIFFICULTIES = ["bình thường", "khó", "cực khó"]
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Quiz generation state
+quiz_generation_active = False
+quiz_generation_task = None
+quiz_generation_stats = {"total": 0, "duplicates": 0, "errors": 0}
 
 def get_vietnam_time():
     return datetime.now(VIETNAM_TZ)
@@ -65,6 +73,8 @@ class GitHubStorage:
             self._quiz_questions_cache = set()
             self._quiz_file_index = 0
             self._current_file_cache = None
+            self._full_quiz_pool = []  # Cache toàn bộ quiz pool
+            self._last_pool_update = None
             logger.info("GitHub storage initialized successfully")
         except Exception as e:
             logger.error(f"Failed to init GitHub storage: {e}")
@@ -245,6 +255,7 @@ class GitHubStorage:
                     quiz_data["questions"].append(quiz)
                     existing_questions.add(normalized_question)
                     self._quiz_questions_cache.add(normalized_question)
+                    self._full_quiz_pool.append(quiz)  # Thêm vào cache
                     added_count += 1
                     logger.info(f"Added new quiz to {current_file}: {quiz['question'][:50]}...")
                 else:
@@ -253,6 +264,7 @@ class GitHubStorage:
             if added_count > 0:
                 quiz_data["total"] = len(quiz_data["questions"])
                 quiz_data["last_updated"] = timestamp
+                self._last_pool_update = get_vietnam_time()
                 
                 self._save_file(current_file, quiz_data, f"Added {added_count} new quizzes")
         
@@ -402,12 +414,28 @@ class GitHubStorage:
             return {'score': 0, 'games_won': 0}
     
     def get_translated_quiz_pool(self) -> List[dict]:
+        # Sử dụng cache nếu có
+        if self._full_quiz_pool and self._last_pool_update:
+            if (get_vietnam_time() - self._last_pool_update).seconds < 300:  # Cache 5 phút
+                return self._full_quiz_pool
+        
+        # Load lại từ file
         all_quizzes = []
         for file_path in self._get_all_quiz_files():
             data = self._get_file_content(file_path)
             if data and "questions" in data:
                 all_quizzes.extend(data["questions"])
+        
+        self._full_quiz_pool = all_quizzes
+        self._last_pool_update = get_vietnam_time()
         return all_quizzes
+    
+    def get_random_quiz(self) -> Optional[dict]:
+        """Lấy quiz ngẫu nhiên từ pool có sẵn"""
+        quiz_pool = self.get_translated_quiz_pool()
+        if quiz_pool:
+            return random.choice(quiz_pool)
+        return None
     
     def add_translated_quiz(self, quiz: dict):
         self.queue_update("translated_quiz", quiz)
@@ -495,7 +523,7 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
                 f"{BASE_URL}/chat/completions",
                 headers=headers,
                 json=data,
-                timeout=10
+                timeout=15
             )
             
             if response.status_code == 429:
@@ -515,7 +543,8 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
             
     return None
 
-async def generate_quiz_with_gemini(topic: str, difficulty: str, retry_count: int = 0) -> Optional[dict]:
+async def generate_quiz_with_qwen(topic: str, difficulty: str) -> Optional[dict]:
+    """Tạo quiz với Qwen model"""
     try:
         difficulty_guide = {
             "bình thường": "dễ, phù hợp kiến thức phổ thông",
@@ -524,6 +553,7 @@ async def generate_quiz_with_gemini(topic: str, difficulty: str, retry_count: in
         }
         
         prompt = f"""Tạo 1 câu hỏi trắc nghiệm {difficulty_guide[difficulty]} về {topic}.
+Câu hỏi phải độc đáo, không được giống các câu thông thường.
 
 Format JSON:
 {{
@@ -540,7 +570,7 @@ Chỉ trả về JSON."""
             {"role": "user", "content": prompt}
         ]
         
-        response = await call_api(messages, max_tokens=400)
+        response = await call_api(messages, model=QUIZ_GEN_MODEL, max_tokens=500)
         
         if not response:
             return None
@@ -554,13 +584,8 @@ Chỉ trả về JSON."""
         
         quiz = json.loads(response)
         
-        if storage and storage.is_duplicate_question(quiz["question"]):
-            if retry_count < MAX_QUIZ_RETRY:
-                await asyncio.sleep(0.5)
-                return await generate_quiz_with_gemini(topic, difficulty, retry_count + 1)
-        
         quiz["topic"] = f"{topic} ({difficulty.title()})"
-        quiz["source"] = "Gemini AI"
+        quiz["source"] = "Qwen AI"
         quiz["difficulty"] = difficulty
         quiz["created_at"] = get_vietnam_time().isoformat()
         quiz["generated"] = True
@@ -568,8 +593,76 @@ Chỉ trả về JSON."""
         return quiz
         
     except Exception as e:
-        logger.error(f"Error generating quiz: {e}")
+        logger.error(f"Error generating quiz with Qwen: {e}")
         return None
+
+async def continuous_quiz_generation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tạo quiz liên tục"""
+    global quiz_generation_active, quiz_generation_stats
+    
+    chat_id = update.effective_chat.id if update else None
+    
+    while quiz_generation_active:
+        try:
+            # Random topic và difficulty
+            topic = random.choice(QUIZ_TOPICS)
+            difficulty = random.choice(DIFFICULTIES)
+            
+            # Tạo quiz với Qwen
+            quiz = await generate_quiz_with_qwen(topic, difficulty)
+            
+            if quiz:
+                # Check trùng lặp
+                if storage and not storage.is_duplicate_question(quiz["question"]):
+                    storage.add_translated_quiz(quiz)
+                    quiz_generation_stats["total"] += 1
+                    logger.info(f"Generated quiz #{quiz_generation_stats['total']}: {quiz['question'][:50]}...")
+                    
+                    # Update status message
+                    if chat_id and quiz_generation_stats["total"] % 5 == 0:
+                        status_msg = f"🎯 **Đã tạo: {quiz_generation_stats['total']} quiz**\n"
+                        status_msg += f"❌ Trùng lặp: {quiz_generation_stats['duplicates']}\n"
+                        status_msg += f"⚠️ Lỗi: {quiz_generation_stats['errors']}"
+                        
+                        try:
+                            await context.bot.send_message(chat_id, status_msg, parse_mode="Markdown")
+                        except:
+                            pass
+                else:
+                    quiz_generation_stats["duplicates"] += 1
+                    logger.warning(f"Duplicate quiz detected")
+            else:
+                quiz_generation_stats["errors"] += 1
+                logger.error("Failed to generate quiz")
+            
+            # Save batch mỗi 10 quiz
+            if quiz_generation_stats["total"] % QUIZ_GEN_BATCH_SIZE == 0 and storage:
+                await storage.batch_save()
+            
+            # Delay giữa mỗi quiz
+            await asyncio.sleep(QUIZ_GEN_DELAY)
+            
+        except Exception as e:
+            logger.error(f"Error in continuous quiz generation: {e}")
+            quiz_generation_stats["errors"] += 1
+            await asyncio.sleep(5)
+    
+    # Final save khi dừng
+    if storage:
+        await storage.batch_save()
+    
+    # Send final stats
+    if chat_id:
+        final_msg = f"✅ **Đã dừng tạo quiz!**\n\n"
+        final_msg += f"📊 **Thống kê:**\n"
+        final_msg += f"✅ Tổng cộng: {quiz_generation_stats['total']} quiz\n"
+        final_msg += f"❌ Trùng lặp: {quiz_generation_stats['duplicates']}\n"
+        final_msg += f"⚠️ Lỗi: {quiz_generation_stats['errors']}"
+        
+        try:
+            await context.bot.send_message(chat_id, final_msg, parse_mode="Markdown")
+        except:
+            pass
 
 class QuizGame:
     def __init__(self, chat_id: int):
@@ -577,35 +670,15 @@ class QuizGame:
         self.score = 0
         self.current_quiz = None
         
-    async def generate_quiz(self) -> dict:
-        topic = random.choice(QUIZ_TOPICS)
-        difficulty = random.choice(DIFFICULTIES)
-        
-        logger.info(f"Generating new quiz: {topic} - {difficulty}")
-        quiz = await generate_quiz_with_gemini(topic, difficulty)
-        
-        if quiz:
-            if storage:
-                storage.add_translated_quiz(quiz)
-            return quiz
-        
+    async def get_quiz_from_pool(self) -> dict:
+        """Lấy quiz ngẫu nhiên từ pool có sẵn"""
         if storage:
-            quiz_pool = storage.get_translated_quiz_pool()
-            if quiz_pool:
-                filtered_pool = [
-                    q for q in quiz_pool 
-                    if topic in q.get('topic', '') and difficulty in q.get('topic', '')
-                ]
-                
-                if not filtered_pool:
-                    filtered_pool = quiz_pool
-                
-                if filtered_pool:
-                    fallback_quiz = random.choice(filtered_pool)
-                    logger.info(f"Using quiz from pool")
-                    return fallback_quiz
+            quiz = storage.get_random_quiz()
+            if quiz:
+                logger.info(f"Using quiz from pool: {quiz['question'][:50]}...")
+                return quiz
         
-        logger.error("Failed to generate or find any quiz")
+        logger.error("No quiz available in pool")
         return None
 
 async def delete_old_messages(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
@@ -650,7 +723,7 @@ async def cleanup_game(chat_id: int, keep_active: bool = False):
     for key in keys_to_remove:
         del user_answered[key]
 
-async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE, show_loading: bool = True):
+async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE, show_loading: bool = False):
     if chat_id not in quiz_creation_locks:
         quiz_creation_locks[chat_id] = asyncio.Lock()
     
@@ -675,33 +748,14 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             
             await cleanup_game(chat_id, keep_active=True)
             
-            loading_msg = None
-            if show_loading:
-                loading_msg = await context.bot.send_message(
-                    chat_id,
-                    "🎲 **Đang tạo quiz mới...**",
-                    parse_mode="Markdown"
-                )
-            
             game = QuizGame(chat_id)
             
-            try:
-                quiz = await asyncio.wait_for(
-                    game.generate_quiz(), 
-                    timeout=QUIZ_CREATION_TIMEOUT
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"Quiz creation timeout for chat {chat_id}")
-                quiz = None
+            # Lấy quiz từ pool có sẵn
+            quiz = await game.get_quiz_from_pool()
             
             if not quiz:
-                logger.error(f"Failed to generate quiz for chat {chat_id}")
-                if loading_msg:
-                    try:
-                        await loading_msg.delete()
-                    except:
-                        pass
-                error_msg = await context.bot.send_message(chat_id, "❌ Lỗi tạo quiz! Thử lại sau...")
+                logger.error(f"No quiz available for chat {chat_id}")
+                error_msg = await context.bot.send_message(chat_id, "❌ Không có quiz trong dữ liệu! Vui lòng tạo thêm quiz.")
                 await add_game_message(chat_id, error_msg.message_id, context)
                 
                 if chat_id in active_games:
@@ -709,8 +763,6 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
                 if chat_id in quiz_scheduling:
                     del quiz_scheduling[chat_id]
                 
-                await asyncio.sleep(5)
-                asyncio.create_task(start_random_minigame(chat_id, context, False))
                 return
             
             game.current_quiz = quiz
@@ -723,9 +775,7 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            source_text = ""
-            if quiz.get("generated"):
-                source_text = " ✨"
+            source_text = f" [{quiz.get('source', 'Pool')}]"
             
             quiz_msg = await context.bot.send_message(
                 chat_id,
@@ -738,17 +788,11 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             )
             await add_game_message(chat_id, quiz_msg.message_id, context)
             
-            if loading_msg:
-                try:
-                    await loading_msg.delete()
-                except:
-                    pass
-            
             if chat_id in quiz_scheduling:
                 del quiz_scheduling[chat_id]
                 
             game_timeouts[chat_id] = asyncio.create_task(game_timeout_handler(chat_id, context))
-            logger.info(f"Quiz created successfully for chat {chat_id}")
+            logger.info(f"Quiz started successfully for chat {chat_id}")
             
         except Exception as e:
             logger.error(f"Error in start_random_minigame for {chat_id}: {e}")
@@ -757,9 +801,6 @@ async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE
             if chat_id in quiz_scheduling:
                 del quiz_scheduling[chat_id]
             await cleanup_game(chat_id)
-            if chat_id in minigame_groups:
-                await asyncio.sleep(10)
-                asyncio.create_task(start_random_minigame(chat_id, context, False))
 
 async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -785,7 +826,7 @@ async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
         await cleanup_game(chat_id)
         
         if chat_id in minigame_groups:
-            asyncio.create_task(start_random_minigame(chat_id, context, True))
+            asyncio.create_task(start_random_minigame(chat_id, context, False))
             
     except asyncio.CancelledError:
         logger.info(f"Timeout handler cancelled for chat {chat_id}")
@@ -794,7 +835,53 @@ async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
         await cleanup_game(chat_id)
         if chat_id in minigame_groups:
             await asyncio.sleep(5)
-            asyncio.create_task(start_random_minigame(chat_id, context, True))
+            asyncio.create_task(start_random_minigame(chat_id, context, False))
+
+async def genquiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh tạo quiz liên tục với Qwen"""
+    global quiz_generation_active, quiz_generation_task, quiz_generation_stats
+    
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("⚠️ Chỉ admin mới dùng được lệnh này!")
+        return
+    
+    if quiz_generation_active:
+        await update.message.reply_text("⚠️ Đang tạo quiz rồi! Dùng /stopgen để dừng.")
+        return
+    
+    quiz_generation_active = True
+    quiz_generation_stats = {"total": 0, "duplicates": 0, "errors": 0}
+    
+    await update.message.reply_text(
+        "🚀 **Bắt đầu tạo quiz liên tục với Qwen-3-235B!**\n\n"
+        "📊 Sẽ cập nhật tiến độ mỗi 5 quiz\n"
+        "🛑 Dùng /stopgen để dừng",
+        parse_mode="Markdown"
+    )
+    
+    quiz_generation_task = asyncio.create_task(continuous_quiz_generation(update, context))
+
+async def stopgen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh dừng tạo quiz"""
+    global quiz_generation_active, quiz_generation_task
+    
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("⚠️ Chỉ admin mới dùng được lệnh này!")
+        return
+    
+    if not quiz_generation_active:
+        await update.message.reply_text("⚠️ Không có tiến trình tạo quiz nào đang chạy!")
+        return
+    
+    quiz_generation_active = False
+    
+    if quiz_generation_task:
+        quiz_generation_task.cancel()
+        quiz_generation_task = None
+    
+    await update.message.reply_text("⏸️ **Đang dừng tạo quiz...**", parse_mode="Markdown")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -857,8 +944,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     result += f" - {correct_answer_text}"
                 result += f"\n💡 {quiz.get('explanation', '')}"
             
-            result += f"\n\n⏳ **Quiz mới đang được tạo...**"
-            
             msg = await context.bot.send_message(chat_id, result, parse_mode="Markdown")
             
             if game_info.get("minigame"):
@@ -911,8 +996,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💰 Số dư của bạn: {_fmt_money(balance)}
 
 🎮 **Minigame tự động trong nhóm**
-Bot tự động tạo quiz với Gemini AI!
-Quiz mới xuất hiện ngay sau khi có người trả lời!
+Bot dùng quiz từ pool có sẵn (không tạo mới)
 
 📚 **Các chủ đề:**
 ⚽ Bóng đá | 🌍 Địa lý | 📜 Lịch sử
@@ -921,7 +1005,11 @@ Quiz mới xuất hiện ngay sau khi có người trả lời!
 ⚡ **Độ khó:** Bình thường, Khó, Cực khó
 
 📝 **Chơi riêng lẻ:**
-/quiz - Tạo quiz ngẫu nhiên
+/quiz - Quiz ngẫu nhiên từ pool
+
+🔧 **Admin Commands:**
+/genquiz - Tạo quiz liên tục với Qwen-3-235B
+/stopgen - Dừng tạo quiz
 
 📊 **Thông tin:**
 /top - BXH toàn cầu
@@ -929,7 +1017,7 @@ Quiz mới xuất hiện ngay sau khi có người trả lời!
 /bal - Xem số dư
 /stats - Thống kê cá nhân
 
-🛠️ **Admin:**
+🛠️ **Quản lý:**
 /clean - Dọn dẹp bot (chỉ admin)
 /stopminigame - Dừng minigame trong nhóm
 
@@ -948,6 +1036,41 @@ Quiz mới xuất hiện ngay sau khi có người trả lời!
             "📊 /top - Bảng xếp hạng\n"
             "💰 /bal - Xem số dư"
         )
+
+async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = update.effective_chat.id
+        
+        if chat_id in active_games:
+            await update.message.reply_text("⚠️ Đang có game khác!")
+            return
+        
+        game = QuizGame(chat_id)
+        quiz = await game.get_quiz_from_pool()
+        
+        if not quiz:
+            await update.message.reply_text("❌ Không có quiz trong pool! Vui lòng tạo thêm quiz bằng /genquiz")
+            return
+        
+        game.current_quiz = quiz
+        active_games[chat_id] = {"type": "quiz", "game": game}
+        
+        keyboard = []
+        for option in quiz["options"]:
+            keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        source_text = f" [{quiz.get('source', 'Pool')}]"
+        
+        await update.message.reply_text(
+            f"❓ **{quiz['topic']}{source_text}**\n\n{quiz['question']}",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error in quiz: {e}")
+        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
 async def gtop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1097,7 +1220,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += "\n🎮 **Đã chơi:**\n"
             for game, count in games.items():
                 if game == "quiz":
-                    msg += f"• Quiz Gemini: {count} lần\n"
+                    msg += f"• Quiz: {count} lần\n"
         
         await update.message.reply_text(msg, parse_mode="Markdown")
         
@@ -1108,45 +1231,6 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance = get_user_balance(user.id)
         msg = f"📊 **{username}**\n\n💰 Số dư: {_fmt_money(balance)}"
         await update.message.reply_text(msg, parse_mode="Markdown")
-
-async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        chat_id = update.effective_chat.id
-        
-        if chat_id in active_games:
-            await update.message.reply_text("⚠️ Đang có game khác!")
-            return
-        
-        loading_msg = await update.message.reply_text("⏳ Đang tạo quiz mới với Gemini...")
-        
-        game = QuizGame(chat_id)
-        quiz = await game.generate_quiz()
-        
-        if not quiz:
-            await loading_msg.edit_text("❌ Lỗi tạo câu hỏi!")
-            return
-        
-        game.current_quiz = quiz
-        active_games[chat_id] = {"type": "quiz", "game": game}
-        
-        keyboard = []
-        for option in quiz["options"]:
-            keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        source_text = ""
-        if quiz.get("generated"):
-            source_text = " ✨"
-        
-        await loading_msg.edit_text(
-            f"❓ **{quiz['topic']}{source_text}**\n\n{quiz['question']}",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.error(f"Error in quiz: {e}")
-        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1293,9 +1377,15 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(cleanup_memory(application))
     asyncio.create_task(quiz_health_check(application))
     asyncio.create_task(load_minigame_groups(application))
-    logger.info("Bot started successfully - Fast Quiz Version!")
+    logger.info("Bot started - Using quiz pool only version!")
 
 async def post_shutdown(application: Application) -> None:
+    global quiz_generation_active, quiz_generation_task
+    
+    quiz_generation_active = False
+    if quiz_generation_task:
+        quiz_generation_task.cancel()
+    
     for task in game_timeouts.values():
         try:
             task.cancel()
@@ -1320,12 +1410,14 @@ def main():
     application.add_handler(CommandHandler("stats", stats_cmd))
     application.add_handler(CommandHandler("clean", clean_cmd))
     application.add_handler(CommandHandler("stopminigame", stopminigame_cmd))
+    application.add_handler(CommandHandler("genquiz", genquiz_cmd))
+    application.add_handler(CommandHandler("stopgen", stopgen_cmd))
     
     application.add_handler(CallbackQueryHandler(button_callback))
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot - Fast Quiz Version! 💕")
+    logger.info("Linh Bot - Pool Quiz Version! 💕")
     application.run_polling()
 
 if __name__ == "__main__":
