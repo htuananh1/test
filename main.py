@@ -36,8 +36,8 @@ ADMIN_ID = 2026797305
 VIETNAM_TZ = timezone(timedelta(hours=7))
 NEXT_QUIZ_DELAY = 0
 QUIZ_CREATION_TIMEOUT = 8
-QUIZ_GEN_BATCH_SIZE = 5  # Giảm xuống để save thường xuyên hơn
-QUIZ_GEN_DELAY = 1  # Giảm delay để tạo nhanh hơn
+QUIZ_GEN_BATCH_SIZE = 5
+QUIZ_GEN_DELAY = 1
 
 QUIZ_TOPICS = [
     "Bóng đá",
@@ -74,7 +74,7 @@ class GitHubStorage:
             self._current_file_cache = None
             self._full_quiz_pool = []
             self._last_pool_update = None
-            self._file_sizes_cache = {}  # Cache file sizes
+            self._file_sizes_cache = {}
             logger.info("GitHub storage initialized successfully")
         except Exception as e:
             logger.error(f"Failed to init GitHub storage: {e}")
@@ -85,14 +85,13 @@ class GitHubStorage:
             file = self.repo.get_contents(path, ref=self.branch)
             content = base64.b64decode(file.content).decode('utf-8')
             data = json.loads(content)
-            self._file_sizes_cache[path] = file.size  # Update cache
+            self._file_sizes_cache[path] = file.size
             return data
         except Exception as e:
             logger.warning(f"File {path} not found or error: {e}")
             return None
     
     def _get_file_size(self, path: str) -> int:
-        # Check cache first
         if path in self._file_sizes_cache:
             return self._file_sizes_cache[path]
             
@@ -104,40 +103,33 @@ class GitHubStorage:
             return 0
     
     def _estimate_json_size(self, data: dict) -> int:
-        """Ước tính kích thước JSON"""
         json_str = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
         return len(json_str.encode('utf-8'))
     
     def _get_current_quiz_file(self) -> str:
-        """Tìm file quiz hiện tại hoặc tạo file mới nếu cần"""
         base_path = "data/translated_quiz_pool"
         
-        # Check file gốc
         main_file = f"{base_path}.json"
         main_size = self._get_file_size(main_file)
         
         if main_size == 0:
-            # File chưa tồn tại, dùng luôn
             return main_file
-        elif main_size < MAX_FILE_SIZE - 50000:  # Để buffer 50KB
+        elif main_size < MAX_FILE_SIZE - 50000:
             return main_file
         
-        # Tìm file đánh số
         index = 1
         while True:
             file_path = f"{base_path}_{index}.json"
             size = self._get_file_size(file_path)
             
             if size == 0:
-                # File chưa tồn tại
                 logger.info(f"Creating new quiz file: {file_path}")
                 return file_path
             elif size < MAX_FILE_SIZE - 50000:
-                # File còn chỗ
                 return file_path
             
             index += 1
-            if index > 100:  # Safety limit
+            if index > 100:
                 logger.error("Too many quiz files!")
                 break
         
@@ -147,11 +139,9 @@ class GitHubStorage:
         files = []
         base_path = "data/translated_quiz_pool"
         
-        # File gốc
         if self._get_file_size(f"{base_path}.json") > 0:
             files.append(f"{base_path}.json")
         
-        # Các file đánh số
         index = 1
         while True:
             file_path = f"{base_path}_{index}.json"
@@ -159,7 +149,7 @@ class GitHubStorage:
                 break
             files.append(file_path)
             index += 1
-            if index > 100:  # Safety limit
+            if index > 100:
                 break
         
         return files
@@ -167,7 +157,6 @@ class GitHubStorage:
     def _save_file(self, path: str, data: dict, message: str):
         try:
             if "translated_quiz_pool" in path and "questions" in data:
-                # Compact JSON format để tiết kiệm space
                 content = '{\n  "questions": [\n'
                 questions = []
                 for quiz in data["questions"]:
@@ -191,7 +180,6 @@ class GitHubStorage:
                 self.repo.create_file(path, message, content, self.branch)
                 logger.info(f"Created file: {path} (size: {content_size:,} bytes)")
             
-            # Update cache
             self._file_sizes_cache[path] = content_size
                 
         except Exception as e:
@@ -209,12 +197,11 @@ class GitHubStorage:
         }
     
     async def batch_save(self, force_quiz: bool = False):
-        if not self._pending_updates and not self._chat_save_queue:
+        if not self._pending_updates and not self._chat_save_queue and not force_quiz:
             return
             
         timestamp = get_vietnam_time().isoformat()
         
-        # Save scores
         if "scores" in self._pending_updates:
             scores_data = self._get_file_content("data/scores.json") or {"users": {}}
             
@@ -247,7 +234,6 @@ class GitHubStorage:
             
             self._save_file("data/scores.json", scores_data, f"Batch update scores at {timestamp}")
         
-        # Save group scores
         if "group_scores" in self._pending_updates:
             for update in self._pending_updates["group_scores"]:
                 chat_id = update["chat_id"]
@@ -276,81 +262,51 @@ class GitHubStorage:
                 group_data["last_updated"] = timestamp
                 self._save_file(file_path, group_data, f"Update group {chat_id} scores")
         
-        # Save quiz với smart file splitting
-        if "translated_quiz" in self._pending_updates or force_quiz:
+        if "translated_quiz" in self._pending_updates:
             added_total = 0
             duplicate_total = 0
             
-            # Group quiz by files
-            file_groups = {}
+            current_file = self._get_current_quiz_file()
+            quiz_data = self._get_file_content(current_file) or {"questions": []}
             
-            for quiz in self._pending_updates.get("translated_quiz", []):
+            existing_questions = {self._normalize_question(q.get("question")) for q in quiz_data["questions"]}
+            
+            for quiz in self._pending_updates["translated_quiz"]:
                 normalized_question = self._normalize_question(quiz.get("question"))
                 
-                # Check duplicate
-                if normalized_question in self._quiz_questions_cache:
+                if normalized_question in existing_questions or normalized_question in self._quiz_questions_cache:
                     duplicate_total += 1
-                    logger.warning(f"Skipped duplicate quiz: {quiz['question'][:50]}...")
+                    logger.warning(f"Skipped duplicate: {quiz['question'][:30]}...")
                     continue
                 
-                # Find appropriate file
-                current_file = self._get_current_quiz_file()
-                
-                if current_file not in file_groups:
-                    # Load existing data for this file
-                    existing_data = self._get_file_content(current_file) or {"questions": []}
-                    file_groups[current_file] = {
-                        "questions": existing_data.get("questions", []),
-                        "new_questions": []
-                    }
-                
-                # Add to appropriate file group
-                file_groups[current_file]["new_questions"].append(quiz)
+                quiz_data["questions"].append(quiz)
+                existing_questions.add(normalized_question)
                 self._quiz_questions_cache.add(normalized_question)
                 self._full_quiz_pool.append(quiz)
                 added_total += 1
+                
+                estimated_size = self._estimate_json_size(quiz_data)
+                if estimated_size > MAX_FILE_SIZE - 50000:
+                    quiz_data["total"] = len(quiz_data["questions"])
+                    quiz_data["last_updated"] = timestamp
+                    self._save_file(current_file, quiz_data, f"Added {added_total} quizzes")
+                    
+                    current_file = self._get_current_quiz_file()
+                    quiz_data = {"questions": []}
+                    existing_questions = set()
+                    added_total = 0
             
-            # Save each file
-            for file_path, file_data in file_groups.items():
-                if file_data["new_questions"]:
-                    # Merge existing and new questions
-                    all_questions = file_data["questions"] + file_data["new_questions"]
-                    
-                    # Check if need to split
-                    quiz_data = {
-                        "questions": all_questions,
-                        "total": len(all_questions),
-                        "last_updated": timestamp
-                    }
-                    
-                    estimated_size = self._estimate_json_size(quiz_data)
-                    
-                    if estimated_size > MAX_FILE_SIZE:
-                        # Split into multiple files
-                        logger.info(f"File {file_path} too large ({estimated_size:,} bytes), splitting...")
-                        
-                        # Keep existing questions in current file
-                        quiz_data["questions"] = file_data["questions"]
-                        quiz_data["total"] = len(file_data["questions"])
-                        self._save_file(file_path, quiz_data, f"Keep existing {len(file_data['questions'])} quizzes")
-                        
-                        # Save new questions to new file
-                        new_file = self._get_current_quiz_file()
-                        new_quiz_data = {
-                            "questions": file_data["new_questions"],
-                            "total": len(file_data["new_questions"]),
-                            "last_updated": timestamp
-                        }
-                        self._save_file(new_file, new_quiz_data, f"Added {len(file_data['new_questions'])} new quizzes")
-                    else:
-                        # Save all to current file
-                        self._save_file(file_path, quiz_data, f"Added {len(file_data['new_questions'])} new quizzes")
+            if quiz_data["questions"]:
+                quiz_data["total"] = len(quiz_data["questions"])
+                quiz_data["last_updated"] = timestamp
+                self._save_file(current_file, quiz_data, f"Added {added_total} quizzes")
             
-            if added_total > 0:
-                logger.info(f"Batch save completed: {added_total} added, {duplicate_total} duplicates")
+            if added_total > 0 or duplicate_total > 0:
+                logger.info(f"Batch save: {added_total} added, {duplicate_total} duplicates")
                 self._last_pool_update = get_vietnam_time()
+            
+            self._pending_updates["translated_quiz"] = []
         
-        # Save chat history
         current_time = get_vietnam_time()
         for chat_id, chat_data in list(self._chat_save_queue.items()):
             if (current_time - chat_data["timestamp"]).total_seconds() < CHAT_SAVE_INTERVAL:
@@ -364,7 +320,8 @@ class GitHubStorage:
             self._save_file(f"data/chat_history/{chat_id}.json", data, f"Save chat history: {chat_id}")
             del self._chat_save_queue[chat_id]
         
-        self._pending_updates = {}
+        if "translated_quiz" not in self._pending_updates:
+            self._pending_updates = {}
         self._last_batch_save = get_vietnam_time()
     
     def _normalize_question(self, question: str) -> str:
@@ -383,7 +340,6 @@ class GitHubStorage:
         if normalized in self._quiz_questions_cache:
             return True
         
-        # Load cache if empty
         if not self._quiz_questions_cache:
             logger.info("Loading quiz cache...")
             for file_path in self._get_all_quiz_files():
@@ -391,7 +347,7 @@ class GitHubStorage:
                 if quiz_data and "questions" in quiz_data:
                     for q in quiz_data["questions"]:
                         self._quiz_questions_cache.add(self._normalize_question(q.get("question", "")))
-            logger.info(f"Loaded {len(self._quiz_questions_cache)} unique questions to cache")
+            logger.info(f"Loaded {len(self._quiz_questions_cache)} unique questions")
         
         return normalized in self._quiz_questions_cache
     
@@ -499,22 +455,20 @@ class GitHubStorage:
             return {'score': 0, 'games_won': 0}
     
     def get_translated_quiz_pool(self) -> List[dict]:
-        # Use cache if available and fresh
         if self._full_quiz_pool and self._last_pool_update:
             if (get_vietnam_time() - self._last_pool_update).seconds < 300:
                 return self._full_quiz_pool
         
-        # Reload from files
         all_quizzes = []
         for file_path in self._get_all_quiz_files():
             data = self._get_file_content(file_path)
             if data and "questions" in data:
                 all_quizzes.extend(data["questions"])
-                logger.info(f"Loaded {len(data['questions'])} quizzes from {file_path}")
+                logger.info(f"Loaded {len(data['questions'])} from {file_path}")
         
         self._full_quiz_pool = all_quizzes
         self._last_pool_update = get_vietnam_time()
-        logger.info(f"Total quiz pool: {len(all_quizzes)} questions")
+        logger.info(f"Total pool: {len(all_quizzes)} questions")
         return all_quizzes
     
     def get_random_quiz(self) -> Optional[dict]:
@@ -559,12 +513,10 @@ class GitHubStorage:
         return []
     
     def get_quiz_stats(self) -> dict:
-        """Lấy thống kê về quiz pool"""
         total_quizzes = 0
         files = self._get_all_quiz_files()
         
         for file_path in files:
-            size = self._get_file_size(file_path)
             data = self._get_file_content(file_path)
             if data:
                 total_quizzes += len(data.get("questions", []))
@@ -572,7 +524,7 @@ class GitHubStorage:
         return {
             "total_files": len(files),
             "total_quizzes": total_quizzes,
-            "unique_quizzes": len(self._quiz_questions_cache)
+            "unique_quizzes": len(self._quiz_questions_cache) if self._quiz_questions_cache else total_quizzes
         }
 
 try:
@@ -619,7 +571,7 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
                 "model": model or CHAT_MODEL,
                 "messages": messages,
                 "max_tokens": max_tokens,
-                "temperature": 0.8,  # Tăng để có variety
+                "temperature": 0.8,
                 "top_p": 0.9
             }
             
@@ -648,7 +600,6 @@ async def call_api(messages: List[dict], model: str = None, max_tokens: int = 40
     return None
 
 async def generate_quiz_with_qwen(topic: str, difficulty: str, variation: int = 0) -> Optional[dict]:
-    """Tạo quiz với Qwen model với variation để tránh trùng"""
     try:
         difficulty_guide = {
             "bình thường": "dễ, kiến thức phổ thông",
@@ -656,7 +607,6 @@ async def generate_quiz_with_qwen(topic: str, difficulty: str, variation: int = 
             "cực khó": "rất khó, chỉ người am hiểu mới biết"
         }
         
-        # Thêm variation prompts
         variations = [
             "Tạo câu hỏi độc đáo, chưa từng thấy",
             "Tạo câu hỏi về góc nhìn mới lạ",
@@ -711,7 +661,6 @@ Format JSON ngắn gọn:
         return None
 
 async def continuous_quiz_generation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Tạo quiz liên tục với tốc độ nhanh"""
     global quiz_generation_active, quiz_generation_stats
     
     chat_id = update.effective_chat.id if update else None
@@ -719,27 +668,21 @@ async def continuous_quiz_generation(update: Update, context: ContextTypes.DEFAU
     
     while quiz_generation_active:
         try:
-            # Random topic và difficulty
             topic = random.choice(QUIZ_TOPICS)
             difficulty = random.choice(DIFFICULTIES)
             
-            # Tạo quiz với variation
             quiz = await generate_quiz_with_qwen(topic, difficulty, variation_counter)
             variation_counter += 1
             
             if quiz:
-                # Check trùng lặp
                 if storage and not storage.is_duplicate_question(quiz["question"]):
                     storage.add_translated_quiz(quiz)
                     quiz_generation_stats["total"] += 1
-                    logger.info(f"Generated quiz #{quiz_generation_stats['total']}: {quiz['question'][:50]}...")
+                    logger.info(f"Generated #{quiz_generation_stats['total']}: {quiz['question'][:50]}...")
                     
-                    # Update status mỗi 10 quiz (thay vì 5)
                     if quiz_generation_stats["total"] % 10 == 0:
-                        # Force save
                         await storage.batch_save(force_quiz=True)
                         
-                        # Send status
                         if chat_id:
                             stats = storage.get_quiz_stats()
                             status_msg = f"🎯 **Tiến độ tạo quiz:**\n"
@@ -761,11 +704,9 @@ async def continuous_quiz_generation(update: Update, context: ContextTypes.DEFAU
                 quiz_generation_stats["errors"] += 1
                 logger.error("Failed to generate quiz")
             
-            # Save batch mỗi 5 quiz
             if quiz_generation_stats["total"] % QUIZ_GEN_BATCH_SIZE == 0 and storage:
                 await storage.batch_save(force_quiz=True)
             
-            # Delay ngắn
             await asyncio.sleep(QUIZ_GEN_DELAY)
             
         except Exception as e:
@@ -773,11 +714,9 @@ async def continuous_quiz_generation(update: Update, context: ContextTypes.DEFAU
             quiz_generation_stats["errors"] += 1
             await asyncio.sleep(3)
     
-    # Final save
     if storage:
         await storage.batch_save(force_quiz=True)
     
-    # Send final stats
     if chat_id:
         stats = storage.get_quiz_stats() if storage else {}
         final_msg = f"✅ **Đã dừng tạo quiz!**\n\n"
@@ -1015,8 +954,6 @@ async def stopgen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("⏸️ **Đang dừng và lưu quiz...**", parse_mode="Markdown")
 
-# ... (phần còn lại của code giữ nguyên như trước)
-
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
@@ -1112,7 +1049,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if storage:
                 storage.add_minigame_group(chat.id)
             
-            if chat_id not in active_games:
+            if chat.id not in active_games:
                 asyncio.create_task(start_random_minigame(chat.id, context))
         
         quiz_stats = {"total_quizzes": 0, "total_files": 0}
@@ -1503,7 +1440,7 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(cleanup_memory(application))
     asyncio.create_task(quiz_health_check(application))
     asyncio.create_task(load_minigame_groups(application))
-    logger.info("Bot started - Optimized file splitting version!")
+    logger.info("Bot started - Fixed save quiz version!")
 
 async def post_shutdown(application: Application) -> None:
     global quiz_generation_active, quiz_generation_task
@@ -1519,7 +1456,7 @@ async def post_shutdown(application: Application) -> None:
             pass
     
     if storage:
-        await storage.batch_save()
+        await storage.batch_save(force_quiz=True)
     logger.info("Bot shutdown - data saved!")
 
 def main():
@@ -1543,7 +1480,7 @@ def main():
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Linh Bot - Fixed file splitting! 💕")
+    logger.info("Linh Bot - Fixed save quiz! 💕")
     application.run_polling()
 
 if __name__ == "__main__":
