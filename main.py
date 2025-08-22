@@ -12,6 +12,8 @@ import base64
 import os
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
+import psutil
+import gc
 
 load_dotenv()
 
@@ -25,146 +27,172 @@ GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 GITHUB_REPO = os.getenv('GITHUB_REPO', 'htuananh1/Data-manager')
 GITHUB_FILE_PATH = "bot_data.json"
 
+# Hiệu ứng đặc biệt cho cá
+FISH_EFFECTS = {
+    "bronze": {
+        "name": "🥉 Đồng",
+        "multiplier": 3,
+        "chance": 5,  # 5%
+        "color": "bronze"
+    },
+    "silver": {
+        "name": "🥈 Bạc",
+        "multiplier": 7,
+        "chance": 2,  # 2%
+        "color": "silver"
+    },
+    "gold": {
+        "name": "🥇 Vàng",
+        "multiplier": 15,
+        "chance": 0.8,  # 0.8%
+        "color": "gold"
+    },
+    "rainbow": {
+        "name": "🌈 Cầu vồng",
+        "multiplier": 30,
+        "chance": 0.3,  # 0.3%
+        "color": "rainbow"
+    },
+    "zombie": {
+        "name": "🧟 Zombie",
+        "multiplier": 50,
+        "chance": 0.1,  # 0.1%
+        "color": "zombie"
+    },
+    "legendary": {
+        "name": "⚡ Huyền thoại",
+        "multiplier": 100,
+        "chance": 0.05,  # 0.05%
+        "color": "legendary"
+    },
+    "mythic": {
+        "name": "🔮 Thần thoại",
+        "multiplier": 200,
+        "chance": 0.01,  # 0.01%
+        "color": "mythic"
+    }
+}
+
 FISH_TYPES = {
     "🍤 Tép": {
         "value": 2,
         "chance": 18,
         "exp": 1,
-        "multiplier_chance": 3,
-        "multiplier_range": (2, 4)
+        "effect_chance": 8
     },
     "🦐 Tôm": {
         "value": 5, 
         "chance": 15, 
         "exp": 1,
-        "multiplier_chance": 5,
-        "multiplier_range": (2, 5)
+        "effect_chance": 10
     },
     "🐟 Cá nhỏ": {
         "value": 10, 
         "chance": 12, 
         "exp": 2,
-        "multiplier_chance": 8,
-        "multiplier_range": (2, 6)
+        "effect_chance": 12
     },
     "🐠 Cá vàng": {
         "value": 30, 
         "chance": 10, 
         "exp": 5,
-        "multiplier_chance": 10,
-        "multiplier_range": (2, 8)
+        "effect_chance": 15
     },
     "🐡 Cá nóc": {
         "value": 50, 
         "chance": 8, 
         "exp": 8,
-        "multiplier_chance": 12,
-        "multiplier_range": (3, 10)
+        "effect_chance": 18
     },
     "🦀 Cua": {
         "value": 60,
         "chance": 7,
         "exp": 10,
-        "multiplier_chance": 13,
-        "multiplier_range": (3, 11)
+        "effect_chance": 20
     },
     "🦑 Mực": {
         "value": 80, 
         "chance": 6, 
         "exp": 12,
-        "multiplier_chance": 15,
-        "multiplier_range": (3, 12)
+        "effect_chance": 22
     },
     "🦈 Cá mập nhỏ": {
         "value": 100,
         "chance": 5,
         "exp": 15,
-        "multiplier_chance": 16,
-        "multiplier_range": (4, 13)
+        "effect_chance": 25
     },
     "🐙 Bạch tuộc": {
         "value": 200, 
         "chance": 4, 
         "exp": 25,
-        "multiplier_chance": 20,
-        "multiplier_range": (5, 16)
+        "effect_chance": 28
     },
     "🦈 Cá mập lớn": {
         "value": 300,
         "chance": 3,
         "exp": 30,
-        "multiplier_chance": 22,
-        "multiplier_range": (5, 17)
+        "effect_chance": 30
     },
     "🐢 Rùa biển": {
         "value": 400,
         "chance": 2.5,
         "exp": 35,
-        "multiplier_chance": 23,
-        "multiplier_range": (6, 18)
+        "effect_chance": 32
     },
     "🦞 Tôm hùm": {
         "value": 500, 
         "chance": 2, 
         "exp": 40,
-        "multiplier_chance": 24,
-        "multiplier_range": (6, 18)
+        "effect_chance": 35
     },
     "🐊 Cá sấu": {
         "value": 600,
         "chance": 1.5,
         "exp": 45,
-        "multiplier_chance": 25,
-        "multiplier_range": (7, 19)
+        "effect_chance": 38
     },
     "🐋 Cá voi": {
         "value": 800, 
         "chance": 1, 
         "exp": 50,
-        "multiplier_chance": 26,
-        "multiplier_range": (8, 19)
+        "effect_chance": 40
     },
     "🦭 Hải cẩu": {
         "value": 700,
         "chance": 0.8,
         "exp": 55,
-        "multiplier_chance": 27,
-        "multiplier_range": (8, 19)
+        "effect_chance": 42
     },
     "⚡ Cá điện": {
         "value": 1000,
         "chance": 0.6,
         "exp": 60,
-        "multiplier_chance": 28,
-        "multiplier_range": (9, 20)
+        "effect_chance": 45
     },
     "🌟 Cá thần": {
         "value": 1500,
         "chance": 0.4,
         "exp": 80,
-        "multiplier_chance": 29,
-        "multiplier_range": (10, 20)
+        "effect_chance": 48
     },
     "🐉 Rồng biển": {
         "value": 2000,
         "chance": 0.3,
         "exp": 100,
-        "multiplier_chance": 30,
-        "multiplier_range": (12, 20)
+        "effect_chance": 50
     },
     "💎 Kho báu": {
         "value": 3000, 
         "chance": 0.2, 
         "exp": 150,
-        "multiplier_chance": 35,
-        "multiplier_range": (15, 20)
+        "effect_chance": 55
     },
     "👑 Vua đại dương": {
         "value": 5000,
         "chance": 0.1,
         "exp": 200,
-        "multiplier_chance": 40,
-        "multiplier_range": (15, 20)
+        "effect_chance": 60
     }
 }
 
@@ -174,7 +202,9 @@ FISHING_RODS = {
         "price": 0,
         "bonus": 0,
         "speed": 3.0,
+        "auto_speed": 4.0,
         "rare_bonus": 1.0,
+        "auto_rare_penalty": 0.7,
         "description": "Cần câu mặc định"
     },
     "bronze": {
@@ -182,40 +212,50 @@ FISHING_RODS = {
         "price": 500,
         "bonus": 10,
         "speed": 2.5,
+        "auto_speed": 3.5,
         "rare_bonus": 1.2,
-        "description": "+10% cơ hội | Nhanh 0.5s | Hiếm x1.2"
+        "auto_rare_penalty": 0.75,
+        "description": "+10% cơ hội | Nhanh 0.5s | Auto chậm hơn"
     },
     "silver": {
         "name": "🥈 Cần câu bạc",
         "price": 1500,
         "bonus": 25,
         "speed": 2.0,
+        "auto_speed": 3.0,
         "rare_bonus": 1.5,
-        "description": "+25% cơ hội | Nhanh 1s | Hiếm x1.5"
+        "auto_rare_penalty": 0.8,
+        "description": "+25% cơ hội | Nhanh 1s | Auto ổn định"
     },
     "gold": {
         "name": "🥇 Cần câu vàng",
         "price": 5000,
         "bonus": 50,
         "speed": 1.5,
+        "auto_speed": 2.5,
         "rare_bonus": 2.0,
-        "description": "+50% cơ hội | Nhanh 1.5s | Hiếm x2"
+        "auto_rare_penalty": 0.85,
+        "description": "+50% cơ hội | Nhanh 1.5s | Auto tốt"
     },
     "diamond": {
         "name": "💎 Cần câu kim cương",
         "price": 15000,
         "bonus": 100,
         "speed": 1.0,
+        "auto_speed": 2.0,
         "rare_bonus": 3.0,
-        "description": "x2 cơ hội | Siêu nhanh | Hiếm x3"
+        "auto_rare_penalty": 0.9,
+        "description": "x2 cơ hội | Siêu nhanh | Auto nhanh"
     },
     "legendary": {
         "name": "⚡ Cần câu huyền thoại",
         "price": 50000,
         "bonus": 200,
         "speed": 0.5,
+        "auto_speed": 1.5,
         "rare_bonus": 5.0,
-        "description": "x3 cơ hội | Tức thì | Hiếm x5"
+        "auto_rare_penalty": 0.95,
+        "description": "x3 cơ hội | Tức thì | Auto vip"
     }
 }
 
@@ -224,33 +264,61 @@ BAITS = {
         "name": "🪱 Giun",
         "price": 5,
         "bonus": 5,
+        "effect_bonus": 0,
         "description": "+5% cơ hội câu được cá"
     },
     "shrimp": {
         "name": "🦐 Tôm nhỏ",
         "price": 15,
         "bonus": 15,
-        "description": "+15% cơ hội câu được cá tốt"
+        "effect_bonus": 5,
+        "description": "+15% cơ hội | +5% hiệu ứng"
     },
     "special": {
         "name": "✨ Mồi đặc biệt",
         "price": 50,
         "bonus": 30,
-        "description": "+30% cơ hội câu được cá hiếm"
+        "effect_bonus": 10,
+        "description": "+30% cơ hội | +10% hiệu ứng"
     },
     "golden": {
         "name": "🌟 Mồi vàng",
         "price": 100,
         "bonus": 50,
-        "description": "+50% cơ hội & x2 nhân tiền"
+        "effect_bonus": 20,
+        "description": "+50% cơ hội | +20% hiệu ứng"
     }
 }
+
+class ResourceMonitor:
+    """Giám sát tài nguyên hệ thống"""
+    @staticmethod
+    def get_system_stats():
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        memory = psutil.virtual_memory()
+        return {
+            "cpu": cpu_percent,
+            "ram": memory.percent,
+            "ram_used": memory.used / (1024**3),  # GB
+            "ram_total": memory.total / (1024**3)  # GB
+        }
+    
+    @staticmethod
+    def check_resources():
+        stats = ResourceMonitor.get_system_stats()
+        if stats["cpu"] > 80:
+            gc.collect()  # Force garbage collection
+            return False
+        if stats["ram"] > 85:
+            gc.collect()
+            return False
+        return True
 
 class DataManager:
     def __init__(self):
         self.data = {}
         self.lock = threading.Lock()
-        self.executor = ThreadPoolExecutor(max_workers=5)
+        self.executor = ThreadPoolExecutor(max_workers=3)  # Giảm workers
         self.github = Github(GITHUB_TOKEN)
         self.repo = self.github.get_repo(GITHUB_REPO)
         self.load_from_github()
@@ -277,6 +345,10 @@ class DataManager:
             self.data = {}
     
     def save_to_github(self):
+        if not ResourceMonitor.check_resources():
+            logging.warning("High resource usage, skipping save")
+            return False
+            
         with self.lock:
             try:
                 lines = []
@@ -310,7 +382,8 @@ class DataManager:
     def auto_save(self):
         while True:
             time.sleep(60)
-            self.executor.submit(self.save_to_github)
+            if ResourceMonitor.check_resources():
+                self.executor.submit(self.save_to_github)
     
     def start_auto_save(self):
         save_thread = threading.Thread(target=self.auto_save, daemon=True)
@@ -329,7 +402,7 @@ class DataManager:
                     "win_count": 0,
                     "lose_count": 0,
                     "treasures_found": 0,
-                    "total_multiplier": 0,
+                    "total_effects": {},
                     "best_multiplier": 0,
                     "auto_fishing": False,
                     "auto_bait": "none",
@@ -392,6 +465,30 @@ def get_level_title(level):
             return titles[min_level]
     return titles[1]
 
+def calculate_fish_effects(fish_data, bait_effect_bonus=0):
+    """Tính toán hiệu ứng đặc biệt cho cá"""
+    effects = []
+    total_multiplier = 1
+    
+    # Cơ hội base để có hiệu ứng
+    base_effect_chance = fish_data.get("effect_chance", 10) + bait_effect_bonus
+    
+    # Roll cho mỗi hiệu ứng
+    for effect_id, effect_data in FISH_EFFECTS.items():
+        roll = random.uniform(0, 100)
+        if roll <= effect_data["chance"] * (base_effect_chance / 100):
+            effects.append(effect_data)
+            total_multiplier *= effect_data["multiplier"]
+    
+    # Giới hạn tối đa 3 hiệu ứng
+    if len(effects) > 3:
+        effects = sorted(effects, key=lambda x: x["multiplier"], reverse=True)[:3]
+        total_multiplier = 1
+        for effect in effects:
+            total_multiplier *= effect["multiplier"]
+    
+    return effects, total_multiplier
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
@@ -399,6 +496,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = data_manager.get_user(user_id)
     user["username"] = user_name
     data_manager.update_user(user_id, user)
+    
+    # Check system resources
+    stats = ResourceMonitor.get_system_stats()
     
     welcome_text = f"""
 🎮 **Chào mừng {user_name} đến với Fishing Game Bot!** 🎮
@@ -415,13 +515,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /inventory - 🎒 Kho đồ
 /shop - 🛍️ Cửa hàng
 /stats - 📊 Thống kê
-/leaderboard - 🏆 BXH
+/system - 💻 Kiểm tra hệ thống
 
-💡 Cá có cơ hội nhân tiền x2-x20!
-🔥 Dùng /fish để câu Auto!
+💡 Cá có thể có nhiều hiệu ứng cùng lúc!
+🔥 Hiệu ứng: 🥉x3 🥈x7 🥇x15 🌈x30 🧟x50
+
+💻 Hệ thống: CPU {stats['cpu']:.1f}% | RAM {stats['ram']:.1f}%
     """
     
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
+
+async def system_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kiểm tra tài nguyên hệ thống"""
+    stats = ResourceMonitor.get_system_stats()
+    
+    text = f"""
+💻 **THÔNG TIN HỆ THỐNG** 💻
+
+📊 **Tài nguyên:**
+├ 🖥️ CPU: {stats['cpu']:.1f}%
+├ 💾 RAM: {stats['ram']:.1f}%
+├ 📈 RAM đã dùng: {stats['ram_used']:.2f} GB
+└ 📉 RAM tổng: {stats['ram_total']:.2f} GB
+
+👥 **Bot:**
+├ 👤 Tổng users: {len(data_manager.data)}
+├ 🤖 Auto đang chạy: {len(data_manager.auto_fishing_tasks)}
+└ ✅ Trạng thái: {'Tốt' if ResourceMonitor.check_resources() else '⚠️ Cao'}
+    """
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -442,7 +565,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🏆 BXH", callback_data='leaderboard')
         ],
         [
-            InlineKeyboardButton("🎁 Quà Hàng Ngày", callback_data='daily_reward')
+            InlineKeyboardButton("🎁 Quà Hàng Ngày", callback_data='daily_reward'),
+            InlineKeyboardButton("💻 Hệ Thống", callback_data='system_info')
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -473,7 +597,7 @@ async def fish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "🎣 **CHỌN CHẾ ĐỘ CÂU CÁ**\nChọn chế độ bạn muốn:",
+        "🎣 **CHỌN CHẾ ĐỘ CÂU CÁ**\n⚠️ Auto câu chậm và khó ra cá hiếm hơn!",
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
@@ -484,12 +608,23 @@ async def auto_fishing_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     total_coins = 0
     total_exp = 0
     fish_caught = {}
+    effects_count = {}
     
     while user_id in data_manager.auto_fishing_tasks and data_manager.auto_fishing_tasks[user_id]:
+        # Check resources every 10 iterations
+        if count % 10 == 0 and not ResourceMonitor.check_resources():
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"⛔ **AUTO TẠM DỪNG**\nHệ thống đang quá tải!\nĐã câu {count} lần",
+                parse_mode='Markdown'
+            )
+            await asyncio.sleep(5)
+            continue
+        
         count += 1
         user = data_manager.get_user(user_id)
         
-        # Kiểm tra xu
         if user["coins"] < 10:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
@@ -500,7 +635,6 @@ async def auto_fishing_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             data_manager.auto_fishing_tasks[user_id] = False
             break
         
-        # Kiểm tra mồi
         if bait_type != 'none':
             if bait_type not in user['inventory']['baits'] or user['inventory']['baits'][bait_type] <= 0:
                 await context.bot.edit_message_text(
@@ -512,25 +646,22 @@ async def auto_fishing_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 data_manager.auto_fishing_tasks[user_id] = False
                 break
         
-        # Câu cá
         user["coins"] -= 10
         bonus = 0
-        golden_multiplier = 1
+        effect_bonus = 0
         
         if bait_type != 'none' and bait_type in BAITS:
             user['inventory']['baits'][bait_type] -= 1
-            if bait_type == 'golden':
-                bonus = 50
-                golden_multiplier = 2
-            else:
-                bonus = BAITS[bait_type]['bonus']
+            bonus = BAITS[bait_type]['bonus']
+            effect_bonus = BAITS[bait_type].get('effect_bonus', 0)
         
         rod_info = FISHING_RODS[user['inventory']['rod']]
         rod_bonus = rod_info['bonus']
         total_bonus = bonus + rod_bonus
-        rare_multiplier = rod_info['rare_bonus']
         
-        # Random cá
+        # Auto penalty cho cá hiếm
+        rare_multiplier = rod_info['rare_bonus'] * rod_info['auto_rare_penalty']
+        
         rand = random.uniform(0, 100)
         cumulative = 0
         caught_fish = None
@@ -538,8 +669,8 @@ async def auto_fishing_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         exp = 0
         
         for fish_name, fish_data in FISH_TYPES.items():
-            if fish_data["chance"] < 1:  # Cá hiếm
-                chance = fish_data["chance"] * rare_multiplier
+            if fish_data["chance"] < 1:  # Cá hiếm bị giảm tỷ lệ khi auto
+                chance = fish_data["chance"] * rare_multiplier * 0.5  # Giảm 50% nữa
             else:
                 chance = fish_data["chance"] * (1 + total_bonus/100)
             
@@ -549,14 +680,17 @@ async def auto_fishing_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 base_reward = fish_data["value"]
                 exp = fish_data["exp"]
                 
-                multiplier = 1
-                if random.randint(1, 100) <= fish_data["multiplier_chance"]:
-                    min_mult, max_mult = fish_data["multiplier_range"]
-                    multiplier = random.randint(min_mult, max_mult)
-                    if golden_multiplier > 1:
-                        multiplier *= golden_multiplier
+                # Tính hiệu ứng
+                effects, effect_multiplier = calculate_fish_effects(fish_data, effect_bonus)
                 
-                reward = base_reward * multiplier
+                if effects:
+                    for effect in effects:
+                        effect_name = effect["name"]
+                        if effect_name not in effects_count:
+                            effects_count[effect_name] = 0
+                        effects_count[effect_name] += 1
+                
+                reward = base_reward * effect_multiplier
                 break
         
         if caught_fish:
@@ -581,7 +715,7 @@ async def auto_fishing_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         
         data_manager.update_user(user_id, user)
         
-        # Cập nhật message
+        # Update message
         status_text = f"""
 🤖 **AUTO FISHING ĐANG CHẠY** 🤖
 
@@ -595,6 +729,11 @@ async def auto_fishing_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 """
         for fish, qty in sorted(fish_caught.items(), key=lambda x: x[1], reverse=True)[:5]:
             status_text += f"  {fish}: {qty}\n"
+        
+        if effects_count:
+            status_text += "\n✨ **Hiệu ứng:**\n"
+            for effect, qty in sorted(effects_count.items(), key=lambda x: x[1], reverse=True):
+                status_text += f"  {effect}: {qty}\n"
         
         status_text += f"\n🎣 Cần: {rod_info['name']}"
         if bait_type != 'none':
@@ -614,12 +753,51 @@ async def auto_fishing_task(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         except:
             pass
         
-        # Chờ theo tốc độ cần câu
-        await asyncio.sleep(rod_info['speed'])
+        # Auto speed chậm hơn câu thường
+        await asyncio.sleep(rod_info['auto_speed'])
     
-    # Kết thúc auto
     if user_id in data_manager.auto_fishing_tasks:
         del data_manager.auto_fishing_tasks[user_id]
+
+async def treasure(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = data_manager.get_user(user_id)
+    
+    cost = 20
+    if user["coins"] < cost:
+        await update.message.reply_text(f"❌ Bạn không đủ xu! Cần {cost} xu để tìm kho báu.")
+        return
+    
+    keyboard = []
+    for i in range(4):
+        row = []
+        for j in range(4):
+            row.append(InlineKeyboardButton("📦", callback_data=f"treasure_{i}_{j}"))
+        keyboard.append(row)
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    treasure_pos = random.randint(0, 15)
+    gold_positions = random.sample([i for i in range(16) if i != treasure_pos], 3)
+    
+    context.user_data[f'treasure_pos_{user_id}'] = treasure_pos
+    context.user_data[f'gold_positions_{user_id}'] = gold_positions
+    context.user_data[f'treasure_paid_{user_id}'] = True
+    
+    user["coins"] -= cost
+    data_manager.update_user(user_id, user)
+    
+    await update.message.reply_text(
+        f"""🗺️ **TÌM KHO BÁU** 🗺️
+Phí chơi: {cost} xu (đã trừ)
+Chọn 1 hộp để tìm kho báu!
+
+💎 Kho báu = 200 xu
+💰 Vàng = 50 xu
+💩 Trống = 0 xu""",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -628,7 +806,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
     
-    if data == 'fish_single' or data == 'game_fishing':
+    if data == 'system_info':
+        stats = ResourceMonitor.get_system_stats()
+        text = f"""
+💻 **THÔNG TIN HỆ THỐNG** 💻
+
+📊 **Tài nguyên:**
+├ 🖥️ CPU: {stats['cpu']:.1f}%
+├ 💾 RAM: {stats['ram']:.1f}%
+├ 📈 RAM đã dùng: {stats['ram_used']:.2f} GB
+└ 📉 RAM tổng: {stats['ram_total']:.2f} GB
+
+👥 **Bot:**
+├ 👤 Tổng users: {len(data_manager.data)}
+├ 🤖 Auto đang chạy: {len(data_manager.auto_fishing_tasks)}
+└ ✅ Trạng thái: {'Tốt' if ResourceMonitor.check_resources() else '⚠️ Cao'}
+        """
+        await query.edit_message_text(text, parse_mode='Markdown')
+    
+    elif data == 'fish_single' or data == 'game_fishing':
         user = data_manager.get_user(user_id)
         cost = 10
         if user["coins"] < cost:
@@ -672,7 +868,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"🤖 **CHỌN MỒI CHO AUTO**\n⚠️ Auto sẽ câu liên tục cho đến khi hết xu/mồi\n\nChọn mồi:",
+            f"🤖 **CHỌN MỒI CHO AUTO**\n⚠️ Auto chậm và khó ra cá hiếm hơn!\n\nChọn mồi:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -680,17 +876,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith('auto_bait_'):
         bait_type = data.replace('auto_bait_', '')
         
-        # Kiểm tra nếu đang auto
         if user_id in data_manager.auto_fishing_tasks and data_manager.auto_fishing_tasks[user_id]:
             await query.edit_message_text("⚠️ Bạn đang auto rồi! Dùng nút DỪNG để tắt.")
             return
         
-        # Bắt đầu auto
+        if not ResourceMonitor.check_resources():
+            await query.edit_message_text("⚠️ Hệ thống đang quá tải! Thử lại sau.")
+            return
+        
         data_manager.auto_fishing_tasks[user_id] = True
         
         await query.edit_message_text("🤖 **BẮT ĐẦU AUTO FISHING...**")
         
-        # Tạo task auto
         asyncio.create_task(auto_fishing_task(
             update,
             context,
@@ -720,15 +917,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         user["coins"] -= 10
         bonus = 0
-        golden_multiplier = 1
+        effect_bonus = 0
         
         if bait_type != 'none' and bait_type in BAITS:
             user['inventory']['baits'][bait_type] -= 1
-            if bait_type == 'golden':
-                bonus = 50
-                golden_multiplier = 2
-            else:
-                bonus = BAITS[bait_type]['bonus']
+            bonus = BAITS[bait_type]['bonus']
+            effect_bonus = BAITS[bait_type].get('effect_bonus', 0)
         
         data_manager.update_user(user_id, user)
         
@@ -745,7 +939,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caught_fish = None
         reward = 0
         exp = 0
-        multiplier = 1
         
         for fish_name, fish_data in FISH_TYPES.items():
             if fish_data["chance"] < 1:
@@ -759,13 +952,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 base_reward = fish_data["value"]
                 exp = fish_data["exp"]
                 
-                if random.randint(1, 100) <= fish_data["multiplier_chance"]:
-                    min_mult, max_mult = fish_data["multiplier_range"]
-                    multiplier = random.randint(min_mult, max_mult)
-                    if golden_multiplier > 1:
-                        multiplier *= golden_multiplier
+                # Tính hiệu ứng
+                effects, effect_multiplier = calculate_fish_effects(fish_data, effect_bonus)
                 
-                reward = base_reward * multiplier
+                reward = base_reward * effect_multiplier
                 break
         
         if caught_fish:
@@ -785,9 +975,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user["fishing_count"] += 1
             user["win_count"] += 1
             
-            if user.get('best_multiplier', 0) < multiplier:
-                user['best_multiplier'] = multiplier
-            user['total_multiplier'] = user.get('total_multiplier', 0) + multiplier
+            if user.get('best_multiplier', 0) < effect_multiplier:
+                user['best_multiplier'] = effect_multiplier
+            
+            # Lưu thống kê hiệu ứng
+            if 'total_effects' not in user:
+                user['total_effects'] = {}
+            for effect in effects:
+                effect_name = effect["name"]
+                if effect_name not in user['total_effects']:
+                    user['total_effects'][effect_name] = 0
+                user['total_effects'][effect_name] += 1
             
             data_manager.update_user(user_id, user)
             
@@ -796,8 +994,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {caught_fish}
 💰 +{format_number(reward)} xu"""
             
-            if multiplier > 1:
-                result_text += f" (x{multiplier} 🔥)"
+            if effects:
+                result_text += f"\n✨ Hiệu ứng: "
+                for effect in effects:
+                    result_text += f"{effect['name']} "
+                result_text += f"\n🔥 Tổng nhân: x{effect_multiplier}"
             
             result_text += f"""
 ⭐ +{exp} EXP
@@ -891,8 +1092,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         treasure_pos = random.randint(0, 15)
         gold_positions = random.sample([i for i in range(16) if i != treasure_pos], 3)
         
-        context.user_data['treasure_pos'] = treasure_pos
-        context.user_data['gold_positions'] = gold_positions
+        context.user_data[f'treasure_pos_{user_id}'] = treasure_pos
+        context.user_data[f'gold_positions_{user_id}'] = gold_positions
+        context.user_data[f'treasure_paid_{user_id}'] = True
         
         user["coins"] -= cost
         data_manager.update_user(user_id, user)
@@ -915,8 +1117,13 @@ Chọn 1 hộp để tìm kho báu!
         col = int(parts[2])
         position = row * 4 + col
         
-        treasure_pos = context.user_data.get('treasure_pos', -1)
-        gold_positions = context.user_data.get('gold_positions', [])
+        # Check if user has paid
+        if not context.user_data.get(f'treasure_paid_{user_id}', False):
+            await query.edit_message_text("❌ Lỗi! Vui lòng chơi lại.")
+            return
+        
+        treasure_pos = context.user_data.get(f'treasure_pos_{user_id}', -1)
+        gold_positions = context.user_data.get(f'gold_positions_{user_id}', [])
         
         user = data_manager.get_user(user_id)
         
@@ -943,6 +1150,9 @@ Chọn 1 hộp để tìm kho báu!
             result = f"""💩 **TRỐNG!**
 Không có gì ở đây!
 💰 Số dư: {format_number(user['coins'])} xu"""
+        
+        # Clear treasure data
+        context.user_data[f'treasure_paid_{user_id}'] = False
         
         data_manager.update_user(user_id, user)
         await query.edit_message_text(result, parse_mode='Markdown')
@@ -997,9 +1207,15 @@ Không có gì ở đây!
 ❌ Thua: {user['lose_count']} lần
 📊 Tỷ lệ thắng: {win_rate:.1f}%
 💎 Kho báu: {user['treasures_found']} lần
-🔥 Tổng nhân: x{user.get('total_multiplier', 0)}
 ⚡ Nhân cao nhất: x{user.get('best_multiplier', 0)}
-        """
+
+✨ **Hiệu ứng đã nhận:**"""
+        
+        if user.get('total_effects'):
+            for effect_name, count in user['total_effects'].items():
+                text += f"\n  {effect_name}: {count}"
+        else:
+            text += "\n  Chưa có"
         
         await query.edit_message_text(text, parse_mode='Markdown')
     
@@ -1208,7 +1424,8 @@ Không có gì ở đây!
                 InlineKeyboardButton("🏆 BXH", callback_data='leaderboard')
             ],
             [
-                InlineKeyboardButton("🎁 Quà Hàng Ngày", callback_data='daily_reward')
+                InlineKeyboardButton("🎁 Quà Hàng Ngày", callback_data='daily_reward'),
+                InlineKeyboardButton("💻 Hệ Thống", callback_data='system_info')
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1225,190 +1442,26 @@ Chọn hoạt động:
         
         await query.edit_message_text(menu_text, reply_markup=reply_markup, parse_mode='Markdown')
 
-async def inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = data_manager.get_user(user_id)
-    inv = user['inventory']
-    
-    total_fish = sum(inv['fish'].values()) if inv['fish'] else 0
-    
-    fish_list = ""
-    if inv['fish']:
-        for fish_name, count in sorted(inv['fish'].items(), key=lambda x: x[1], reverse=True)[:10]:
-            fish_list += f"  {fish_name}: {count}\n"
-    else:
-        fish_list = "  Chưa có cá nào\n"
-    
-    inventory_text = f"""
-🎒 **KHO ĐỒ CỦA BẠN** 🎒
-
-**🎣 Cần câu:**
-{FISHING_RODS[inv['rod']]['name']}
-{FISHING_RODS[inv['rod']]['description']}
-
-**🪱 Mồi câu:**
-├ 🪱 Giun: {inv['baits']['worm']}
-├ 🦐 Tôm: {inv['baits']['shrimp']}
-├ ✨ Đặc biệt: {inv['baits']['special']}
-└ 🌟 Vàng: {inv['baits'].get('golden', 0)}
-
-**🐟 Cá đã câu:** (Tổng: {total_fish})
-{fish_list}
-
-**📈 Thống kê nhân tiền:**
-├ Tổng nhân: x{user.get('total_multiplier', 0)}
-└ Cao nhất: x{user.get('best_multiplier', 0)}
-    """
-    
-    keyboard = [
-        [InlineKeyboardButton("🛍️ Cửa hàng", callback_data='open_shop')],
-        [InlineKeyboardButton("💰 Bán cá", callback_data='sell_fish')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(inventory_text, reply_markup=reply_markup, parse_mode='Markdown')
-
-async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🎣 Cần câu", callback_data='shop_rods')],
-        [InlineKeyboardButton("🪱 Mồi câu", callback_data='shop_baits')],
-        [InlineKeyboardButton("◀️ Quay lại", callback_data='back_menu')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    shop_text = """
-🛍️ **CỬA HÀNG** 🛍️
-
-Chào mừng đến cửa hàng!
-Chọn danh mục bạn muốn xem:
-    """
-    
-    await update.message.reply_text(shop_text, reply_markup=reply_markup, parse_mode='Markdown')
-
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sorted_users = sorted(data_manager.data.items(), 
-                         key=lambda x: x[1]['coins'], 
-                         reverse=True)[:10]
-    
-    text = "🏆 **BẢNG XẾP HẠNG TOP 10** 🏆\n\n"
-    
-    medals = ["🥇", "🥈", "🥉"]
-    for i, (user_id, user_data) in enumerate(sorted_users, 1):
-        medal = medals[i-1] if i <= 3 else f"{i}."
-        text += f"{medal} {user_data.get('username', 'User')} - {format_number(user_data['coins'])} xu (Lv.{user_data['level']})\n"
-    
-    await update.message.reply_text(text, parse_mode='Markdown')
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = data_manager.get_user(user_id)
-    
-    win_rate = (user['win_count'] / (user['win_count'] + user['lose_count']) * 100) if (user['win_count'] + user['lose_count']) > 0 else 0
-    
-    text = f"""
-📊 **THỐNG KÊ CỦA BẠN** 📊
-
-👤 {user['username']}
-🏆 Level {user['level']} - {get_level_title(user['level'])}
-⭐ {user['exp']} EXP
-💰 {format_number(user['coins'])} xu
-
-📈 **Thành tích:**
-🎣 Câu cá: {user['fishing_count']} lần
-✅ Thắng: {user['win_count']} lần
-❌ Thua: {user['lose_count']} lần
-📊 Tỷ lệ thắng: {win_rate:.1f}%
-💎 Kho báu: {user['treasures_found']} lần
-🔥 Tổng nhân: x{user.get('total_multiplier', 0)}
-⚡ Nhân cao nhất: x{user.get('best_multiplier', 0)}
-    """
-    
-    await update.message.reply_text(text, parse_mode='Markdown')
-
-async def chanle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [
-            InlineKeyboardButton("Chẵn (10 xu)", callback_data='chanle_chan_10'),
-            InlineKeyboardButton("Lẻ (10 xu)", callback_data='chanle_le_10')
-        ],
-        [
-            InlineKeyboardButton("Chẵn (50 xu)", callback_data='chanle_chan_50'),
-            InlineKeyboardButton("Lẻ (50 xu)", callback_data='chanle_le_50')
-        ],
-        [
-            InlineKeyboardButton("Chẵn (100 xu)", callback_data='chanle_chan_100'),
-            InlineKeyboardButton("Lẻ (100 xu)", callback_data='chanle_le_100')
-        ],
-        [
-            InlineKeyboardButton("Chẵn (500 xu)", callback_data='chanle_chan_500'),
-            InlineKeyboardButton("Lẻ (500 xu)", callback_data='chanle_le_500')
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "🎲 **TRÒ CHƠI CHẴN LẺ** 🎲\nChọn chẵn hoặc lẻ:",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
-async def treasure(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = data_manager.get_user(user_id)
-    
-    cost = 20
-    if user["coins"] < cost:
-        await update.message.reply_text(f"❌ Bạn không đủ xu! Cần {cost} xu để tìm kho báu.")
-        return
-    
-    keyboard = []
-    for i in range(4):
-        row = []
-        for j in range(4):
-            row.append(InlineKeyboardButton("📦", callback_data=f"treasure_{i}_{j}"))
-        keyboard.append(row)
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    treasure_pos = random.randint(0, 15)
-    gold_positions = random.sample([i for i in range(16) if i != treasure_pos], 3)
-    
-    context.user_data['treasure_pos'] = treasure_pos
-    context.user_data['gold_positions'] = gold_positions
-    
-    await update.message.reply_text(
-        f"""🗺️ **TÌM KHO BÁU** 🗺️
-Phí chơi: {cost} xu
-Chọn 1 hộp để tìm kho báu!
-
-💎 Kho báu = 200 xu
-💰 Vàng = 50 xu
-💩 Trống = 0 xu""",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-    
-    data_manager.add_coins(user_id, -cost)
-
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu))
     application.add_handler(CommandHandler("fish", fish))
-    application.add_handler(CommandHandler("chanle", chanle))
     application.add_handler(CommandHandler("treasure", treasure))
-    application.add_handler(CommandHandler("inventory", inventory))
-    application.add_handler(CommandHandler("shop", shop))
-    application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CommandHandler("leaderboard", leaderboard))
+    application.add_handler(CommandHandler("system", system_stats))
     
     application.add_handler(CallbackQueryHandler(button_callback))
     
     print("🤖 Bot đang chạy...")
     print("📊 Dữ liệu tự động lưu GitHub mỗi 60 giây")
-    print("👥 Hỗ trợ nhiều người chơi cùng lúc")
-    print("🔥 Auto fishing đã sẵn sàng!")
+    print("💻 Kiểm soát CPU/RAM đã bật")
+    print("✨ Hệ thống hiệu ứng đã sẵn sàng!")
+    
+    # Check initial resources
+    stats = ResourceMonitor.get_system_stats()
+    print(f"💻 CPU: {stats['cpu']:.1f}% | RAM: {stats['ram']:.1f}%")
+    
     application.run_polling()
 
 if __name__ == '__main__':
