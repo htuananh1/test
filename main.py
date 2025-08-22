@@ -444,6 +444,32 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text, parse_mode='Markdown')
 
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = data_manager.get_user(user_id)
+    
+    win_rate = (user['win_count'] / (user['win_count'] + user['lose_count']) * 100) if (user['win_count'] + user['lose_count']) > 0 else 0
+    
+    text = f"""
+📊 **THỐNG KÊ CỦA BẠN** 📊
+
+👤 {user['username']}
+🏆 Level {user['level']} - {get_level_title(user['level'])}
+⭐ {user['exp']} EXP
+💰 {format_number(user['coins'])} xu
+
+📈 **Thành tích:**
+🎣 Câu cá: {user['fishing_count']} lần
+✅ Thắng: {user['win_count']} lần
+❌ Thua: {user['lose_count']} lần
+📊 Tỷ lệ thắng: {win_rate:.1f}%
+💎 Kho báu: {user['treasures_found']} lần
+🔥 Tổng nhân: x{user.get('total_multiplier', 0)}
+⚡ Nhân cao nhất: x{user.get('best_multiplier', 0)}
+    """
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
+
 async def fishing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = data_manager.get_user(user_id)
@@ -538,110 +564,20 @@ Chọn 1 hộp để tìm kho báu!
     
     data_manager.add_coins(user_id, -cost)
 
-async def process_fishing(update: Update, context: ContextTypes.DEFAULT_TYPE, bait_type: str):
-    query = update.callback_query
-    user_id = query.from_user.id
-    user = data_manager.get_user(user_id)
-    
-    data_manager.add_coins(user_id, -10)
-    
-    bonus = 0
-    golden_multiplier = 1
-    if bait_type != 'none':
-        if bait_type in user['inventory']['baits'] and user['inventory']['baits'][bait_type] > 0:
-            user['inventory']['baits'][bait_type] -= 1
-            if bait_type == 'golden':
-                bonus = 50
-                golden_multiplier = 2
-            else:
-                bait_info = BAITS.get(bait_type)
-                bonus = bait_info['bonus'] if bait_info else 0
-    
-    rod_info = FISHING_RODS[user['inventory']['rod']]
-    rod_bonus = rod_info['bonus']
-    total_bonus = bonus + rod_bonus
-    rare_multiplier = rod_info['rare_bonus']
-    
-    await query.edit_message_text(f"🎣 Đang thả câu... (chờ {rod_info['speed']}s)")
-    await asyncio.sleep(rod_info['speed'])
-    
-    rand = random.uniform(0, 100)
-    cumulative = 0
-    caught_fish = None
-    reward = 0
-    exp = 0
-    multiplier = 1
-    
-    for fish_name, fish_data in FISH_TYPES.items():
-        if fish_name in ["🐋 Cá voi", "💎 Kho báu", "🦞 Tôm hùm"]:
-            chance = fish_data["chance"] * (1 + total_bonus/100) * rare_multiplier
-        else:
-            chance = fish_data["chance"] * (1 + total_bonus/100)
-        
-        cumulative += chance
-        if rand <= cumulative:
-            caught_fish = fish_name
-            base_reward = fish_data["value"]
-            exp = fish_data["exp"]
-            
-            if random.randint(1, 100) <= fish_data["multiplier_chance"]:
-                min_mult, max_mult = fish_data["multiplier_range"]
-                multiplier = random.randint(min_mult, max_mult)
-                if golden_multiplier > 1:
-                    multiplier *= golden_multiplier
-            
-            reward = base_reward * multiplier
-            
-            if user.get('best_multiplier', 0) < multiplier:
-                user['best_multiplier'] = multiplier
-            user['total_multiplier'] = user.get('total_multiplier', 0) + multiplier
-            
-            break
-    
-    if caught_fish:
-        if caught_fish not in user['inventory']['fish']:
-            user['inventory']['fish'][caught_fish] = 0
-        user['inventory']['fish'][caught_fish] += 1
-        
-        data_manager.add_coins(user_id, reward)
-        leveled_up = data_manager.add_exp(user_id, exp)
-        
-        user["fishing_count"] += 1
-        user["win_count"] += 1
-        
-        result_text = f"""
-🎉 **BẮT ĐƯỢC!**
-{caught_fish}
-💰 +{format_number(reward)} xu"""
-        
-        if multiplier > 1:
-            result_text += f" (x{multiplier} 🔥)"
-        
-        result_text += f"""
-⭐ +{exp} EXP
-📦 Đã lưu vào kho
-
-💰 Số dư: {format_number(user['coins'] + reward - 10)} xu"""
-        
-        if leveled_up:
-            new_level = user['level'] + 1
-            result_text += f"\n\n🎊 **LEVEL UP! Bạn đã đạt level {new_level}!**"
-    else:
-        user["fishing_count"] += 1
-        result_text = f"😢 Không câu được gì!\n💰 Số dư: {format_number(user['coins'] - 10)} xu"
-    
-    data_manager.update_user(user_id, user)
-    await query.edit_message_text(result_text, parse_mode='Markdown')
-
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
-    user = data_manager.get_user(user_id)
     data = query.data
     
     if data == 'game_fishing':
+        user = data_manager.get_user(user_id)
+        cost = 10
+        if user["coins"] < cost:
+            await query.edit_message_text(f"❌ Bạn không đủ xu! Cần {cost} xu để câu cá.")
+            return
+        
         keyboard = [
             [InlineKeyboardButton(f"🪱 Giun ({user['inventory']['baits']['worm']})", 
                                 callback_data='fish_bait_worm')],
@@ -657,10 +593,130 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         rod_info = FISHING_RODS[user['inventory']['rod']]
         await query.edit_message_text(
-            f"🎣 **CHỌN MỒI CÂU**\nCần: {rod_info['name']}\nTốc độ: {rod_info['speed']}s\nChọn mồi:",
+            f"🎣 **CHỌN MỒI CÂU**\n💰 Phí: 10 xu\nCần: {rod_info['name']}\nTốc độ: {rod_info['speed']}s\n\nChọn mồi:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+    
+    elif data.startswith('fish_bait_'):
+        bait_type = data.replace('fish_bait_', '')
+        user = data_manager.get_user(user_id)
+        
+        # Kiểm tra xu
+        if user["coins"] < 10:
+            await query.edit_message_text("❌ Bạn không đủ xu để câu cá!")
+            return
+        
+        # Kiểm tra mồi
+        if bait_type != 'none':
+            if bait_type not in user['inventory']['baits'] or user['inventory']['baits'][bait_type] <= 0:
+                await query.edit_message_text(f"❌ Bạn không có mồi này!\n💡 Vào /shop để mua mồi.")
+                return
+        
+        # Trừ xu và mồi
+        user["coins"] -= 10
+        bonus = 0
+        golden_multiplier = 1
+        
+        if bait_type != 'none' and bait_type in BAITS:
+            user['inventory']['baits'][bait_type] -= 1
+            if bait_type == 'golden':
+                bonus = 50
+                golden_multiplier = 2
+            else:
+                bonus = BAITS[bait_type]['bonus']
+        
+        data_manager.update_user(user_id, user)
+        
+        # Lấy thông tin cần câu
+        rod_info = FISHING_RODS[user['inventory']['rod']]
+        rod_bonus = rod_info['bonus']
+        total_bonus = bonus + rod_bonus
+        rare_multiplier = rod_info['rare_bonus']
+        
+        # Hiển thị đang câu
+        await query.edit_message_text(f"🎣 Đang thả câu... (chờ {rod_info['speed']}s)")
+        await asyncio.sleep(rod_info['speed'])
+        
+        # Random cá
+        rand = random.uniform(0, 100)
+        cumulative = 0
+        caught_fish = None
+        reward = 0
+        exp = 0
+        multiplier = 1
+        
+        for fish_name, fish_data in FISH_TYPES.items():
+            if fish_name in ["🐋 Cá voi", "💎 Kho báu", "🦞 Tôm hùm"]:
+                chance = fish_data["chance"] * (1 + total_bonus/100) * rare_multiplier
+            else:
+                chance = fish_data["chance"] * (1 + total_bonus/100)
+            
+            cumulative += chance
+            if rand <= cumulative:
+                caught_fish = fish_name
+                base_reward = fish_data["value"]
+                exp = fish_data["exp"]
+                
+                # Tính multiplier
+                if random.randint(1, 100) <= fish_data["multiplier_chance"]:
+                    min_mult, max_mult = fish_data["multiplier_range"]
+                    multiplier = random.randint(min_mult, max_mult)
+                    if golden_multiplier > 1:
+                        multiplier *= golden_multiplier
+                
+                reward = base_reward * multiplier
+                break
+        
+        # Cập nhật kết quả
+        if caught_fish:
+            # Cập nhật user data
+            user = data_manager.get_user(user_id)
+            
+            if caught_fish not in user['inventory']['fish']:
+                user['inventory']['fish'][caught_fish] = 0
+            user['inventory']['fish'][caught_fish] += 1
+            
+            user["coins"] += reward
+            user["exp"] += exp
+            new_level = (user["exp"] // 100) + 1
+            leveled_up = new_level > user["level"]
+            if leveled_up:
+                user["level"] = new_level
+            
+            user["fishing_count"] += 1
+            user["win_count"] += 1
+            
+            if user.get('best_multiplier', 0) < multiplier:
+                user['best_multiplier'] = multiplier
+            user['total_multiplier'] = user.get('total_multiplier', 0) + multiplier
+            
+            data_manager.update_user(user_id, user)
+            
+            # Tạo message kết quả
+            result_text = f"""
+🎉 **BẮT ĐƯỢC!**
+{caught_fish}
+💰 +{format_number(reward)} xu"""
+            
+            if multiplier > 1:
+                result_text += f" (x{multiplier} 🔥)"
+            
+            result_text += f"""
+⭐ +{exp} EXP
+📦 Đã lưu vào kho
+
+💰 Số dư: {format_number(user['coins'])} xu"""
+            
+            if leveled_up:
+                result_text += f"\n\n🎊 **LEVEL UP! Bạn đã đạt level {user['level']}!**"
+        else:
+            user = data_manager.get_user(user_id)
+            user["fishing_count"] += 1
+            data_manager.update_user(user_id, user)
+            result_text = f"😢 Không câu được gì!\n💰 Số dư: {format_number(user['coins'])} xu"
+        
+        await query.edit_message_text(result_text, parse_mode='Markdown')
     
     elif data == 'game_chanle':
         keyboard = [
@@ -685,7 +741,42 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
     
+    elif data.startswith('chanle_'):
+        parts = data.split('_')
+        choice = parts[1]
+        bet = int(parts[2])
+        
+        user = data_manager.get_user(user_id)
+        
+        if user["coins"] < bet:
+            await query.edit_message_text(f"❌ Bạn không đủ {bet} xu để cược!")
+            return
+        
+        dice = random.randint(1, 6)
+        is_even = dice % 2 == 0
+        
+        if (choice == 'chan' and is_even) or (choice == 'le' and not is_even):
+            user["coins"] += bet
+            user["exp"] += 5
+            user["win_count"] += 1
+            result = f"""🎉 **THẮNG!**
+🎲 Xúc xắc: {dice}
+💰 +{bet} xu
+⭐ +5 EXP
+💰 Số dư: {format_number(user['coins'])} xu"""
+        else:
+            user["coins"] -= bet
+            user["lose_count"] += 1
+            result = f"""😢 **THUA!**
+🎲 Xúc xắc: {dice}
+💰 -{bet} xu
+💰 Số dư: {format_number(user['coins'])} xu"""
+        
+        data_manager.update_user(user_id, user)
+        await query.edit_message_text(result, parse_mode='Markdown')
+    
     elif data == 'game_treasure':
+        user = data_manager.get_user(user_id)
         cost = 20
         if user["coins"] < cost:
             await query.edit_message_text(f"❌ Bạn không đủ xu! Cần {cost} xu để tìm kho báu.")
@@ -706,9 +797,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['treasure_pos'] = treasure_pos
         context.user_data['gold_positions'] = gold_positions
         
+        user["coins"] -= cost
+        data_manager.update_user(user_id, user)
+        
         await query.edit_message_text(
             f"""🗺️ **TÌM KHO BÁU** 🗺️
-Phí chơi: {cost} xu
+Phí chơi: {cost} xu (đã trừ)
 Chọn 1 hộp để tìm kho báu!
 
 💎 Kho báu = 200 xu
@@ -717,10 +811,47 @@ Chọn 1 hộp để tìm kho báu!
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+    
+    elif data.startswith('treasure_'):
+        parts = data.split('_')
+        row = int(parts[1])
+        col = int(parts[2])
+        position = row * 4 + col
         
-        data_manager.add_coins(user_id, -cost)
+        treasure_pos = context.user_data.get('treasure_pos', -1)
+        gold_positions = context.user_data.get('gold_positions', [])
+        
+        user = data_manager.get_user(user_id)
+        
+        if position == treasure_pos:
+            reward = 200
+            user["coins"] += reward
+            user["exp"] += 20
+            user["treasures_found"] += 1
+            user["win_count"] += 1
+            result = f"""💎 **KHO BÁU!**
++{reward} xu
+⭐ +20 EXP
+💰 Số dư: {format_number(user['coins'])} xu"""
+        elif position in gold_positions:
+            reward = 50
+            user["coins"] += reward
+            user["exp"] += 10
+            result = f"""💰 **VÀNG!**
++{reward} xu
+⭐ +10 EXP
+💰 Số dư: {format_number(user['coins'])} xu"""
+        else:
+            user["lose_count"] += 1
+            result = f"""💩 **TRỐNG!**
+Không có gì ở đây!
+💰 Số dư: {format_number(user['coins'])} xu"""
+        
+        data_manager.update_user(user_id, user)
+        await query.edit_message_text(result, parse_mode='Markdown')
     
     elif data == 'view_inventory':
+        user = data_manager.get_user(user_id)
         inv = user['inventory']
         total_fish = sum(inv['fish'].values()) if inv['fish'] else 0
         
@@ -752,6 +883,7 @@ Chọn 1 hộp để tìm kho báu!
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     
     elif data == 'view_stats':
+        user = data_manager.get_user(user_id)
         win_rate = (user['win_count'] / (user['win_count'] + user['lose_count']) * 100) if (user['win_count'] + user['lose_count']) > 0 else 0
         
         text = f"""
@@ -803,6 +935,7 @@ Chọn 1 hộp để tìm kho báu!
         await query.edit_message_text(text, parse_mode='Markdown')
     
     elif data == 'daily_reward':
+        user = data_manager.get_user(user_id)
         last_claim = user.get('daily_claimed')
         if last_claim:
             last_date = datetime.fromisoformat(last_claim)
@@ -816,7 +949,7 @@ Chọn 1 hộp để tìm kho báu!
         reward = random.randint(50, 200)
         bonus_baits = random.randint(5, 15)
         
-        data_manager.add_coins(user_id, reward)
+        user["coins"] += reward
         user['inventory']['baits']['worm'] += bonus_baits
         user['daily_claimed'] = datetime.now().isoformat()
         data_manager.update_user(user_id, user)
@@ -825,83 +958,12 @@ Chọn 1 hộp để tìm kho báu!
             f"🎁 **PHẦN THƯỞNG HÀNG NGÀY!**\n"
             f"💰 +{reward} xu\n"
             f"🪱 +{bonus_baits} mồi giun\n"
-            f"💰 Số dư: {format_number(user['coins'] + reward)} xu",
+            f"💰 Số dư: {format_number(user['coins'])} xu",
             parse_mode='Markdown'
         )
     
-    elif data.startswith('fish_bait_'):
-        bait = data.replace('fish_bait_', '')
-        await process_fishing(update, context, bait)
-    
-    elif data.startswith('chanle_'):
-        parts = data.split('_')
-        choice = parts[1]
-        bet = int(parts[2])
-        
-        if user["coins"] < bet:
-            await query.edit_message_text(f"❌ Bạn không đủ {bet} xu để cược!")
-            return
-        
-        dice = random.randint(1, 6)
-        is_even = dice % 2 == 0
-        
-        if (choice == 'chan' and is_even) or (choice == 'le' and not is_even):
-            data_manager.add_coins(user_id, bet)
-            data_manager.add_exp(user_id, 5)
-            user["win_count"] += 1
-            result = f"""🎉 **THẮNG!**
-🎲 Xúc xắc: {dice}
-💰 +{bet} xu
-⭐ +5 EXP
-💰 Số dư: {format_number(user['coins'] + bet)} xu"""
-        else:
-            data_manager.add_coins(user_id, -bet)
-            user["lose_count"] += 1
-            result = f"""😢 **THUA!**
-🎲 Xúc xắc: {dice}
-💰 -{bet} xu
-💰 Số dư: {format_number(user['coins'] - bet)} xu"""
-        
-        data_manager.update_user(user_id, user)
-        await query.edit_message_text(result, parse_mode='Markdown')
-    
-    elif data.startswith('treasure_'):
-        parts = data.split('_')
-        row = int(parts[1])
-        col = int(parts[2])
-        position = row * 4 + col
-        
-        treasure_pos = context.user_data.get('treasure_pos', -1)
-        gold_positions = context.user_data.get('gold_positions', [])
-        
-        if position == treasure_pos:
-            reward = 200
-            data_manager.add_coins(user_id, reward)
-            data_manager.add_exp(user_id, 20)
-            user["treasures_found"] += 1
-            user["win_count"] += 1
-            result = f"""💎 **KHO BÁU!**
-+{reward} xu
-⭐ +20 EXP
-💰 Số dư: {format_number(user['coins'] + reward - 20)} xu"""
-        elif position in gold_positions:
-            reward = 50
-            data_manager.add_coins(user_id, reward)
-            data_manager.add_exp(user_id, 10)
-            result = f"""💰 **VÀNG!**
-+{reward} xu
-⭐ +10 EXP
-💰 Số dư: {format_number(user['coins'] + reward - 20)} xu"""
-        else:
-            user["lose_count"] += 1
-            result = f"""💩 **TRỐNG!**
-Không có gì ở đây!
-💰 Số dư: {format_number(user['coins'] - 20)} xu"""
-        
-        data_manager.update_user(user_id, user)
-        await query.edit_message_text(result, parse_mode='Markdown')
-    
     elif data == 'shop_rods':
+        user = data_manager.get_user(user_id)
         current_rod = user['inventory']['rod']
         
         text = "🎣 **CỬA HÀNG CẦN CÂU**\n\n"
@@ -927,6 +989,8 @@ Không có gì ở đây!
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     
     elif data == 'shop_baits':
+        user = data_manager.get_user(user_id)
+        
         text = "🪱 **CỬA HÀNG MỒI CÂU**\n\n"
         keyboard = []
         
@@ -957,18 +1021,20 @@ Không có gì ở đây!
         rod_id = data.replace('buy_rod_', '')
         rod_info = FISHING_RODS[rod_id]
         
+        user = data_manager.get_user(user_id)
+        
         if user['coins'] < rod_info['price']:
             await query.edit_message_text("❌ Bạn không đủ xu!")
             return
         
-        data_manager.add_coins(user_id, -rod_info['price'])
+        user["coins"] -= rod_info['price']
         user['inventory']['rod'] = rod_id
         data_manager.update_user(user_id, user)
         
         await query.edit_message_text(
             f"✅ **MUA THÀNH CÔNG!**\n"
             f"Bạn đã mua {rod_info['name']}\n"
-            f"💰 Số dư: {format_number(user['coins'] - rod_info['price'])} xu",
+            f"💰 Số dư: {format_number(user['coins'])} xu",
             parse_mode='Markdown'
         )
     
@@ -979,11 +1045,13 @@ Không có gì ở đây!
         bait_info = BAITS[bait_type]
         total_price = bait_info['price'] * amount
         
+        user = data_manager.get_user(user_id)
+        
         if user['coins'] < total_price:
             await query.edit_message_text("❌ Bạn không đủ xu!")
             return
         
-        data_manager.add_coins(user_id, -total_price)
+        user["coins"] -= total_price
         if bait_type not in user['inventory']['baits']:
             user['inventory']['baits'][bait_type] = 0
         user['inventory']['baits'][bait_type] += amount
@@ -992,11 +1060,12 @@ Không có gì ở đây!
         await query.edit_message_text(
             f"✅ **MUA THÀNH CÔNG!**\n"
             f"Bạn đã mua {amount} {bait_info['name']}\n"
-            f"💰 Số dư: {format_number(user['coins'] - total_price)} xu",
+            f"💰 Số dư: {format_number(user['coins'])} xu",
             parse_mode='Markdown'
         )
     
     elif data == 'sell_fish':
+        user = data_manager.get_user(user_id)
         total_value = 0
         total_count = 0
         
@@ -1009,20 +1078,21 @@ Không có gì ở đây!
                         break
             
             user['inventory']['fish'] = {}
-            data_manager.add_coins(user_id, int(total_value))
+            user["coins"] += int(total_value)
             data_manager.update_user(user_id, user)
             
             await query.edit_message_text(
                 f"💰 **BÁN THÀNH CÔNG!**\n"
                 f"Đã bán {total_count} con cá\n"
                 f"Thu được: {format_number(int(total_value))} xu\n"
-                f"💰 Số dư: {format_number(user['coins'] + int(total_value))} xu",
+                f"💰 Số dư: {format_number(user['coins'])} xu",
                 parse_mode='Markdown'
             )
         else:
             await query.edit_message_text("❌ Bạn không có cá để bán!")
     
     elif data == 'back_menu':
+        user = data_manager.get_user(user_id)
         keyboard = [
             [
                 InlineKeyboardButton("🎣 Câu Cá", callback_data='game_fishing'),
@@ -1065,6 +1135,7 @@ def main():
     application.add_handler(CommandHandler("treasure", treasure))
     application.add_handler(CommandHandler("inventory", inventory))
     application.add_handler(CommandHandler("shop", shop))
+    application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("leaderboard", leaderboard))
     
     application.add_handler(CallbackQueryHandler(button_callback))
