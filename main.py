@@ -1,1487 +1,1024 @@
-import os
-import random
-import asyncio
 import logging
-import requests
+import random
 import json
-import base64
-import unicodedata
-import re
-import html
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple, Set
-from collections import deque
-from github import Github
+import asyncio
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import threading
+import time
+from github import Github
+import base64
+import os
+from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-VERCEL_API_KEY = os.environ.get("VERCEL_API_KEY", "")
-BASE_URL = os.getenv("BASE_URL", "https://ai-gateway.vercel.sh/v1")
-CHAT_MODEL = "google/gemini-2.5-flash-lite"
-QUIZ_GEN_MODEL = "alibaba/qwen-3-235b"
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "400"))
-GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-GITHUB_REPO = "htuananh1/Data-manager"
+load_dotenv()
 
-START_BALANCE = 1000
-CHAT_HISTORY_LIMIT = 6
-GAME_TIMEOUT = 600
-MAX_GAME_MESSAGES = 5
-CHAT_SAVE_INTERVAL = 300
-QUIZ_CHECK_INTERVAL = 60
-MAX_QUIZ_RETRY = 2
-MAX_FILE_SIZE = 3 * 1024 * 1024
-ADMIN_ID = 2026797305
-VIETNAM_TZ = timezone(timedelta(hours=7))
-NEXT_QUIZ_DELAY = 0
-QUIZ_CREATION_TIMEOUT = 8
-QUIZ_GEN_BATCH_SIZE = 5
-QUIZ_GEN_DELAY = 1
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-QUIZ_TOPICS = [
-    "Bóng đá",
-    "Địa lý",
-    "Lịch sử",
-    "Kĩ năng sống",
-    "Động vật",
-    "Anime & Manga"
-]
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
+GITHUB_REPO = os.getenv('GITHUB_REPO', 'htuananh1/Data-manager')
+GITHUB_FILE_PATH = "bot_data.json"
 
-DIFFICULTIES = ["bình thường", "khó", "cực khó"]
+FISH_TYPES = {
+    "🦐 Tôm": {
+        "value": 5, 
+        "chance": 25, 
+        "exp": 1,
+        "multiplier_chance": 5,
+        "multiplier_range": (2, 5)
+    },
+    "🐟 Cá nhỏ": {
+        "value": 10, 
+        "chance": 20, 
+        "exp": 2,
+        "multiplier_chance": 8,
+        "multiplier_range": (2, 6)
+    },
+    "🐠 Cá vàng": {
+        "value": 30, 
+        "chance": 15, 
+        "exp": 5,
+        "multiplier_chance": 10,
+        "multiplier_range": (2, 8)
+    },
+    "🐡 Cá nóc": {
+        "value": 50, 
+        "chance": 12, 
+        "exp": 8,
+        "multiplier_chance": 12,
+        "multiplier_range": (3, 10)
+    },
+    "🦑 Mực": {
+        "value": 80, 
+        "chance": 10, 
+        "exp": 12,
+        "multiplier_chance": 15,
+        "multiplier_range": (3, 12)
+    },
+    "🦈 Cá mập": {
+        "value": 150, 
+        "chance": 8, 
+        "exp": 20,
+        "multiplier_chance": 18,
+        "multiplier_range": (4, 15)
+    },
+    "🐙 Bạch tuộc": {
+        "value": 200, 
+        "chance": 5, 
+        "exp": 25,
+        "multiplier_chance": 20,
+        "multiplier_range": (5, 16)
+    },
+    "🐋 Cá voi": {
+        "value": 500, 
+        "chance": 3, 
+        "exp": 50,
+        "multiplier_chance": 25,
+        "multiplier_range": (5, 18)
+    },
+    "🦞 Tôm hùm": {
+        "value": 300, 
+        "chance": 1.5, 
+        "exp": 35,
+        "multiplier_chance": 22,
+        "multiplier_range": (4, 17)
+    },
+    "💎 Kho báu": {
+        "value": 1000, 
+        "chance": 0.5, 
+        "exp": 100,
+        "multiplier_chance": 30,
+        "multiplier_range": (10, 20)
+    }
+}
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+FISHING_RODS = {
+    "basic": {
+        "name": "🎣 Cần câu cơ bản",
+        "price": 0,
+        "bonus": 0,
+        "speed": 3.0,
+        "rare_bonus": 1.0,
+        "description": "Cần câu mặc định"
+    },
+    "bronze": {
+        "name": "🥉 Cần câu đồng",
+        "price": 500,
+        "bonus": 10,
+        "speed": 2.5,
+        "rare_bonus": 1.2,
+        "description": "+10% cơ hội | Nhanh hơn 0.5s | Cá hiếm x1.2"
+    },
+    "silver": {
+        "name": "🥈 Cần câu bạc",
+        "price": 1500,
+        "bonus": 25,
+        "speed": 2.0,
+        "rare_bonus": 1.5,
+        "description": "+25% cơ hội | Nhanh hơn 1s | Cá hiếm x1.5"
+    },
+    "gold": {
+        "name": "🥇 Cần câu vàng",
+        "price": 5000,
+        "bonus": 50,
+        "speed": 1.5,
+        "rare_bonus": 2.0,
+        "description": "+50% cơ hội | Nhanh hơn 1.5s | Cá hiếm x2"
+    },
+    "diamond": {
+        "name": "💎 Cần câu kim cương",
+        "price": 15000,
+        "bonus": 100,
+        "speed": 1.0,
+        "rare_bonus": 3.0,
+        "description": "x2 cơ hội | Siêu nhanh | Cá hiếm x3"
+    },
+    "legendary": {
+        "name": "⚡ Cần câu huyền thoại",
+        "price": 50000,
+        "bonus": 200,
+        "speed": 0.5,
+        "rare_bonus": 5.0,
+        "description": "x3 cơ hội | Tức thì | Cá hiếm x5"
+    }
+}
 
-quiz_generation_active = False
-quiz_generation_task = None
-quiz_generation_stats = {"total": 0, "duplicates": 0, "errors": 0}
+BAITS = {
+    "worm": {
+        "name": "🪱 Giun",
+        "price": 5,
+        "bonus": 5,
+        "description": "+5% cơ hội câu được cá"
+    },
+    "shrimp": {
+        "name": "🦐 Tôm nhỏ",
+        "price": 15,
+        "bonus": 15,
+        "description": "+15% cơ hội câu được cá tốt"
+    },
+    "special": {
+        "name": "✨ Mồi đặc biệt",
+        "price": 50,
+        "bonus": 30,
+        "description": "+30% cơ hội câu được cá hiếm"
+    },
+    "golden": {
+        "name": "🌟 Mồi vàng",
+        "price": 100,
+        "bonus": 50,
+        "description": "+50% cơ hội & x2 nhân tiền"
+    }
+}
 
-def get_vietnam_time():
-    return datetime.now(VIETNAM_TZ)
-
-class GitHubStorage:
-    def __init__(self, token: str, repo_name: str):
+class DataManager:
+    def __init__(self):
+        self.data = {}
+        self.lock = threading.Lock()
+        self.executor = ThreadPoolExecutor(max_workers=5)
+        self.github = Github(GITHUB_TOKEN)
+        self.repo = self.github.get_repo(GITHUB_REPO)
+        self.load_from_github()
+        self.start_auto_save()
+        self.pending_saves = {}
+    
+    def load_from_github(self):
         try:
-            self.g = Github(token)
-            self.repo = self.g.get_repo(repo_name)
-            self.branch = "main"
-            self._pending_updates = {}
-            self._last_batch_save = get_vietnam_time()
-            self._chat_save_queue = {}
-            self._quiz_questions_cache = set()
-            self._quiz_file_index = 0
-            self._current_file_cache = None
-            self._full_quiz_pool = []
-            self._last_pool_update = None
-            self._file_sizes_cache = {}
-            logger.info("GitHub storage initialized successfully")
+            file_content = self.repo.get_contents(GITHUB_FILE_PATH)
+            self.data = json.loads(base64.b64decode(file_content.content).decode())
+            logging.info("Loaded data from GitHub successfully")
         except Exception as e:
-            logger.error(f"Failed to init GitHub storage: {e}")
-            raise
-        
-    def _get_file_content(self, path: str) -> Optional[dict]:
-        try:
-            file = self.repo.get_contents(path, ref=self.branch)
-            content = base64.b64decode(file.content).decode('utf-8')
-            data = json.loads(content)
-            self._file_sizes_cache[path] = file.size
-            return data
-        except Exception as e:
-            logger.warning(f"File {path} not found or error: {e}")
-            return None
+            logging.info(f"No existing data file or error: {e}")
+            self.data = {}
     
-    def _get_file_size(self, path: str) -> int:
-        if path in self._file_sizes_cache:
-            return self._file_sizes_cache[path]
-            
-        try:
-            file = self.repo.get_contents(path, ref=self.branch)
-            self._file_sizes_cache[path] = file.size
-            return file.size
-        except:
-            return 0
-    
-    def _estimate_json_size(self, data: dict) -> int:
-        json_str = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
-        return len(json_str.encode('utf-8'))
-    
-    def _get_current_quiz_file(self) -> str:
-        base_path = "data/translated_quiz_pool"
-        
-        main_file = f"{base_path}.json"
-        main_size = self._get_file_size(main_file)
-        
-        if main_size == 0:
-            return main_file
-        elif main_size < MAX_FILE_SIZE - 50000:
-            return main_file
-        
-        index = 1
-        while True:
-            file_path = f"{base_path}_{index}.json"
-            size = self._get_file_size(file_path)
-            
-            if size == 0:
-                logger.info(f"Creating new quiz file: {file_path}")
-                return file_path
-            elif size < MAX_FILE_SIZE - 50000:
-                return file_path
-            
-            index += 1
-            if index > 100:
-                logger.error("Too many quiz files!")
-                break
-        
-        return f"{base_path}_last.json"
-    
-    def _get_all_quiz_files(self) -> List[str]:
-        files = []
-        base_path = "data/translated_quiz_pool"
-        
-        if self._get_file_size(f"{base_path}.json") > 0:
-            files.append(f"{base_path}.json")
-        
-        index = 1
-        while True:
-            file_path = f"{base_path}_{index}.json"
-            if self._get_file_size(file_path) == 0:
-                break
-            files.append(file_path)
-            index += 1
-            if index > 100:
-                break
-        
-        return files
-    
-    def _save_file(self, path: str, data: dict, message: str):
-        try:
-            if "translated_quiz_pool" in path and "questions" in data:
-                content = '{\n  "questions": [\n'
-                questions = []
-                for quiz in data["questions"]:
-                    quiz_json = json.dumps(quiz, ensure_ascii=False, separators=(',', ':'))
-                    questions.append(f'    {quiz_json}')
-                content += ',\n'.join(questions)
-                content += '\n  ],\n'
-                content += f'  "total": {data.get("total", len(data["questions"]))},\n'
-                content += f'  "last_updated": "{data.get("last_updated", get_vietnam_time().isoformat())}"\n'
-                content += '}'
-            else:
-                content = json.dumps(data, ensure_ascii=False, indent=2)
-            
-            content_size = len(content.encode('utf-8'))
-            
+    def save_to_github(self):
+        with self.lock:
             try:
-                file = self.repo.get_contents(path, ref=self.branch)
-                self.repo.update_file(path, message, content, file.sha, self.branch)
-                logger.info(f"Updated file: {path} (size: {content_size:,} bytes)")
-            except:
-                self.repo.create_file(path, message, content, self.branch)
-                logger.info(f"Created file: {path} (size: {content_size:,} bytes)")
-            
-            self._file_sizes_cache[path] = content_size
+                json_data = json.dumps(self.data, indent=2, ensure_ascii=False)
                 
-        except Exception as e:
-            logger.error(f"Failed to save {path}: {e}")
-    
-    def queue_update(self, update_type: str, data: dict):
-        if update_type not in self._pending_updates:
-            self._pending_updates[update_type] = []
-        self._pending_updates[update_type].append(data)
-    
-    def queue_chat_save(self, chat_id: int, messages: List[dict]):
-        self._chat_save_queue[chat_id] = {
-            "messages": messages,
-            "timestamp": get_vietnam_time()
-        }
-    
-    async def batch_save(self, force_quiz: bool = False):
-        if not self._pending_updates and not self._chat_save_queue and not force_quiz:
-            return
-            
-        timestamp = get_vietnam_time().isoformat()
-        
-        if "scores" in self._pending_updates:
-            scores_data = self._get_file_content("data/scores.json") or {"users": {}}
-            
-            for update in self._pending_updates["scores"]:
-                user_key = str(update["user_id"])
+                try:
+                    file = self.repo.get_contents(GITHUB_FILE_PATH)
+                    self.repo.update_file(
+                        GITHUB_FILE_PATH,
+                        f"Update bot data - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        json_data,
+                        file.sha
+                    )
+                except:
+                    self.repo.create_file(
+                        GITHUB_FILE_PATH,
+                        f"Create bot data - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        json_data
+                    )
                 
-                if user_key not in scores_data["users"]:
-                    scores_data["users"][user_key] = {
-                        "user_id": update["user_id"],
-                        "username": update["username"],
-                        "balance": START_BALANCE,
-                        "total_earned": 0,
-                        "games_played": {},
-                        "created_at": timestamp,
-                        "last_updated": timestamp
-                    }
-                
-                user = scores_data["users"][user_key]
-                user["balance"] += update["amount"]
-                user["username"] = update["username"]
-                user["last_updated"] = timestamp
-                
-                if update["amount"] > 0:
-                    user["total_earned"] = user.get("total_earned", 0) + update["amount"]
-                    if update.get("game_type"):
-                        if "games_played" not in user:
-                            user["games_played"] = {}
-                        game_type = update["game_type"]
-                        user["games_played"][game_type] = user["games_played"].get(game_type, 0) + 1
-            
-            self._save_file("data/scores.json", scores_data, f"Batch update scores at {timestamp}")
-        
-        if "group_scores" in self._pending_updates:
-            for update in self._pending_updates["group_scores"]:
-                chat_id = update["chat_id"]
-                file_path = f"data/group_scores/{chat_id}.json"
-                
-                group_data = self._get_file_content(file_path) or {"users": {}, "chat_id": chat_id}
-                user_key = str(update["user_id"])
-                
-                if user_key not in group_data["users"]:
-                    group_data["users"][user_key] = {
-                        "user_id": update["user_id"],
-                        "username": update["username"],
-                        "score": 0,
-                        "games_won": 0,
-                        "created_at": timestamp
-                    }
-                
-                user = group_data["users"][user_key]
-                user["score"] += update["amount"]
-                user["username"] = update["username"]
-                user["last_updated"] = timestamp
-                
-                if update["amount"] > 0:
-                    user["games_won"] = user.get("games_won", 0) + 1
-                
-                group_data["last_updated"] = timestamp
-                self._save_file(file_path, group_data, f"Update group {chat_id} scores")
-        
-        if "translated_quiz" in self._pending_updates:
-            added_total = 0
-            duplicate_total = 0
-            
-            current_file = self._get_current_quiz_file()
-            quiz_data = self._get_file_content(current_file) or {"questions": []}
-            
-            existing_questions = {self._normalize_question(q.get("question")) for q in quiz_data["questions"]}
-            
-            for quiz in self._pending_updates["translated_quiz"]:
-                normalized_question = self._normalize_question(quiz.get("question"))
-                
-                if normalized_question in existing_questions or normalized_question in self._quiz_questions_cache:
-                    duplicate_total += 1
-                    logger.warning(f"Skipped duplicate: {quiz['question'][:30]}...")
-                    continue
-                
-                quiz_data["questions"].append(quiz)
-                existing_questions.add(normalized_question)
-                self._quiz_questions_cache.add(normalized_question)
-                self._full_quiz_pool.append(quiz)
-                added_total += 1
-                
-                estimated_size = self._estimate_json_size(quiz_data)
-                if estimated_size > MAX_FILE_SIZE - 50000:
-                    quiz_data["total"] = len(quiz_data["questions"])
-                    quiz_data["last_updated"] = timestamp
-                    self._save_file(current_file, quiz_data, f"Added {added_total} quizzes")
-                    
-                    current_file = self._get_current_quiz_file()
-                    quiz_data = {"questions": []}
-                    existing_questions = set()
-                    added_total = 0
-            
-            if quiz_data["questions"]:
-                quiz_data["total"] = len(quiz_data["questions"])
-                quiz_data["last_updated"] = timestamp
-                self._save_file(current_file, quiz_data, f"Added {added_total} quizzes")
-            
-            if added_total > 0 or duplicate_total > 0:
-                logger.info(f"Batch save: {added_total} added, {duplicate_total} duplicates")
-                self._last_pool_update = get_vietnam_time()
-            
-            self._pending_updates["translated_quiz"] = []
-        
-        current_time = get_vietnam_time()
-        for chat_id, chat_data in list(self._chat_save_queue.items()):
-            if (current_time - chat_data["timestamp"]).total_seconds() < CHAT_SAVE_INTERVAL:
-                continue
-                
-            data = {
-                "messages": chat_data["messages"][-CHAT_HISTORY_LIMIT:],
-                "chat_id": chat_id,
-                "saved_at": current_time.isoformat()
-            }
-            self._save_file(f"data/chat_history/{chat_id}.json", data, f"Save chat history: {chat_id}")
-            del self._chat_save_queue[chat_id]
-        
-        if "translated_quiz" not in self._pending_updates:
-            self._pending_updates = {}
-        self._last_batch_save = get_vietnam_time()
-    
-    def _normalize_question(self, question: str) -> str:
-        if not question:
-            return ""
-        normalized = question.lower()
-        normalized = unicodedata.normalize('NFD', normalized)
-        normalized = ''.join(char for char in normalized if unicodedata.category(char) != 'Mn')
-        normalized = re.sub(r'[^a-z0-9\s]', '', normalized)
-        normalized = ' '.join(normalized.split())
-        return normalized
-    
-    def is_duplicate_question(self, question: str) -> bool:
-        normalized = self._normalize_question(question)
-        
-        if normalized in self._quiz_questions_cache:
-            return True
-        
-        if not self._quiz_questions_cache:
-            logger.info("Loading quiz cache...")
-            for file_path in self._get_all_quiz_files():
-                quiz_data = self._get_file_content(file_path)
-                if quiz_data and "questions" in quiz_data:
-                    for q in quiz_data["questions"]:
-                        self._quiz_questions_cache.add(self._normalize_question(q.get("question", "")))
-            logger.info(f"Loaded {len(self._quiz_questions_cache)} unique questions")
-        
-        return normalized in self._quiz_questions_cache
-    
-    def get_user_balance(self, user_id: int) -> int:
-        try:
-            data = self._get_file_content("data/scores.json") or {"users": {}}
-            user_data = data.get("users", {}).get(str(user_id), {})
-            return user_data.get("balance", START_BALANCE)
-        except:
-            return START_BALANCE
-    
-    def update_user_balance(self, user_id: int, username: str, amount: int, game_type: str = None):
-        self.queue_update("scores", {
-            "user_id": user_id,
-            "username": username,
-            "amount": amount,
-            "game_type": game_type
-        })
-    
-    def update_group_score(self, chat_id: int, user_id: int, username: str, amount: int):
-        self.queue_update("group_scores", {
-            "chat_id": chat_id,
-            "user_id": user_id,
-            "username": username,
-            "amount": amount
-        })
-    
-    def get_leaderboard_direct(self, limit: int = 10) -> List[tuple]:
-        try:
-            data = self._get_file_content("data/scores.json")
-            if not data or "users" not in data:
-                return []
-                
-            users = []
-            for user_data in data["users"].values():
-                username = user_data.get("username", "Unknown")
-                total_earned = user_data.get("total_earned", 0)
-                if total_earned > 0:
-                    users.append((username, total_earned))
-                    
-            users.sort(key=lambda x: x[1], reverse=True)
-            return users[:limit]
-        except Exception as e:
-            logger.error(f"Failed to get leaderboard: {e}")
-            return []
-    
-    def get_group_leaderboard(self, chat_id: int, limit: int = 10) -> List[tuple]:
-        try:
-            file_path = f"data/group_scores/{chat_id}.json"
-            data = self._get_file_content(file_path)
-            if not data or "users" not in data:
-                return []
-            
-            users = []
-            for user_data in data["users"].values():
-                username = user_data.get("username", "Unknown")
-                score = user_data.get("score", 0)
-                if score > 0:
-                    users.append((username, score))
-            
-            users.sort(key=lambda x: x[1], reverse=True)
-            return users[:limit]
-        except Exception as e:
-            logger.error(f"Failed to get group leaderboard: {e}")
-            return []
-    
-    def get_user_stats_direct(self, user_id: int) -> dict:
-        try:
-            data = self._get_file_content("data/scores.json")
-            if not data or "users" not in data:
-                return {
-                    'balance': START_BALANCE,
-                    'total_earned': 0,
-                    'games_played': {}
-                }
-                
-            user_data = data["users"].get(str(user_id), {})
-            
-            return {
-                'balance': user_data.get("balance", START_BALANCE),
-                'total_earned': user_data.get("total_earned", 0),
-                'games_played': user_data.get("games_played", {})
-            }
-        except Exception as e:
-            logger.error(f"Failed to get user stats: {e}")
-            return {
-                'balance': START_BALANCE,
-                'total_earned': 0,
-                'games_played': {}
-            }
-    
-    def get_user_group_stats(self, chat_id: int, user_id: int) -> dict:
-        try:
-            file_path = f"data/group_scores/{chat_id}.json"
-            data = self._get_file_content(file_path)
-            if not data or "users" not in data:
-                return {'score': 0, 'games_won': 0}
-            
-            user_data = data["users"].get(str(user_id), {})
-            return {
-                'score': user_data.get("score", 0),
-                'games_won': user_data.get("games_won", 0)
-            }
-        except:
-            return {'score': 0, 'games_won': 0}
-    
-    def get_translated_quiz_pool(self) -> List[dict]:
-        if self._full_quiz_pool and self._last_pool_update:
-            if (get_vietnam_time() - self._last_pool_update).seconds < 300:
-                return self._full_quiz_pool
-        
-        all_quizzes = []
-        for file_path in self._get_all_quiz_files():
-            data = self._get_file_content(file_path)
-            if data and "questions" in data:
-                all_quizzes.extend(data["questions"])
-                logger.info(f"Loaded {len(data['questions'])} from {file_path}")
-        
-        self._full_quiz_pool = all_quizzes
-        self._last_pool_update = get_vietnam_time()
-        logger.info(f"Total pool: {len(all_quizzes)} questions")
-        return all_quizzes
-    
-    def get_random_quiz(self) -> Optional[dict]:
-        quiz_pool = self.get_translated_quiz_pool()
-        if quiz_pool:
-            return random.choice(quiz_pool)
-        return None
-    
-    def add_translated_quiz(self, quiz: dict):
-        self.queue_update("translated_quiz", quiz)
-    
-    def get_minigame_groups(self) -> Set[int]:
-        data = self._get_file_content("data/minigame_groups.json")
-        if data and "groups" in data:
-            return set(data["groups"])
-        return set()
-    
-    def save_minigame_groups(self, groups: Set[int]):
-        data = {
-            "groups": list(groups),
-            "updated": get_vietnam_time().isoformat()
-        }
-        self._save_file("data/minigame_groups.json", data, "Update minigame groups")
-    
-    def add_minigame_group(self, chat_id: int):
-        groups = self.get_minigame_groups()
-        groups.add(chat_id)
-        self.save_minigame_groups(groups)
-    
-    def remove_minigame_group(self, chat_id: int):
-        groups = self.get_minigame_groups()
-        groups.discard(chat_id)
-        self.save_minigame_groups(groups)
-    
-    def get_chat_history(self, chat_id: int) -> List[dict]:
-        data = self._get_file_content(f"data/chat_history/{chat_id}.json")
-        if data:
-            saved_at = datetime.fromisoformat(data.get("saved_at", get_vietnam_time().isoformat()))
-            if get_vietnam_time() - saved_at > timedelta(hours=24):
-                return []
-            return data.get("messages", [])
-        return []
-    
-    def get_quiz_stats(self) -> dict:
-        total_quizzes = 0
-        files = self._get_all_quiz_files()
-        
-        for file_path in files:
-            data = self._get_file_content(file_path)
-            if data:
-                total_quizzes += len(data.get("questions", []))
-        
-        return {
-            "total_files": len(files),
-            "total_quizzes": total_quizzes,
-            "unique_quizzes": len(self._quiz_questions_cache) if self._quiz_questions_cache else total_quizzes
-        }
-
-try:
-    storage = GitHubStorage(GITHUB_TOKEN, GITHUB_REPO)
-except Exception as e:
-    logger.error(f"Critical error initializing storage: {e}")
-    storage = None
-
-active_games: Dict[int, dict] = {}
-chat_history: Dict[int, deque] = {}
-game_messages: Dict[int, List[int]] = {}
-game_timeouts: Dict[int, asyncio.Task] = {}
-game_start_times: Dict[int, datetime] = {}
-minigame_groups: Set[int] = set()
-user_answered: Dict[Tuple[int, int], bool] = {}
-quiz_scheduling: Dict[int, datetime] = {}
-quiz_creation_locks: Dict[int, asyncio.Lock] = {}
-
-def _fmt_money(x: int) -> str:
-    return f"{x:,}".replace(",", ".")
-
-def get_user_balance(user_id: int) -> int:
-    if storage:
-        return storage.get_user_balance(user_id)
-    return START_BALANCE
-
-def update_user_balance(user_id: int, username: str, amount: int, game_type: str = None):
-    try:
-        if storage:
-            storage.update_user_balance(user_id, username, amount, game_type)
-            logger.info(f"Balance queued for {username}: {amount:+d} from {game_type}")
-    except Exception as e:
-        logger.error(f"Update balance error: {e}")
-
-async def call_api(messages: List[dict], model: str = None, max_tokens: int = 400, retry: int = 2) -> str:
-    for attempt in range(retry):
-        try:
-            headers = {
-                "Authorization": f"Bearer {VERCEL_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            
-            data = {
-                "model": model or CHAT_MODEL,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": 0.8,
-                "top_p": 0.9
-            }
-            
-            response = requests.post(
-                f"{BASE_URL}/chat/completions",
-                headers=headers,
-                json=data,
-                timeout=10
-            )
-            
-            if response.status_code == 429:
-                wait_time = min(2 ** attempt, 5)
-                await asyncio.sleep(wait_time)
-                continue
-                
-            if response.status_code == 200:
-                return response.json()['choices'][0]['message']['content']
-                
-        except requests.Timeout:
-            if attempt < retry - 1:
-                await asyncio.sleep(1)
-                continue
-        except Exception as e:
-            logger.error(f"API call error attempt {attempt + 1}: {e}")
-            
-    return None
-
-async def generate_quiz_with_qwen(topic: str, difficulty: str, variation: int = 0) -> Optional[dict]:
-    try:
-        difficulty_guide = {
-            "bình thường": "dễ, kiến thức phổ thông",
-            "khó": "khó, cần kiến thức sâu", 
-            "cực khó": "rất khó, chỉ người am hiểu mới biết"
-        }
-        
-        variations = [
-            "Tạo câu hỏi độc đáo, chưa từng thấy",
-            "Tạo câu hỏi về góc nhìn mới lạ",
-            "Tạo câu hỏi về chi tiết ít người biết",
-            "Tạo câu hỏi với fact thú vị",
-            "Tạo câu hỏi về sự kiện gần đây",
-            "Tạo câu hỏi về kỷ lục đặc biệt"
-        ]
-        
-        var_prompt = variations[variation % len(variations)] if variation > 0 else ""
-        
-        prompt = f"""Tạo câu hỏi trắc nghiệm {difficulty_guide[difficulty]} về {topic}.
-{var_prompt}
-
-Format JSON ngắn gọn:
-{{
-  "question": "câu hỏi",
-  "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
-  "correct": "A/B/C/D",
-  "correct_answer": "đáp án",
-  "explanation": "giải thích"
-}}"""
-
-        messages = [
-            {"role": "user", "content": prompt}
-        ]
-        
-        response = await call_api(messages, model=QUIZ_GEN_MODEL, max_tokens=400)
-        
-        if not response:
-            return None
-            
-        response = response.strip()
-        if response.startswith("```json"):
-            response = response[7:]
-        if response.endswith("```"):
-            response = response[:-3]
-        response = response.strip()
-        
-        quiz = json.loads(response)
-        
-        quiz["topic"] = f"{topic} ({difficulty.title()})"
-        quiz["source"] = "Qwen AI"
-        quiz["difficulty"] = difficulty
-        quiz["created_at"] = get_vietnam_time().isoformat()
-        quiz["generated"] = True
-        
-        return quiz
-        
-    except Exception as e:
-        logger.error(f"Error generating quiz with Qwen: {e}")
-        return None
-
-async def continuous_quiz_generation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global quiz_generation_active, quiz_generation_stats
-    
-    chat_id = update.effective_chat.id if update else None
-    variation_counter = 0
-    
-    while quiz_generation_active:
-        try:
-            topic = random.choice(QUIZ_TOPICS)
-            difficulty = random.choice(DIFFICULTIES)
-            
-            quiz = await generate_quiz_with_qwen(topic, difficulty, variation_counter)
-            variation_counter += 1
-            
-            if quiz:
-                if storage and not storage.is_duplicate_question(quiz["question"]):
-                    storage.add_translated_quiz(quiz)
-                    quiz_generation_stats["total"] += 1
-                    logger.info(f"Generated #{quiz_generation_stats['total']}: {quiz['question'][:50]}...")
-                    
-                    if quiz_generation_stats["total"] % 10 == 0:
-                        await storage.batch_save(force_quiz=True)
-                        
-                        if chat_id:
-                            stats = storage.get_quiz_stats()
-                            status_msg = f"🎯 **Tiến độ tạo quiz:**\n"
-                            status_msg += f"✅ Đã tạo: {quiz_generation_stats['total']}\n"
-                            status_msg += f"❌ Trùng: {quiz_generation_stats['duplicates']}\n"
-                            status_msg += f"⚠️ Lỗi: {quiz_generation_stats['errors']}\n\n"
-                            status_msg += f"📊 **Tổng trong pool:**\n"
-                            status_msg += f"📁 Files: {stats['total_files']}\n"
-                            status_msg += f"📝 Total: {stats['total_quizzes']}"
-                            
-                            try:
-                                await context.bot.send_message(chat_id, status_msg, parse_mode="Markdown")
-                            except:
-                                pass
-                else:
-                    quiz_generation_stats["duplicates"] += 1
-                    logger.warning(f"Duplicate quiz detected")
-            else:
-                quiz_generation_stats["errors"] += 1
-                logger.error("Failed to generate quiz")
-            
-            if quiz_generation_stats["total"] % QUIZ_GEN_BATCH_SIZE == 0 and storage:
-                await storage.batch_save(force_quiz=True)
-            
-            await asyncio.sleep(QUIZ_GEN_DELAY)
-            
-        except Exception as e:
-            logger.error(f"Error in continuous quiz generation: {e}")
-            quiz_generation_stats["errors"] += 1
-            await asyncio.sleep(3)
-    
-    if storage:
-        await storage.batch_save(force_quiz=True)
-    
-    if chat_id:
-        stats = storage.get_quiz_stats() if storage else {}
-        final_msg = f"✅ **Đã dừng tạo quiz!**\n\n"
-        final_msg += f"📊 **Kết quả:**\n"
-        final_msg += f"✅ Tạo mới: {quiz_generation_stats['total']}\n"
-        final_msg += f"❌ Trùng: {quiz_generation_stats['duplicates']}\n"
-        final_msg += f"⚠️ Lỗi: {quiz_generation_stats['errors']}\n\n"
-        if stats:
-            final_msg += f"📚 **Tổng quiz pool:**\n"
-            final_msg += f"📁 Files: {stats.get('total_files', 0)}\n"
-            final_msg += f"📝 Total: {stats.get('total_quizzes', 0)}"
-        
-        try:
-            await context.bot.send_message(chat_id, final_msg, parse_mode="Markdown")
-        except:
-            pass
-
-class QuizGame:
-    def __init__(self, chat_id: int):
-        self.chat_id = chat_id
-        self.score = 0
-        self.current_quiz = None
-        
-    async def get_quiz_from_pool(self) -> dict:
-        if storage:
-            quiz = storage.get_random_quiz()
-            if quiz:
-                logger.info(f"Using quiz from pool: {quiz['question'][:50]}...")
-                return quiz
-        
-        logger.error("No quiz available in pool")
-        return None
-
-async def delete_old_messages(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    if chat_id not in game_messages:
-        return
-        
-    messages = game_messages[chat_id]
-    for msg_id in messages[:-MAX_GAME_MESSAGES]:
-        try:
-            await context.bot.delete_message(chat_id, msg_id)
-        except:
-            pass
-    game_messages[chat_id] = messages[-MAX_GAME_MESSAGES:] if len(messages) > MAX_GAME_MESSAGES else messages
-
-async def add_game_message(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE):
-    if chat_id not in game_messages:
-        game_messages[chat_id] = []
-    game_messages[chat_id].append(message_id)
-    await delete_old_messages(chat_id, context)
-
-async def cleanup_game(chat_id: int, keep_active: bool = False):
-    if not keep_active and chat_id in active_games:
-        del active_games[chat_id]
-    
-    if chat_id in game_timeouts:
-        try:
-            game_timeouts[chat_id].cancel()
-        except:
-            pass
-        del game_timeouts[chat_id]
-    
-    if chat_id in game_start_times:
-        del game_start_times[chat_id]
-    
-    if chat_id in quiz_scheduling:
-        del quiz_scheduling[chat_id]
-    
-    if chat_id in game_messages and len(game_messages[chat_id]) > MAX_GAME_MESSAGES:
-        game_messages[chat_id] = game_messages[chat_id][-MAX_GAME_MESSAGES:]
-    
-    keys_to_remove = [key for key in user_answered.keys() if key[0] == chat_id]
-    for key in keys_to_remove:
-        del user_answered[key]
-
-async def start_random_minigame(chat_id: int, context: ContextTypes.DEFAULT_TYPE, show_loading: bool = False):
-    if chat_id not in quiz_creation_locks:
-        quiz_creation_locks[chat_id] = asyncio.Lock()
-    
-    if chat_id in active_games or chat_id in quiz_scheduling:
-        logger.warning(f"Game already active/scheduling for chat {chat_id}")
-        return
-    
-    async with quiz_creation_locks[chat_id]:
-        try:
-            logger.info(f"Starting minigame for chat {chat_id}")
-            
-            if chat_id not in minigame_groups:
-                logger.info(f"Chat {chat_id} not in minigame groups")
-                return
-            
-            if chat_id in active_games:
-                logger.warning(f"Game already active for chat {chat_id}, skipping")
-                return
-            
-            active_games[chat_id] = {"type": "quiz", "game": None, "minigame": True, "creating": True}
-            quiz_scheduling[chat_id] = get_vietnam_time()
-            
-            await cleanup_game(chat_id, keep_active=True)
-            
-            game = QuizGame(chat_id)
-            quiz = await game.get_quiz_from_pool()
-            
-            if not quiz:
-                logger.error(f"No quiz available for chat {chat_id}")
-                error_msg = await context.bot.send_message(
-                    chat_id, 
-                    "❌ Không có quiz trong dữ liệu!\n"
-                    "Admin vui lòng dùng /genquiz để tạo thêm quiz."
-                )
-                await add_game_message(chat_id, error_msg.message_id, context)
-                
-                if chat_id in active_games:
-                    del active_games[chat_id]
-                if chat_id in quiz_scheduling:
-                    del quiz_scheduling[chat_id]
-                
-                return
-            
-            game.current_quiz = quiz
-            active_games[chat_id] = {"type": "quiz", "game": game, "minigame": True}
-            game_start_times[chat_id] = get_vietnam_time()
-            
-            keyboard = []
-            for option in quiz["options"]:
-                keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            source_text = f" [{quiz.get('source', 'Pool')}]"
-            
-            quiz_msg = await context.bot.send_message(
-                chat_id,
-                f"❓ **{quiz['topic']}{source_text}**\n\n"
-                f"{quiz['question']}\n\n"
-                f"🏆 Ai trả lời đúng sẽ được 300 điểm!\n"
-                f"⚠️ Mỗi người chỉ được chọn 1 lần!",
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-            await add_game_message(chat_id, quiz_msg.message_id, context)
-            
-            if chat_id in quiz_scheduling:
-                del quiz_scheduling[chat_id]
-                
-            game_timeouts[chat_id] = asyncio.create_task(game_timeout_handler(chat_id, context))
-            logger.info(f"Quiz started successfully for chat {chat_id}")
-            
-        except Exception as e:
-            logger.error(f"Error in start_random_minigame for {chat_id}: {e}")
-            if chat_id in active_games:
-                del active_games[chat_id]
-            if chat_id in quiz_scheduling:
-                del quiz_scheduling[chat_id]
-            await cleanup_game(chat_id)
-
-async def game_timeout_handler(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await asyncio.sleep(GAME_TIMEOUT)
-        
-        logger.info(f"Game timeout for chat {chat_id}")
-        
-        if chat_id in active_games:
-            game_info = active_games[chat_id]
-            game = game_info.get("game")
-            
-            try:
-                msg = f"⏰ **Hết 10 phút! Chuyển câu mới...**\n\n"
-                if game_info["type"] == "quiz" and game and game.current_quiz:
-                    msg += f"✅ Đáp án: **{game.current_quiz['correct']}**\n"
-                    msg += f"💡 {game.current_quiz.get('explanation', '')}"
-                
-                timeout_msg = await context.bot.send_message(chat_id, msg, parse_mode="Markdown")
-                await add_game_message(chat_id, timeout_msg.message_id, context)
+                logging.info("Saved data to GitHub successfully")
+                return True
             except Exception as e:
-                logger.error(f"Error sending timeout message to {chat_id}: {e}")
-        
-        await cleanup_game(chat_id)
-        
-        if chat_id in minigame_groups:
-            asyncio.create_task(start_random_minigame(chat_id, context, False))
-            
-    except asyncio.CancelledError:
-        logger.info(f"Timeout handler cancelled for chat {chat_id}")
-    except Exception as e:
-        logger.error(f"Error in timeout handler for {chat_id}: {e}")
-        await cleanup_game(chat_id)
-        if chat_id in minigame_groups:
-            await asyncio.sleep(5)
-            asyncio.create_task(start_random_minigame(chat_id, context, False))
+                logging.error(f"Error saving to GitHub: {e}")
+                return False
+    
+    def auto_save(self):
+        while True:
+            time.sleep(60)
+            self.executor.submit(self.save_to_github)
+    
+    def start_auto_save(self):
+        save_thread = threading.Thread(target=self.auto_save, daemon=True)
+        save_thread.start()
+    
+    def get_user(self, user_id):
+        user_id = str(user_id)
+        with self.lock:
+            if user_id not in self.data:
+                self.data[user_id] = {
+                    "username": "",
+                    "coins": 100,
+                    "exp": 0,
+                    "level": 1,
+                    "fishing_count": 0,
+                    "win_count": 0,
+                    "lose_count": 0,
+                    "treasures_found": 0,
+                    "total_multiplier": 0,
+                    "best_multiplier": 0,
+                    "inventory": {
+                        "rod": "basic",
+                        "baits": {"worm": 10, "shrimp": 0, "special": 0, "golden": 0},
+                        "fish": {}
+                    },
+                    "daily_claimed": None,
+                    "created_at": datetime.now().isoformat()
+                }
+            return self.data[user_id].copy()
+    
+    def update_user(self, user_id, data):
+        user_id = str(user_id)
+        with self.lock:
+            self.data[user_id] = data
+    
+    def add_coins(self, user_id, amount):
+        user_id = str(user_id)
+        with self.lock:
+            user = self.get_user(user_id)
+            user["coins"] += amount
+            self.data[user_id] = user
+            return user["coins"]
+    
+    def add_exp(self, user_id, amount):
+        user_id = str(user_id)
+        with self.lock:
+            user = self.get_user(user_id)
+            user["exp"] += amount
+            new_level = (user["exp"] // 100) + 1
+            leveled_up = new_level > user["level"]
+            if leveled_up:
+                user["level"] = new_level
+            self.data[user_id] = user
+            return leveled_up
 
-async def genquiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global quiz_generation_active, quiz_generation_task, quiz_generation_stats
-    
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⚠️ Chỉ admin mới dùng được lệnh này!")
-        return
-    
-    if quiz_generation_active:
-        await update.message.reply_text("⚠️ Đang tạo quiz rồi! Dùng /stopgen để dừng.")
-        return
-    
-    quiz_generation_active = True
-    quiz_generation_stats = {"total": 0, "duplicates": 0, "errors": 0}
-    
-    await update.message.reply_text(
-        "🚀 **Bắt đầu tạo quiz với Qwen-3-235B!**\n\n"
-        "⚡ Tốc độ: 1 quiz/giây\n"
-        "📊 Update tiến độ mỗi 10 quiz\n"
-        "💾 Auto save mỗi 5 quiz\n"
-        "🛑 Dùng /stopgen để dừng",
-        parse_mode="Markdown"
-    )
-    
-    quiz_generation_task = asyncio.create_task(continuous_quiz_generation(update, context))
+data_manager = DataManager()
 
-async def stopgen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global quiz_generation_active, quiz_generation_task
-    
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⚠️ Chỉ admin mới dùng được lệnh này!")
-        return
-    
-    if not quiz_generation_active:
-        await update.message.reply_text("⚠️ Không có tiến trình tạo quiz nào đang chạy!")
-        return
-    
-    quiz_generation_active = False
-    
-    if quiz_generation_task:
-        quiz_generation_task.cancel()
-        quiz_generation_task = None
-    
-    await update.message.reply_text("⏸️ **Đang dừng và lưu quiz...**", parse_mode="Markdown")
+def format_number(num):
+    return "{:,}".format(num)
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        query = update.callback_query
-        await query.answer(cache_time=1)
-        
-        data = query.data
-        chat_id = update.effective_chat.id
-        user = update.effective_user
-        username = user.username or user.first_name
-        
-        if chat_id not in active_games:
-            await query.answer("⏰ Quiz đã kết thúc!", show_alert=True)
-            return
-        
-        user_key = (chat_id, user.id)
-        if user_key in user_answered:
-            await query.answer("⚠️ Bạn đã trả lời rồi!", show_alert=True)
-            return
-        
-        game_info = active_games[chat_id]
-        
-        if game_info.get("creating"):
-            await query.answer("⏳ Quiz đang được tạo...", show_alert=True)
-            return
-            
-        game = game_info["game"]
-        user_answered[user_key] = True
-        
-        if data.startswith("quiz_") and game_info["type"] == "quiz":
-            quiz = game.current_quiz
-            answer = data.split("_")[1]
-            
-            correct_option = quiz['correct']
-            correct_answer_text = quiz.get('correct_answer', '')
-            
-            try:
-                await query.delete_message()
-            except:
-                pass
-            
-            if answer == correct_option:
-                points = 300
-                result = f"🎉 **{username}** trả lời chính xác! (+{points}đ)\n\n"
-                result += f"✅ Đáp án: **{correct_option}**"
-                if correct_answer_text:
-                    result += f" - {correct_answer_text}"
-                result += f"\n💡 {quiz.get('explanation', '')}"
-                
-                update_user_balance(user.id, username, points, "quiz")
-                
-                chat = update.effective_chat
-                if chat.type in ["group", "supergroup"] and storage:
-                    storage.update_group_score(chat.id, user.id, username, points)
-                    
-            else:
-                result = f"❌ **{username}** - Chưa đúng!\n\n"
-                result += f"✅ Đáp án đúng: **{correct_option}**"
-                if correct_answer_text:
-                    result += f" - {correct_answer_text}"
-                result += f"\n💡 {quiz.get('explanation', '')}"
-            
-            msg = await context.bot.send_message(chat_id, result, parse_mode="Markdown")
-            
-            if game_info.get("minigame"):
-                await add_game_message(chat_id, msg.message_id, context)
-            
-            await cleanup_game(chat_id)
-            
-            if chat_id in minigame_groups and chat_id not in quiz_scheduling:
-                asyncio.create_task(start_random_minigame(chat_id, context, False))
-        
-        elif data.startswith("disabled_"):
-            await query.answer("⚠️ Bạn đã trả lời rồi!", show_alert=True)
-            return
-                        
-    except Exception as e:
-        logger.error(f"Error in button callback: {e}")
-        try:
-            await query.answer("❌ Có lỗi xảy ra!", show_alert=True)
-        except:
-            pass
+def get_level_title(level):
+    titles = {
+        1: "🐣 Người mới",
+        5: "🎣 Thợ câu",
+        10: "🐠 Ngư dân",
+        20: "🦈 Thủy thủ",
+        30: "⚓ Thuyền trưởng",
+        50: "🏴‍☠️ Hải tặc",
+        75: "🧜‍♂️ Vua biển cả",
+        100: "🔱 Poseidon",
+        150: "🌊 Thần đại dương",
+        200: "⚡ Huyền thoại"
+    }
+    
+    for min_level in sorted(titles.keys(), reverse=True):
+        if level >= min_level:
+            return titles[min_level]
+    return titles[1]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user = update.effective_user
-        username = user.username or user.first_name
-        balance = get_user_balance(user.id)
-        
-        chat = update.effective_chat
-        
-        if chat.type in ["group", "supergroup"]:
-            minigame_groups.add(chat.id)
-            if storage:
-                storage.add_minigame_group(chat.id)
-            
-            if chat.id not in active_games:
-                asyncio.create_task(start_random_minigame(chat.id, context))
-        
-        quiz_stats = {"total_quizzes": 0, "total_files": 0}
-        if storage:
-            quiz_stats = storage.get_quiz_stats()
-        
-        message = f"""👋 Xin chào {username}! Mình là Linh Bot!
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
+    
+    user = data_manager.get_user(user_id)
+    user["username"] = user_name
+    data_manager.update_user(user_id, user)
+    
+    welcome_text = f"""
+🎮 **Chào mừng {user_name} đến với Fishing Game Bot!** 🎮
 
-💰 Số dư của bạn: {_fmt_money(balance)}
+🎣 **Thông tin của bạn:**
+├ 💰 Xu: {format_number(user['coins'])}
+├ ⭐ Level: {user['level']} - {get_level_title(user['level'])}
+├ 🎯 Kinh nghiệm: {user['exp']}
+└ 🎣 Cần câu: {FISHING_RODS[user['inventory']['rod']]['name']}
 
-🎮 **Minigame tự động trong nhóm**
-Bot dùng quiz từ pool có sẵn (không tạo mới)
+📜 **Lệnh cơ bản:**
+/menu - 📱 Menu chính
+/fishing - 🎣 Câu cá
+/inventory - 🎒 Kho đồ
+/shop - 🛍️ Cửa hàng
+/stats - 📊 Thống kê
+/leaderboard - 🏆 BXH
 
-📚 **Các chủ đề:**
-⚽ Bóng đá | 🌍 Địa lý | 📜 Lịch sử
-💡 Kĩ năng sống | 🦁 Động vật | 🎌 Anime & Manga
+💡 Cá có cơ hội nhân tiền x2-x20!
+    """
+    
+    await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
-📝 **Chơi riêng lẻ:**
-/quiz - Quiz ngẫu nhiên từ pool
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton("🎣 Câu Cá", callback_data='game_fishing'),
+            InlineKeyboardButton("🎲 Chẵn Lẻ", callback_data='game_chanle')
+        ],
+        [
+            InlineKeyboardButton("🗺️ Tìm Kho Báu", callback_data='game_treasure'),
+            InlineKeyboardButton("🎒 Kho Đồ", callback_data='view_inventory')
+        ],
+        [
+            InlineKeyboardButton("🛍️ Cửa Hàng", callback_data='open_shop'),
+            InlineKeyboardButton("📊 Thống Kê", callback_data='view_stats')
+        ],
+        [
+            InlineKeyboardButton("🏆 BXH", callback_data='leaderboard'),
+            InlineKeyboardButton("🎁 Quà Hàng Ngày", callback_data='daily_reward')
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    user_id = update.effective_user.id
+    user = data_manager.get_user(user_id)
+    
+    menu_text = f"""
+🎮 **MENU CHÍNH** 🎮
 
-🔧 **Admin Commands:**
-/genquiz - Tạo quiz liên tục với Qwen-3-235B
-/stopgen - Dừng tạo quiz
+👤 {user['username']} | Level {user['level']}
+💰 {format_number(user['coins'])} xu | ⭐ {user['exp']} EXP
+🎣 Cần: {FISHING_RODS[user['inventory']['rod']]['name']}
 
-📊 **Thông tin:**
-/top - BXH toàn cầu
-/gtop - BXH nhóm này
-/bal - Xem số dư
-/stats - Thống kê cá nhân
+Chọn hoạt động:
+    """
+    
+    await update.message.reply_text(menu_text, reply_markup=reply_markup, parse_mode='Markdown')
 
-🛠️ **Quản lý:**
-/clean - Dọn dẹp bot (chỉ admin)
-/stopminigame - Dừng minigame trong nhóm
+async def inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = data_manager.get_user(user_id)
+    inv = user['inventory']
+    
+    total_fish = sum(inv['fish'].values()) if inv['fish'] else 0
+    
+    fish_list = ""
+    if inv['fish']:
+        for fish_name, count in sorted(inv['fish'].items(), key=lambda x: x[1], reverse=True)[:10]:
+            fish_list += f"  {fish_name}: {count}\n"
+    else:
+        fish_list = "  Chưa có cá nào\n"
+    
+    inventory_text = f"""
+🎒 **KHO ĐỒ CỦA BẠN** 🎒
 
-📚 **Quiz pool:** {quiz_stats['total_quizzes']} câu ({quiz_stats['total_files']} files)
-🏆 **Mỗi nhóm có BXH riêng!**
+**🎣 Cần câu:**
+{FISHING_RODS[inv['rod']]['name']}
+{FISHING_RODS[inv['rod']]['description']}
 
-💬 Chat riêng với mình để trò chuyện!"""
-        
-        await update.message.reply_text(message, parse_mode="Markdown")
-        logger.info(f"Start command successful for user {user.id}")
-        
-    except Exception as e:
-        logger.error(f"Error in start command: {e}", exc_info=True)
-        await update.message.reply_text(
-            "👋 Xin chào! Mình là Linh Bot!\n\n"
-            "📊 /top - Bảng xếp hạng\n"
-            "💰 /bal - Xem số dư"
-        )
+**🪱 Mồi câu:**
+├ 🪱 Giun: {inv['baits']['worm']}
+├ 🦐 Tôm: {inv['baits']['shrimp']}
+├ ✨ Đặc biệt: {inv['baits']['special']}
+└ 🌟 Vàng: {inv['baits'].get('golden', 0)}
 
-async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        chat_id = update.effective_chat.id
-        
-        if chat_id in active_games:
-            await update.message.reply_text("⚠️ Đang có game khác!")
-            return
-        
-        game = QuizGame(chat_id)
-        quiz = await game.get_quiz_from_pool()
-        
-        if not quiz:
-            await update.message.reply_text("❌ Không có quiz trong pool! Vui lòng tạo thêm quiz bằng /genquiz")
-            return
-        
-        game.current_quiz = quiz
-        active_games[chat_id] = {"type": "quiz", "game": game}
-        
-        keyboard = []
-        for option in quiz["options"]:
-            keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{option[0]}")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        source_text = f" [{quiz.get('source', 'Pool')}]"
-        
-        await update.message.reply_text(
-            f"❓ **{quiz['topic']}{source_text}**\n\n{quiz['question']}",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.error(f"Error in quiz: {e}")
-        await update.message.reply_text("😅 Xin lỗi, có lỗi xảy ra!")
+**🐟 Cá đã câu:** (Tổng: {total_fish})
+{fish_list}
 
-async def gtop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        chat = update.effective_chat
-        
-        if chat.type == "private":
-            await update.message.reply_text("⚠️ Lệnh này chỉ dùng được trong nhóm!")
-            return
-        
-        if not storage:
-            await update.message.reply_text("📊 Hệ thống đang bảo trì")
-            return
-        
-        group_name = chat.title or "Nhóm này"
-        leaderboard = storage.get_group_leaderboard(chat.id)
-        
-        if not leaderboard:
-            await update.message.reply_text(f"📊 **BXH {group_name}**\n\nChưa có dữ liệu!\nHãy chơi quiz để lên bảng!", parse_mode="Markdown")
-            return
-        
-        msg = f"🏆 **BXH {group_name}**\n"
-        msg += "────────────────\n"
-        
-        medals = ["🥇", "🥈", "🥉"]
-        for i, (name, score) in enumerate(leaderboard):
-            medal = medals[i] if i < 3 else f"{i+1}."
-            msg += f"{medal} {name}: {_fmt_money(score)} điểm\n"
-        
-        user = update.effective_user
-        user_stats = storage.get_user_group_stats(chat.id, user.id)
-        if user_stats['score'] > 0:
-            msg += f"\n📊 **Điểm của bạn:** {_fmt_money(user_stats['score'])}"
-            msg += f"\n🏅 **Số lần thắng:** {user_stats['games_won']}"
-        
-        await update.message.reply_text(msg, parse_mode="Markdown")
-        
-    except Exception as e:
-        logger.error(f"Error in gtop command: {e}", exc_info=True)
-        await update.message.reply_text("📊 Không thể tải bảng xếp hạng nhóm")
+**📈 Thống kê nhân tiền:**
+├ Tổng nhân: x{user.get('total_multiplier', 0)}
+└ Cao nhất: x{user.get('best_multiplier', 0)}
+    """
+    
+    keyboard = [
+        [InlineKeyboardButton("🛍️ Cửa hàng", callback_data='open_shop')],
+        [InlineKeyboardButton("💰 Bán cá", callback_data='sell_fish')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(inventory_text, reply_markup=reply_markup, parse_mode='Markdown')
 
-async def stopminigame_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        chat = update.effective_chat
-        user = update.effective_user
-        
-        member = await context.bot.get_chat_member(chat.id, user.id)
-        if member.status not in ['administrator', 'creator']:
-            await update.message.reply_text("⚠️ Chỉ admin nhóm mới dùng được lệnh này!")
-            return
-        
-        if chat.id in minigame_groups:
-            minigame_groups.discard(chat.id)
-            if storage:
-                storage.remove_minigame_group(chat.id)
-            
-            await cleanup_game(chat.id)
-            
-            await update.message.reply_text("🛑 Đã dừng minigame trong nhóm này!")
-        else:
-            await update.message.reply_text("⚠️ Minigame chưa được bật trong nhóm này!")
-            
-    except Exception as e:
-        logger.error(f"Error in stopminigame: {e}")
-        await update.message.reply_text("❌ Lỗi khi dừng minigame!")
+async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🎣 Cần câu", callback_data='shop_rods')],
+        [InlineKeyboardButton("🪱 Mồi câu", callback_data='shop_baits')],
+        [InlineKeyboardButton("💎 Vật phẩm đặc biệt", callback_data='shop_special')],
+        [InlineKeyboardButton("◀️ Quay lại", callback_data='back_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    shop_text = """
+🛍️ **CỬA HÀNG** 🛍️
 
-async def clean_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user = update.effective_user
-        
-        if user.id != ADMIN_ID:
-            await update.message.reply_text("⚠️ Chỉ admin mới dùng được lệnh này!")
-            return
-        
-        await update.message.reply_text("🧹 Đang dọn dẹp bot...")
-        
-        if storage:
-            await storage.batch_save()
-        
-        for chat_id in list(active_games.keys()):
-            await cleanup_game(chat_id)
-        
-        game_messages.clear()
-        chat_history.clear()
-        
-        await update.message.reply_text("✅ Đã dọn dẹp xong! Bot đã được làm mới.")
-        
-    except Exception as e:
-        logger.error(f"Error in clean command: {e}")
-        await update.message.reply_text("❌ Lỗi khi dọn dẹp!")
+Chào mừng đến cửa hàng!
+Chọn danh mục bạn muốn xem:
+    """
+    
+    await update.message.reply_text(shop_text, reply_markup=reply_markup, parse_mode='Markdown')
 
-async def bal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user = update.effective_user
-        balance = get_user_balance(user.id)
-        await update.message.reply_text(f"💰 Số dư của bạn: {_fmt_money(balance)}")
-        
-    except Exception as e:
-        logger.error(f"Error in bal command: {e}", exc_info=True)
-        await update.message.reply_text("💰 Số dư: 1.000 (mặc định)")
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sorted_users = sorted(data_manager.data.items(), 
+                         key=lambda x: x[1]['coins'], 
+                         reverse=True)[:10]
+    
+    text = "🏆 **BẢNG XẾP HẠNG TOP 10** 🏆\n\n"
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (user_id, user_data) in enumerate(sorted_users, 1):
+        medal = medals[i-1] if i <= 3 else f"{i}."
+        text += f"{medal} {user_data.get('username', 'User')} - {format_number(user_data['coins'])} xu (Lv.{user_data['level']})\n"
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
 
-async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not storage:
-            await update.message.reply_text("📊 Hệ thống đang bảo trì")
-            return
-            
-        leaderboard = storage.get_leaderboard_direct()
-        
-        if not leaderboard:
-            await update.message.reply_text("📊 Chưa có dữ liệu bảng xếp hạng\n\nHãy chơi game để lên bảng!")
-            return
-        
-        msg = "🏆 **BẢNG XẾP HẠNG TOÀN CẦU**\n"
-        msg += "────────────────\n"
-        
-        medals = ["🥇", "🥈", "🥉"]
-        for i, (name, score) in enumerate(leaderboard):
-            medal = medals[i] if i < 3 else f"{i+1}."
-            msg += f"{medal} {name}: {_fmt_money(score)} điểm\n"
-        
-        await update.message.reply_text(msg, parse_mode="Markdown")
-        
-    except Exception as e:
-        logger.error(f"Error in top command: {e}", exc_info=True)
-        await update.message.reply_text("📊 Không thể tải bảng xếp hạng")
+async def fishing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = data_manager.get_user(user_id)
+    
+    cost = 10
+    if user["coins"] < cost:
+        await update.message.reply_text(f"❌ Bạn không đủ xu! Cần {cost} xu để câu cá.")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton(f"🪱 Giun ({user['inventory']['baits']['worm']})", 
+                            callback_data='fish_bait_worm')],
+        [InlineKeyboardButton(f"🦐 Tôm ({user['inventory']['baits']['shrimp']})", 
+                            callback_data='fish_bait_shrimp')],
+        [InlineKeyboardButton(f"✨ Đặc biệt ({user['inventory']['baits']['special']})", 
+                            callback_data='fish_bait_special')],
+        [InlineKeyboardButton(f"🌟 Vàng ({user['inventory']['baits'].get('golden', 0)})", 
+                            callback_data='fish_bait_golden')],
+        [InlineKeyboardButton("🎣 Không dùng mồi", callback_data='fish_bait_none')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    rod_info = FISHING_RODS[user['inventory']['rod']]
+    await update.message.reply_text(
+        f"🎣 **CHỌN MỒI CÂU**\nCần: {rod_info['name']}\nTốc độ: {rod_info['speed']}s\nChọn mồi:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
 
-async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user = update.effective_user
-        username = user.username or user.first_name
-        
-        if not storage:
-            balance = get_user_balance(user.id)
-            msg = f"📊 **{username}**\n\n💰 Số dư: {_fmt_money(balance)}"
-            await update.message.reply_text(msg, parse_mode="Markdown")
-            return
-            
-        data = storage.get_user_stats_direct(user.id)
-        
-        msg = f"📊 **Thống kê của {username}**\n"
-        msg += "────────────────\n"
-        msg += f"💰 Số dư: {_fmt_money(data['balance'])}\n"
-        msg += f"⭐ Tổng điểm: {_fmt_money(data['total_earned'])}\n"
-        
-        games = data.get('games_played', {})
-        if games:
-            msg += "\n🎮 **Đã chơi:**\n"
-            for game, count in games.items():
-                if game == "quiz":
-                    msg += f"• Quiz: {count} lần\n"
-        
-        await update.message.reply_text(msg, parse_mode="Markdown")
-        
-    except Exception as e:
-        logger.error(f"Error in stats command: {e}", exc_info=True)
-        user = update.effective_user
-        username = user.username or user.first_name
-        balance = get_user_balance(user.id)
-        msg = f"📊 **{username}**\n\n💰 Số dư: {_fmt_money(balance)}"
-        await update.message.reply_text(msg, parse_mode="Markdown")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        message = update.message.text
-        chat_id = update.effective_chat.id
-        user = update.effective_user
-        username = user.username or user.first_name
-        
-        chat = update.effective_chat
-        
-        if chat.type in ["group", "supergroup"] and chat_id not in minigame_groups:
-            minigame_groups.add(chat_id)
-            if storage:
-                storage.add_minigame_group(chat_id)
-            
-            if chat_id not in active_games:
-                asyncio.create_task(start_random_minigame(chat_id, context))
-        
-        if chat.type == "private":
-            user_id = user.id
-            
-            if user_id not in chat_history:
-                if storage:
-                    history = storage.get_chat_history(user_id)
-                    chat_history[user_id] = deque(history, maxlen=CHAT_HISTORY_LIMIT)
-                else:
-                    chat_history[user_id] = deque(maxlen=CHAT_HISTORY_LIMIT)
-            
-            chat_history[user_id].append({"role": "user", "content": message})
-            
-            messages = [
-                {"role": "system", "content": "You are Linh, a cheerful Vietnamese girl. Reply in Vietnamese, keep responses short and friendly."}
-            ]
-            messages.extend(list(chat_history[user_id]))
-            
-            response = await call_api(messages, max_tokens=150)
-            
-            if response:
-                chat_history[user_id].append({"role": "assistant", "content": response})
-                
-                await update.message.reply_text(response)
-                
-                if storage:
-                    storage.queue_chat_save(user_id, list(chat_history[user_id]))
+async def process_fishing(query, bait_type):
+    user_id = query.from_user.id
+    user = data_manager.get_user(user_id)
+    
+    data_manager.add_coins(user_id, -10)
+    
+    bonus = 0
+    golden_multiplier = 1
+    if bait_type != 'none':
+        if bait_type in user['inventory']['baits'] and user['inventory']['baits'][bait_type] > 0:
+            user['inventory']['baits'][bait_type] -= 1
+            if bait_type == 'golden':
+                bonus = 50
+                golden_multiplier = 2
             else:
-                await update.message.reply_text("😊 Mình đang nghĩ... Thử lại nhé!")
-    except Exception as e:
-        logger.error(f"Error in handle_message: {e}", exc_info=True)
-
-async def periodic_batch_save(application: Application):
-    while True:
-        await asyncio.sleep(60)
-        try:
-            if storage:
-                await storage.batch_save()
-        except Exception as e:
-            logger.error(f"Batch save error: {e}")
-
-async def quiz_health_check(application: Application):
-    while True:
-        await asyncio.sleep(QUIZ_CHECK_INTERVAL)
-        try:
-            stuck_games = []
-            current_time = get_vietnam_time()
-            
-            for chat_id in list(minigame_groups):
-                try:
-                    should_restart = False
-                    
-                    if chat_id not in active_games:
-                        should_restart = True
-                    elif chat_id in game_start_times:
-                        duration = (current_time - game_start_times[chat_id]).total_seconds()
-                        if duration > GAME_TIMEOUT + 60:
-                            should_restart = True
-                    
-                    if chat_id in active_games:
-                        game = active_games[chat_id]
-                        if game.get("creating") and not game.get("game"):
-                            create_time = quiz_scheduling.get(chat_id)
-                            if create_time and (current_time - create_time).total_seconds() > 30:
-                                should_restart = True
-                    
-                    if should_restart:
-                        stuck_games.append(chat_id)
-                        
-                except Exception as e:
-                    logger.error(f"Check failed for {chat_id}: {e}")
-            
-            for chat_id in stuck_games:
-                logger.warning(f"Restarting stuck game for chat {chat_id}")
-                await cleanup_game(chat_id)
-                await asyncio.sleep(2)
-                asyncio.create_task(start_random_minigame(chat_id, application))
-                    
-        except Exception as e:
-            logger.error(f"Error in quiz health check: {e}")
-
-async def cleanup_memory(application: Application):
-    while True:
-        await asyncio.sleep(1800)
-        try:
-            current_games = set(active_games.keys())
-            keys_to_remove = [key for key in user_answered.keys() if key[0] not in current_games]
-            for key in keys_to_remove:
-                del user_answered[key]
-            
-            inactive_chats = []
-            for chat_id in list(quiz_creation_locks.keys()):
-                if chat_id not in minigame_groups and chat_id not in active_games:
-                    inactive_chats.append(chat_id)
-            
-            for chat_id in inactive_chats:
-                del quiz_creation_locks[chat_id]
-            
-            inactive_users = []
-            for user_id in list(chat_history.keys()):
-                if len(chat_history[user_id]) == 0:
-                    inactive_users.append(user_id)
-            
-            for user_id in inactive_users:
-                del chat_history[user_id]
-            
-            logger.info(f"Memory cleanup completed. Active chats: {len(chat_history)}, Active games: {len(active_games)}")
-        except Exception as e:
-            logger.error(f"Cleanup error: {e}")
-
-async def load_minigame_groups(application: Application):
-    global minigame_groups
+                bait_info = BAITS.get(bait_type)
+                bonus = bait_info['bonus'] if bait_info else 0
     
-    if storage:
-        minigame_groups = storage.get_minigame_groups()
-        logger.info(f"Loaded {len(minigame_groups)} minigame groups")
+    rod_info = FISHING_RODS[user['inventory']['rod']]
+    rod_bonus = rod_info['bonus']
+    total_bonus = bonus + rod_bonus
+    rare_multiplier = rod_info['rare_bonus']
+    
+    await query.edit_message_text(f"🎣 Đang thả câu... (chờ {rod_info['speed']}s)")
+    await asyncio.sleep(rod_info['speed'])
+    
+    rand = random.uniform(0, 100)
+    cumulative = 0
+    caught_fish = None
+    
+    for fish_name, fish_data in FISH_TYPES.items():
+        if fish_name in ["🐋 Cá voi", "💎 Kho báu", "🦞 Tôm hùm"]:
+            chance = fish_data["chance"] * (1 + total_bonus/100) * rare_multiplier
+        else:
+            chance = fish_data["chance"] * (1 + total_bonus/100)
         
-        for i, chat_id in enumerate(minigame_groups):
-            try:
-                await start_random_minigame(chat_id, application)
-                await asyncio.sleep(3)
-            except Exception as e:
-                logger.error(f"Error starting minigame for {chat_id}: {e}")
+        cumulative += chance
+        if rand <= cumulative:
+            caught_fish = fish_name
+            base_reward = fish_data["value"]
+            exp = fish_data["exp"]
+            
+            multiplier = 1
+            if random.randint(1, 100) <= fish_data["multiplier_chance"]:
+                min_mult, max_mult = fish_data["multiplier_range"]
+                multiplier = random.randint(min_mult, max_mult)
+                if golden_multiplier > 1:
+                    multiplier *= golden_multiplier
+            
+            reward = base_reward * multiplier
+            
+            if user.get('best_multiplier', 0) < multiplier:
+                user['best_multiplier'] = multiplier
+            user['total_multiplier'] = user.get('total_multiplier', 0) + multiplier
+            
+            break
+    
+    if caught_fish:
+        if caught_fish not in user['inventory']['fish']:
+            user['inventory']['fish'][caught_fish] = 0
+        user['inventory']['fish'][caught_fish] += 1
+        
+        data_manager.add_coins(user_id, reward)
+        leveled_up = data_manager.add_exp(user_id, exp)
+        
+        user["fishing_count"] += 1
+        user["win_count"] += 1
+        
+        result_text = f"""
+🎉 **BẮT ĐƯỢC!**
+{caught_fish}
+💰 +{format_number(reward)} xu"""
+        
+        if multiplier > 1:
+            result_text += f" (x{multiplier} 🔥)"
+        
+        result_text += f"""
+⭐ +{exp} EXP
+📦 Đã lưu vào kho
 
-async def post_init(application: Application) -> None:
-    asyncio.create_task(periodic_batch_save(application))
-    asyncio.create_task(cleanup_memory(application))
-    asyncio.create_task(quiz_health_check(application))
-    asyncio.create_task(load_minigame_groups(application))
-    logger.info("Bot started - Fixed save quiz version!")
+💰 Số dư: {format_number(user['coins'] + reward)} xu"""
+        
+        if leveled_up:
+            result_text += f"\n\n🎊 **LEVEL UP! Bạn đã đạt level {user['level'] + 1}!**"
+    else:
+        user["fishing_count"] += 1
+        result_text = f"😢 Không câu được gì!\n💰 Số dư: {format_number(user['coins'] - 10)} xu"
+    
+    data_manager.update_user(user_id, user)
+    await query.edit_message_text(result_text, parse_mode='Markdown')
 
-async def post_shutdown(application: Application) -> None:
-    global quiz_generation_active, quiz_generation_task
+async def chanle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton("Chẵn (10 xu)", callback_data='chanle_chan_10'),
+            InlineKeyboardButton("Lẻ (10 xu)", callback_data='chanle_le_10')
+        ],
+        [
+            InlineKeyboardButton("Chẵn (50 xu)", callback_data='chanle_chan_50'),
+            InlineKeyboardButton("Lẻ (50 xu)", callback_data='chanle_le_50')
+        ],
+        [
+            InlineKeyboardButton("Chẵn (100 xu)", callback_data='chanle_chan_100'),
+            InlineKeyboardButton("Lẻ (100 xu)", callback_data='chanle_le_100')
+        ],
+        [
+            InlineKeyboardButton("Chẵn (500 xu)", callback_data='chanle_chan_500'),
+            InlineKeyboardButton("Lẻ (500 xu)", callback_data='chanle_le_500')
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    quiz_generation_active = False
-    if quiz_generation_task:
-        quiz_generation_task.cancel()
+    await update.message.reply_text(
+        "🎲 **TRÒ CHƠI CHẴN LẺ** 🎲\nChọn chẵn hoặc lẻ:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def treasure(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = data_manager.get_user(user_id)
     
-    for task in game_timeouts.values():
-        try:
-            task.cancel()
-        except:
-            pass
+    cost = 20
+    if user["coins"] < cost:
+        await update.message.reply_text(f"❌ Bạn không đủ xu! Cần {cost} xu để tìm kho báu.")
+        return
     
-    if storage:
-        await storage.batch_save(force_quiz=True)
-    logger.info("Bot shutdown - data saved!")
+    keyboard = []
+    for i in range(4):
+        row = []
+        for j in range(4):
+            row.append(InlineKeyboardButton("📦", callback_data=f"treasure_{i}_{j}"))
+        keyboard.append(row)
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    treasure_pos = random.randint(0, 15)
+    gold_positions = random.sample([i for i in range(16) if i != treasure_pos], 3)
+    
+    context.user_data['treasure_pos'] = treasure_pos
+    context.user_data['gold_positions'] = gold_positions
+    
+    await update.message.reply_text(
+        f"""🗺️ **TÌM KHO BÁU** 🗺️
+Phí chơi: {cost} xu
+Chọn 1 hộp để tìm kho báu!
+
+💎 Kho báu = 200 xu
+💰 Vàng = 50 xu
+💩 Trống = 0 xu""",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+    
+    data_manager.add_coins(user_id, -cost)
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    user = data_manager.get_user(user_id)
+    data = query.data
+    
+    if data == 'game_fishing':
+        await fishing(query, context)
+    
+    elif data == 'game_chanle':
+        await chanle(query, context)
+    
+    elif data == 'game_treasure':
+        await treasure(query, context)
+    
+    elif data == 'view_inventory':
+        await show_inventory(query)
+    
+    elif data == 'view_stats':
+        await show_stats(query)
+    
+    elif data == 'open_shop':
+        await show_shop(query)
+    
+    elif data == 'leaderboard':
+        await show_leaderboard(query)
+    
+    elif data == 'daily_reward':
+        await claim_daily(query)
+    
+    elif data.startswith('fish_bait_'):
+        bait = data.replace('fish_bait_', '')
+        await process_fishing(query, bait)
+    
+    elif data.startswith('chanle_'):
+        parts = data.split('_')
+        choice = parts[1]
+        bet = int(parts[2])
+        
+        if user["coins"] < bet:
+            await query.edit_message_text(f"❌ Bạn không đủ {bet} xu để cược!")
+            return
+        
+        dice = random.randint(1, 6)
+        is_even = dice % 2 == 0
+        
+        if (choice == 'chan' and is_even) or (choice == 'le' and not is_even):
+            data_manager.add_coins(user_id, bet)
+            data_manager.add_exp(user_id, 5)
+            user["win_count"] += 1
+            result = f"""🎉 **THẮNG!**
+🎲 Xúc xắc: {dice}
+💰 +{bet} xu
+⭐ +5 EXP
+💰 Số dư: {format_number(user['coins'] + bet)} xu"""
+        else:
+            data_manager.add_coins(user_id, -bet)
+            user["lose_count"] += 1
+            result = f"""😢 **THUA!**
+🎲 Xúc xắc: {dice}
+💰 -{bet} xu
+💰 Số dư: {format_number(user['coins'] - bet)} xu"""
+        
+        data_manager.update_user(user_id, user)
+        await query.edit_message_text(result, parse_mode='Markdown')
+    
+    elif data.startswith('treasure_'):
+        parts = data.split('_')
+        row = int(parts[1])
+        col = int(parts[2])
+        position = row * 4 + col
+        
+        treasure_pos = context.user_data.get('treasure_pos', -1)
+        gold_positions = context.user_data.get('gold_positions', [])
+        
+        if position == treasure_pos:
+            reward = 200
+            data_manager.add_coins(user_id, reward)
+            data_manager.add_exp(user_id, 20)
+            user["treasures_found"] += 1
+            user["win_count"] += 1
+            result = f"""💎 **KHO BÁU!**
++{reward} xu
+⭐ +20 EXP
+💰 Số dư: {format_number(user['coins'] + reward - 20)} xu"""
+        elif position in gold_positions:
+            reward = 50
+            data_manager.add_coins(user_id, reward)
+            data_manager.add_exp(user_id, 10)
+            result = f"""💰 **VÀNG!**
++{reward} xu
+⭐ +10 EXP
+💰 Số dư: {format_number(user['coins'] + reward - 20)} xu"""
+        else:
+            user["lose_count"] += 1
+            result = f"""💩 **TRỐNG!**
+Không có gì ở đây!
+💰 Số dư: {format_number(user['coins'] - 20)} xu"""
+        
+        data_manager.update_user(user_id, user)
+        await query.edit_message_text(result, parse_mode='Markdown')
+    
+    elif data == 'shop_rods':
+        await show_rods_shop(query)
+    
+    elif data == 'shop_baits':
+        await show_baits_shop(query)
+    
+    elif data.startswith('buy_rod_'):
+        rod_id = data.replace('buy_rod_', '')
+        await buy_rod(query, rod_id)
+    
+    elif data.startswith('buy_bait_'):
+        parts = data.split('_')
+        bait_type = parts[2]
+        amount = int(parts[3])
+        await buy_bait(query, bait_type, amount)
+    
+    elif data == 'sell_fish':
+        await sell_all_fish(query)
+
+async def show_shop(query):
+    keyboard = [
+        [InlineKeyboardButton("🎣 Cần câu", callback_data='shop_rods')],
+        [InlineKeyboardButton("🪱 Mồi câu", callback_data='shop_baits')],
+        [InlineKeyboardButton("◀️ Quay lại", callback_data='back_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "🛍️ **CỬA HÀNG**\nChọn danh mục:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def show_rods_shop(query):
+    user_id = query.from_user.id
+    user = data_manager.get_user(user_id)
+    current_rod = user['inventory']['rod']
+    
+    text = "🎣 **CỬA HÀNG CẦN CÂU**\n\n"
+    keyboard = []
+    
+    for rod_id, rod_info in FISHING_RODS.items():
+        if rod_id == current_rod:
+            text += f"✅ {rod_info['name']} (Đang dùng)\n\n"
+        else:
+            text += f"{rod_info['name']}\n"
+            text += f"💰 {format_number(rod_info['price'])} xu\n"
+            text += f"📝 {rod_info['description']}\n\n"
+            
+            if rod_info['price'] <= user['coins'] and rod_id != current_rod:
+                keyboard.append([InlineKeyboardButton(
+                    f"Mua {rod_info['name']} ({format_number(rod_info['price'])} xu)",
+                    callback_data=f'buy_rod_{rod_id}'
+                )])
+    
+    keyboard.append([InlineKeyboardButton("◀️ Quay lại", callback_data='open_shop')])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def show_baits_shop(query):
+    user_id = query.from_user.id
+    user = data_manager.get_user(user_id)
+    
+    text = "🪱 **CỬA HÀNG MỒI CÂU**\n\n"
+    keyboard = []
+    
+    for bait_id, bait_info in BAITS.items():
+        current_amount = user['inventory']['baits'].get(bait_id, 0)
+        text += f"{bait_info['name']}\n"
+        text += f"💰 {bait_info['price']} xu/cái\n"
+        text += f"📝 {bait_info['description']}\n"
+        text += f"📦 Đang có: {current_amount}\n\n"
+        
+        row = []
+        for amount in [10, 50, 100]:
+            total_price = bait_info['price'] * amount
+            if total_price <= user['coins']:
+                row.append(InlineKeyboardButton(
+                    f"x{amount} ({format_number(total_price)} xu)",
+                    callback_data=f'buy_bait_{bait_id}_{amount}'
+                ))
+        if row:
+            keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton("◀️ Quay lại", callback_data='open_shop')])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def buy_rod(query, rod_id):
+    user_id = query.from_user.id
+    user = data_manager.get_user(user_id)
+    rod_info = FISHING_RODS[rod_id]
+    
+    if user['coins'] < rod_info['price']:
+        await query.edit_message_text("❌ Bạn không đủ xu!")
+        return
+    
+    data_manager.add_coins(user_id, -rod_info['price'])
+    user['inventory']['rod'] = rod_id
+    data_manager.update_user(user_id, user)
+    
+    await query.edit_message_text(
+        f"✅ **MUA THÀNH CÔNG!**\n"
+        f"Bạn đã mua {rod_info['name']}\n"
+        f"💰 Số dư: {format_number(user['coins'] - rod_info['price'])} xu",
+        parse_mode='Markdown'
+    )
+
+async def buy_bait(query, bait_type, amount):
+    user_id = query.from_user.id
+    user = data_manager.get_user(user_id)
+    bait_info = BAITS[bait_type]
+    total_price = bait_info['price'] * amount
+    
+    if user['coins'] < total_price:
+        await query.edit_message_text("❌ Bạn không đủ xu!")
+        return
+    
+    data_manager.add_coins(user_id, -total_price)
+    if bait_type not in user['inventory']['baits']:
+        user['inventory']['baits'][bait_type] = 0
+    user['inventory']['baits'][bait_type] += amount
+    data_manager.update_user(user_id, user)
+    
+    await query.edit_message_text(
+        f"✅ **MUA THÀNH CÔNG!**\n"
+        f"Bạn đã mua {amount} {bait_info['name']}\n"
+        f"💰 Số dư: {format_number(user['coins'] - total_price)} xu",
+        parse_mode='Markdown'
+    )
+
+async def sell_all_fish(query):
+    user_id = query.from_user.id
+    user = data_manager.get_user(user_id)
+    
+    total_value = 0
+    total_count = 0
+    
+    if user['inventory']['fish']:
+        for fish_name, count in user['inventory']['fish'].items():
+            for fish_type, fish_data in FISH_TYPES.items():
+                if fish_type == fish_name:
+                    total_value += fish_data['value'] * count * 0.7
+                    total_count += count
+                    break
+        
+        user['inventory']['fish'] = {}
+        data_manager.add_coins(user_id, int(total_value))
+        data_manager.update_user(user_id, user)
+        
+        await query.edit_message_text(
+            f"💰 **BÁN THÀNH CÔNG!**\n"
+            f"Đã bán {total_count} con cá\n"
+            f"Thu được: {format_number(int(total_value))} xu\n"
+            f"💰 Số dư: {format_number(user['coins'] + int(total_value))} xu",
+            parse_mode='Markdown'
+        )
+    else:
+        await query.edit_message_text("❌ Bạn không có cá để bán!")
+
+async def show_inventory(query):
+    user_id = query.from_user.id
+    user = data_manager.get_user(user_id)
+    inv = user['inventory']
+    
+    total_fish = sum(inv['fish'].values()) if inv['fish'] else 0
+    
+    fish_list = ""
+    if inv['fish']:
+        for fish_name, count in sorted(inv['fish'].items(), key=lambda x: x[1], reverse=True)[:5]:
+            fish_list += f"  {fish_name}: {count}\n"
+    else:
+        fish_list = "  Chưa có cá nào\n"
+    
+    text = f"""
+🎒 **KHO ĐỒ**
+
+🎣 Cần: {FISHING_RODS[inv['rod']]['name']}
+🪱 Mồi: Giun x{inv['baits']['worm']} | Tôm x{inv['baits']['shrimp']} | ĐB x{inv['baits']['special']} | Vàng x{inv['baits'].get('golden', 0)}
+
+🐟 Cá ({total_fish} con):
+{fish_list}
+
+📈 Nhân cao nhất: x{user.get('best_multiplier', 0)}
+    """
+    
+    keyboard = [
+        [InlineKeyboardButton("💰 Bán tất cả cá", callback_data='sell_fish')],
+        [InlineKeyboardButton("◀️ Quay lại", callback_data='back_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def show_stats(query):
+    user_id = query.from_user.id
+    user = data_manager.get_user(user_id)
+    
+    win_rate = (user['win_count'] / (user['win_count'] + user['lose_count']) * 100) if (user['win_count'] + user['lose_count']) > 0 else 0
+    
+    text = f"""
+📊 **THỐNG KÊ**
+
+👤 {user['username']}
+🏆 Level {user['level']} - {get_level_title(user['level'])}
+⭐ {user['exp']} EXP
+💰 {format_number(user['coins'])} xu
+
+📈 **Thành tích:**
+🎣 Câu cá: {user['fishing_count']} lần
+✅ Thắng: {user['win_count']} lần
+❌ Thua: {user['lose_count']} lần
+📊 Tỷ lệ thắng: {win_rate:.1f}%
+💎 Kho báu: {user['treasures_found']} lần
+🔥 Tổng nhân: x{user.get('total_multiplier', 0)}
+⚡ Nhân cao nhất: x{user.get('best_multiplier', 0)}
+    """
+    
+    await query.edit_message_text(text, parse_mode='Markdown')
+
+async def show_leaderboard(query):
+    sorted_users = sorted(data_manager.data.items(), 
+                         key=lambda x: x[1]['coins'], 
+                         reverse=True)[:10]
+    
+    text = "🏆 **BẢNG XẾP HẠNG TOP 10** 🏆\n\n"
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (user_id, user_data) in enumerate(sorted_users, 1):
+        medal = medals[i-1] if i <= 3 else f"{i}."
+        text += f"{medal} {user_data.get('username', 'User')} - {format_number(user_data['coins'])} xu (Lv.{user_data['level']})\n"
+    
+    await query.edit_message_text(text, parse_mode='Markdown')
+
+async def claim_daily(query):
+    user_id = query.from_user.id
+    user = data_manager.get_user(user_id)
+    
+    last_claim = user.get('daily_claimed')
+    if last_claim:
+        last_date = datetime.fromisoformat(last_claim)
+        if (datetime.now() - last_date).days < 1:
+            hours_left = 24 - (datetime.now() - last_date).total_seconds() / 3600
+            await query.edit_message_text(
+                f"⏰ Bạn đã nhận quà hôm nay!\nQuay lại sau {hours_left:.1f} giờ"
+            )
+            return
+    
+    reward = random.randint(50, 200)
+    bonus_baits = random.randint(5, 15)
+    
+    data_manager.add_coins(user_id, reward)
+    user['inventory']['baits']['worm'] += bonus_baits
+    user['daily_claimed'] = datetime.now().isoformat()
+    data_manager.update_user(user_id, user)
+    
+    await query.edit_message_text(
+        f"🎁 **PHẦN THƯỞNG HÀNG NGÀY!**\n"
+        f"💰 +{reward} xu\n"
+        f"🪱 +{bonus_baits} mồi giun\n"
+        f"💰 Số dư: {format_number(user['coins'] + reward)} xu",
+        parse_mode='Markdown'
+    )
 
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
-    application.post_init = post_init
-    application.post_shutdown = post_shutdown
-    
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("quiz", quiz_cmd))
-    application.add_handler(CommandHandler("bal", bal_cmd))
-    application.add_handler(CommandHandler("top", top_cmd))
-    application.add_handler(CommandHandler("gtop", gtop_cmd))
-    application.add_handler(CommandHandler("stats", stats_cmd))
-    application.add_handler(CommandHandler("clean", clean_cmd))
-    application.add_handler(CommandHandler("stopminigame", stopminigame_cmd))
-    application.add_handler(CommandHandler("genquiz", genquiz_cmd))
-    application.add_handler(CommandHandler("stopgen", stopgen_cmd))
+    application.add_handler(CommandHandler("menu", menu))
+    application.add_handler(CommandHandler("fishing", fishing))
+    application.add_handler(CommandHandler("chanle", chanle))
+    application.add_handler(CommandHandler("treasure", treasure))
+    application.add_handler(CommandHandler("inventory", inventory))
+    application.add_handler(CommandHandler("shop", shop))
+    application.add_handler(CommandHandler("leaderboard", leaderboard))
     
     application.add_handler(CallbackQueryHandler(button_callback))
     
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    logger.info("Linh Bot - Fixed save quiz! 💕")
+    print("🤖 Bot đang chạy...")
+    print("📊 Dữ liệu tự động lưu GitHub mỗi 60 giây")
+    print("👥 Hỗ trợ nhiều người chơi cùng lúc")
     application.run_polling()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
