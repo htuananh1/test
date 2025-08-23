@@ -343,6 +343,13 @@ async def process_fishing(user_id, is_auto=False):
     rod_data = FISHING_RODS.get(rod_id, FISHING_RODS['1'])
     current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
     
+    luck_bonus = 1.0
+    if not is_auto:
+        if random.random() < 0.1:
+            luck_bonus = 2.0
+        elif random.random() < 0.3:
+            luck_bonus = 1.5
+    
     rand = random.uniform(0, 100)
     cumulative = 0
     caught_fish = None
@@ -356,7 +363,7 @@ async def process_fishing(user_id, is_auto=False):
                      'rare': rod_data['rare_bonus'], 'epic': rod_data['epic_bonus'],
                      'legendary': rod_data['legendary_bonus'], 'mythic': rod_data['mythic_bonus'],
                      'secret': rod_data['secret_bonus']}
-        chance = fish_data["chance"] * chance_map.get(rarity, 1.0) * current_rank['fish_bonus']
+        chance = fish_data["chance"] * chance_map.get(rarity, 1.0) * current_rank['fish_bonus'] * luck_bonus
         if is_auto and rarity in ['epic', 'legendary', 'mythic', 'secret']:
             chance *= 0.7
         cumulative += chance
@@ -381,7 +388,7 @@ async def process_fishing(user_id, is_auto=False):
         data_manager.update_user(user_id, user)
         return {"success": True, "fish": caught_fish, "rarity": FISH_TYPES[caught_fish]['rarity'],
                 "reward": reward, "exp": exp, "leveled_up": leveled_up, "new_level": user["level"],
-                "coins": user["coins"]}, None
+                "coins": user["coins"], "luck_bonus": luck_bonus}, None
     else:
         user["fishing_count"] += 1
         data_manager.update_user(user_id, user)
@@ -395,7 +402,9 @@ async def auto_fishing_task(user_id, message_id, chat_id, bot):
     last_update_time = time.time()
     
     try:
-        while user_id in data_manager.auto_fishing_tasks and data_manager.auto_fishing_tasks[user_id]:
+        data_manager.auto_fishing_tasks[user_id] = True
+        
+        while user_id in data_manager.auto_fishing_tasks and data_manager.auto_fishing_tasks.get(user_id, False):
             if count % 5 == 0 and not ResourceMonitor.check_resources():
                 await asyncio.sleep(3)
                 continue
@@ -406,12 +415,15 @@ async def auto_fishing_task(user_id, message_id, chat_id, bot):
             if error:
                 try:
                     await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
-                        text=f"⛔ AUTO DỪNG\n{error}\nĐã câu: {count-1} lần\n💰 Thu: {format_number(total_coins)} xu", parse_mode='Markdown')
+                        text=f"⛔ **AUTO DỪNG**\n{error}\n\n📊 Kết quả:\n🔄 Đã câu: {count-1} lần\n💰 Thu được: {format_number(total_coins)} xu\n⭐ Tổng EXP: {total_exp}",
+                        parse_mode='Markdown')
                 except:
-                    pass
+                    await bot.send_message(chat_id=chat_id,
+                        text=f"⛔ **AUTO DỪNG**\n{error}\n\n📊 Kết quả:\n🔄 Đã câu: {count-1} lần\n💰 Thu được: {format_number(total_coins)} xu",
+                        parse_mode='Markdown')
                 break
             
-            if result["success"]:
+            if result and result["success"]:
                 rarity_count[result["rarity"]] += 1
                 total_coins += result["reward"] - 10
                 total_exp += result["exp"]
@@ -425,17 +437,19 @@ async def auto_fishing_task(user_id, message_id, chat_id, bot):
                 current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
                 rod_data = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), FISHING_RODS['1'])
                 
-                status_text = f"🤖 AUTO FISHING\n\n📊 Lần: {count}\n💰 Thu: {format_number(total_coins)} xu\n⭐ EXP: {total_exp}\n💰 Xu: {format_number(user['coins'])}\n\n🏆 {current_rank['name']}\n📈 Buff: 💰x{current_rank['coin_bonus']} 🎣x{current_rank['fish_bonus']}\n\n📈 "
-                status_text += " ".join([f"{get_rarity_color(r)}{c}" for r, c in rarity_count.items() if c > 0])
-                status_text += f"\n\n🎣 {rod_data['name']}\n⏱️ {rod_data['auto_speed']}s\n\n💡 /stop để dừng"
+                status_text = f"🤖 **AUTO FISHING**\n\n📊 **Thống kê:**\n├ 🔄 Số lần: {count}\n├ 💰 Thu được: {format_number(total_coins)} xu\n├ ⭐ Tổng EXP: {total_exp}\n└ 💰 Xu hiện tại: {format_number(user['coins'])}\n\n🏆 Rank: {current_rank['name']}\n📈 Buff: 💰x{current_rank['coin_bonus']} | 🎣x{current_rank['fish_bonus']}\n\n📈 Độ hiếm: "
+                for rarity, cnt in rarity_count.items():
+                    if cnt > 0:
+                        status_text += f"{get_rarity_color(rarity)}{cnt} "
+                status_text += f"\n\n🎣 Cần: {rod_data['name']}\n⏱️ Tốc độ: {rod_data['auto_speed']}s\n\n💡 Dùng /stop hoặc nút bên dưới để dừng"
                 
-                keyboard = [[InlineKeyboardButton("🛑 DỪNG", callback_data=f'stop_auto_{user_id}')]]
+                keyboard = [[InlineKeyboardButton("🛑 DỪNG AUTO", callback_data='stop_auto')]]
                 
                 try:
                     await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=status_text,
                         reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
                 except Exception as e:
-                    if "message is not modified" not in str(e).lower():
+                    if "message to edit not found" in str(e).lower() or "message can't be edited" in str(e).lower():
                         try:
                             new_msg = await bot.send_message(chat_id=chat_id, text=status_text,
                                 reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -443,21 +457,29 @@ async def auto_fishing_task(user_id, message_id, chat_id, bot):
                         except:
                             pass
             
+            user = data_manager.get_user(user_id)
+            rod_data = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), FISHING_RODS['1'])
             await asyncio.sleep(rod_data['auto_speed'])
     
     except Exception as e:
-        logging.error(f"Auto error {user_id}: {e}")
+        logging.error(f"Auto fishing error for user {user_id}: {e}")
     
     finally:
         if user_id in data_manager.auto_fishing_tasks:
             del data_manager.auto_fishing_tasks[user_id]
         
         try:
-            final_text = f"✅ AUTO KẾT THÚC\n\n📊 Tổng:\n🔄 {count} lần\n💰 {format_number(total_coins)} xu\n⭐ {total_exp} EXP\n\n📈 "
-            final_text += " ".join([f"{get_rarity_color(r)}{c}" for r, c in rarity_count.items() if c > 0])
+            final_text = f"✅ **AUTO KẾT THÚC**\n\n📊 **Tổng kết:**\n├ 🔄 Tổng câu: {count} lần\n├ 💰 Thu được: {format_number(total_coins)} xu\n├ ⭐ Tổng EXP: {total_exp}\n└ 📈 Độ hiếm: "
+            for rarity, cnt in rarity_count.items():
+                if cnt > 0:
+                    final_text += f"{get_rarity_color(rarity)}{cnt} "
+            final_text += "\n\n💡 Dùng /menu để chơi tiếp"
             await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=final_text, parse_mode='Markdown')
         except:
-            pass
+            try:
+                await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='Markdown')
+            except:
+                pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -493,9 +515,9 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in data_manager.auto_fishing_tasks:
         data_manager.auto_fishing_tasks[user_id] = False
-        await update.message.reply_text("🛑 **ĐANG DỪNG AUTO...**", parse_mode='Markdown')
+        await update.message.reply_text("🛑 **ĐANG DỪNG AUTO...**\n\nĐang tổng kết kết quả...", parse_mode='Markdown')
     else:
-        await update.message.reply_text("❌ Không có auto nào đang chạy!", parse_mode='Markdown')
+        await update.message.reply_text("❌ Bạn không có auto nào đang chạy!\n\nDùng /menu để bắt đầu", parse_mode='Markdown')
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -676,7 +698,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
     elif data == 'help':
-        text = "📖 **HƯỚNG DẪN**\n\n🎣 Câu: 10 xu/lần\n🎲 Chẵn lẻ: 1000 xu, thắng x2.5\n🏆 Rank cao = buff xu & cá\n💰 Reset CN 00:00\n🎒 Bán cá = 70% giá\n\n/menu - Menu game\n/stop - Dừng auto"
+        text = "📖 **HƯỚNG DẪN**\n\n🎣 Câu: 10 xu/lần\n🍀 Câu thường may mắn hơn auto\n🎲 Chẵn lẻ: 1000 xu, thắng x2.5\n🏆 Rank cao = buff xu & cá\n💰 Reset CN 00:00\n🎒 Bán cá = 70% giá\n\n/menu - Menu game\n/stop - Dừng auto"
         keyboard = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
@@ -691,7 +713,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(error)
             return
         if result["success"]:
-            text = f"🎉 **BẮT ĐƯỢC!**\n{result['fish']} {get_rarity_color(result['rarity'])}\n💰 +{format_number(result['reward'])} xu (x{current_rank['coin_bonus']})\n⭐ +{result['exp']} EXP\n💰 {format_number(result['coins'])} xu"
+            luck_text = ""
+            if result.get("luck_bonus", 1.0) > 1.5:
+                luck_text = "\n🍀 **MAY MẮN x2!**"
+            elif result.get("luck_bonus", 1.0) > 1.0:
+                luck_text = "\n🍀 May mắn x1.5!"
+            text = f"🎉 **BẮT ĐƯỢC!**\n{result['fish']} {get_rarity_color(result['rarity'])}\n💰 +{format_number(result['reward'])} xu (x{current_rank['coin_bonus']})\n⭐ +{result['exp']} EXP\n💰 {format_number(result['coins'])} xu{luck_text}"
             if result['leveled_up']:
                 text += f"\n\n🎊 **LEVEL {result['new_level']}!**"
         else:
@@ -700,31 +727,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
     elif data == 'auto_fishing':
-        if user_id in data_manager.auto_fishing_tasks and data_manager.auto_fishing_tasks[user_id]:
-            await query.edit_message_text("⚠️ Đang auto rồi!\n/stop để dừng", parse_mode='Markdown')
+        if user_id in data_manager.auto_fishing_tasks and data_manager.auto_fishing_tasks.get(user_id, False):
+            await query.edit_message_text("⚠️ Bạn đang auto rồi!\nDùng /stop để dừng", parse_mode='Markdown')
             return
         if not ResourceMonitor.check_resources():
-            await query.edit_message_text("⚠️ Hệ thống quá tải!", parse_mode='Markdown')
+            await query.edit_message_text("⚠️ Hệ thống đang quá tải!\nVui lòng thử lại sau", parse_mode='Markdown')
             return
-        data_manager.auto_fishing_tasks[user_id] = True
-        await query.edit_message_text("🤖 **KHỞI ĐỘNG AUTO...**", parse_mode='Markdown')
+        user = data_manager.get_user(user_id)
+        if user["coins"] < 10:
+            await query.edit_message_text("❌ Cần ít nhất 10 xu để auto!", parse_mode='Markdown')
+            return
+        await query.edit_message_text("🤖 **KHỞI ĐỘNG AUTO FISHING...**", parse_mode='Markdown')
         asyncio.create_task(auto_fishing_task(user_id, query.message.message_id, query.message.chat_id, context.bot))
     
-    elif data.startswith('stop_auto'):
-        target_user_id = user_id
-        if '_' in data:
-            try:
-                target_user_id = int(data.split('_')[-1])
-            except:
-                pass
-        if target_user_id == user_id:
-            if target_user_id in data_manager.auto_fishing_tasks:
-                data_manager.auto_fishing_tasks[target_user_id] = False
-                await query.edit_message_text("🛑 **ĐANG DỪNG...**", parse_mode='Markdown')
-            else:
-                await query.edit_message_text("❌ Auto đã dừng!", parse_mode='Markdown')
+    elif data == 'stop_auto':
+        if user_id in data_manager.auto_fishing_tasks:
+            data_manager.auto_fishing_tasks[user_id] = False
+            await query.edit_message_text("🛑 **ĐANG DỪNG AUTO...**\n\nVui lòng chờ...", parse_mode='Markdown')
         else:
-            await query.answer("❌ Không thể dừng auto của người khác!", show_alert=True)
+            await query.edit_message_text("❌ Không có auto nào đang chạy!", parse_mode='Markdown')
     
     elif data == 'view_stats':
         user = data_manager.get_user(user_id)
@@ -755,6 +776,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Error: {context.error}")
 
+def cleanup_on_shutdown():
+    for user_id in list(data_manager.auto_fishing_tasks.keys()):
+        data_manager.auto_fishing_tasks[user_id] = False
+    time.sleep(1)
+    data_manager.auto_fishing_tasks.clear()
+
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
@@ -767,12 +794,15 @@ def main():
     stats = ResourceMonitor.get_system_stats()
     print(f"🤖 Bot started\n🏆 Ranks: {len(FISH_RANKS)}\n🐟 Fish: {len(FISH_TYPES)}\n🎣 Rods: {len(FISHING_RODS)}\n⏰ Reset: {next_reset.strftime('%d/%m/%Y %H:%M')}\n💻 CPU: {stats['cpu']:.1f}% | RAM: {stats['ram']:.1f}%")
     
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down...")
+        cleanup_on_shutdown()
+        print("✅ Cleanup completed")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        cleanup_on_shutdown()
 
 if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n🛑 Bot stopped")
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    main()
