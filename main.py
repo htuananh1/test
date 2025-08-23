@@ -129,6 +129,16 @@ def get_user_rank(exp):
     exp_to_next = next_rank["exp_required"] - exp if next_rank else 0
     return current_rank, rank_level, next_rank, exp_to_next
 
+def format_number(num):
+    if num >= 1000000000:
+        return f"{num/1000000000:.1f}B".replace('.0B', 'B')
+    elif num >= 1000000:
+        return f"{num/1000000:.1f}M".replace('.0M', 'M')
+    elif num >= 1000:
+        return f"{num/1000:.1f}K".replace('.0K', 'K')
+    else:
+        return str(num)
+
 class LocalStorage:
     @staticmethod
     def save_local(data):
@@ -225,6 +235,8 @@ class DataManager:
                             user_data.setdefault('owned_rods', ["1"])
                             user_data.setdefault('inventory', {"rod": "1", "fish": {}})
                             user_data.setdefault('total_exp', user_data.get('exp', 0))
+                            user_data.setdefault('chanle_win', 0)
+                            user_data.setdefault('chanle_lose', 0)
                             cache_manager.set(f"user_{user_id}", user_data)
                             return user_data
                     except:
@@ -237,8 +249,8 @@ class DataManager:
     
     def create_new_user(self, user_id):
         return {"user_id": str(user_id), "username": "", "coins": 100, "exp": 0, "total_exp": 0, "level": 1,
-                "fishing_count": 0, "win_count": 0, "lose_count": 0, "owned_rods": ["1"],
-                "inventory": {"rod": "1", "fish": {}}, "created_at": datetime.now().isoformat()}
+                "fishing_count": 0, "win_count": 0, "lose_count": 0, "chanle_win": 0, "chanle_lose": 0,
+                "owned_rods": ["1"], "inventory": {"rod": "1", "fish": {}}, "created_at": datetime.now().isoformat()}
     
     def save_user_to_github(self, user_data):
         with self.lock:
@@ -296,6 +308,8 @@ class DataManager:
         if user_data['inventory'].get('rod') not in FISHING_RODS:
             user_data['inventory']['rod'] = "1"
         user_data.setdefault('total_exp', user_data.get('exp', 0))
+        user_data.setdefault('chanle_win', 0)
+        user_data.setdefault('chanle_lose', 0)
         return user_data
     
     def update_user(self, user_id, data):
@@ -303,9 +317,6 @@ class DataManager:
         self.save_user_to_github(data)
 
 data_manager = DataManager()
-
-def format_number(num):
-    return "{:,}".format(num)
 
 def get_rarity_color(rarity):
     return {"common": "⚪", "uncommon": "🟢", "rare": "🔵", "epic": "🟣", 
@@ -326,11 +337,11 @@ async def odd_even_game(user_id, choice, bet_amount=1000):
     if player_wins:
         winnings = int(bet_amount * 2.5)
         user["coins"] += winnings
-        user["win_count"] = user.get("win_count", 0) + 1
+        user["chanle_win"] = user.get("chanle_win", 0) + 1
         data_manager.update_user(user_id, user)
         return {"success": True, "dice": dice, "winnings": winnings, "coins": user["coins"], "choice": choice}, None
     else:
-        user["lose_count"] = user.get("lose_count", 0) + 1
+        user["chanle_lose"] = user.get("chanle_lose", 0) + 1
         data_manager.update_user(user_id, user)
         return {"success": False, "dice": dice, "coins": user["coins"], "choice": choice}, None
 
@@ -391,6 +402,7 @@ async def process_fishing(user_id, is_auto=False):
                 "coins": user["coins"], "luck_bonus": luck_bonus}, None
     else:
         user["fishing_count"] += 1
+        user["lose_count"] += 1
         data_manager.update_user(user_id, user)
         return {"success": False, "coins": user["coins"]}, None
 
@@ -483,18 +495,21 @@ async def auto_fishing_task(user_id, message_id, chat_id, bot):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
+    user_name = update.effective_user.username or update.effective_user.first_name
     user = data_manager.get_user(user_id)
-    user["username"] = user_name
+    user["username"] = f"@{user_name}" if update.effective_user.username else user_name
     data_manager.update_user(user_id, user)
     current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
     stats = ResourceMonitor.get_system_stats()
     next_reset = get_next_sunday()
-    await update.message.reply_text(f"🎮 **FISHING GAME**\n\n👤 {user_name}\n💰 {format_number(user['coins'])} xu\n⭐ Lv.{user['level']}\n🎯 {format_number(user.get('total_exp', 0))} EXP\n🏆 {current_rank['name']}\n🎣 {get_current_rod_name(user)}\n\n⏰ Reset: CN {next_reset.strftime('%d/%m %H:%M')}\n\n/menu - Menu game\n/stop - Dừng auto\n\n💻 CPU {stats['cpu']:.1f}% | RAM {stats['ram']:.1f}%", parse_mode='Markdown')
+    await update.message.reply_text(f"🎮 **FISHING GAME**\n\n👤 {user['username']}\n💰 {format_number(user['coins'])} xu\n⭐ Lv.{user['level']}\n🎯 {format_number(user.get('total_exp', 0))} EXP\n🏆 {current_rank['name']}\n🎣 {get_current_rod_name(user)}\n\n⏰ Reset: CN {next_reset.strftime('%d/%m %H:%M')}\n\n/menu - Menu game\n/stop - Dừng auto\n\n💻 CPU {stats['cpu']:.1f}% | RAM {stats['ram']:.1f}%", parse_mode='Markdown')
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = data_manager.get_user(user_id)
+    if not user.get("username"):
+        user["username"] = f"@{update.effective_user.username}" if update.effective_user.username else update.effective_user.first_name
+        data_manager.update_user(user_id, user)
     current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
     keyboard = [
         [InlineKeyboardButton("🎣 Câu Cá", callback_data='game_fishing'),
@@ -544,7 +559,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         keyboard.append([InlineKeyboardButton(f"Dùng {rod_data['name']}", callback_data=f'equip_rod_{rod_id_str}')])
                 else:
                     text += f"⬜ {rod_data['name']} - {format_number(rod_data['price'])} xu - {rod_data['description']}\n"
-                    if user['coins'] >= rod_data['price']:
+                    if user['coins'] >= rod_data['price'] and rod_id_str not in owned_rods:
                         keyboard.append([InlineKeyboardButton(f"Mua {rod_data['name']}", callback_data=f'buy_rod_{rod_id_str}')])
         keyboard.append([InlineKeyboardButton("↩️ Menu", callback_data='back_menu')])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -578,7 +593,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == 'game_chanle':
         user = data_manager.get_user(user_id)
-        text = f"🎲 **CHẴN LẺ**\n\n💰 {format_number(user['coins'])} xu\n🏆 Thắng: {user.get('win_count', 0)}\n💔 Thua: {user.get('lose_count', 0)}\n\n📋 Luật:\n🎲 Xúc xắc 1-6\n💰 Cược: 1000 xu\n🏆 Thắng: x2.5 (2500 xu)\n\nChọn:"
+        text = f"🎲 **CHẴN LẺ**\n\n💰 {format_number(user['coins'])} xu\n🏆 Thắng: {user.get('chanle_win', 0)}\n💔 Thua: {user.get('chanle_lose', 0)}\n\n📋 Luật:\n🎲 Xúc xắc 1-6\n💰 Cược: 1K xu\n🏆 Thắng: x2.5 (2.5K xu)\n\nChọn:"
         keyboard = [[InlineKeyboardButton("CHẴN", callback_data='chanle_even'), InlineKeyboardButton("LẺ", callback_data='chanle_odd')],
                    [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -597,7 +612,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result["success"]:
             text = f"🎉 **THẮNG!**\n\n{dice_display} Kết quả: {result['dice']} ({result_text})\nBạn chọn: {choice_text}\n\n💰 Thắng: {format_number(result['winnings'])} xu\n💰 Tổng: {format_number(result['coins'])} xu"
         else:
-            text = f"😢 **THUA!**\n\n{dice_display} Kết quả: {result['dice']} ({result_text})\nBạn chọn: {choice_text}\n\n💸 Mất: 1000 xu\n💰 Còn: {format_number(result['coins'])} xu"
+            text = f"😢 **THUA!**\n\n{dice_display} Kết quả: {result['dice']} ({result_text})\nBạn chọn: {choice_text}\n\n💸 Mất: 1K xu\n💰 Còn: {format_number(result['coins'])} xu"
         keyboard = [[InlineKeyboardButton("🎲 Chơi tiếp", callback_data='game_chanle')], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
@@ -698,7 +713,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
     elif data == 'help':
-        text = "📖 **HƯỚNG DẪN**\n\n🎣 Câu: 10 xu/lần\n🍀 Câu thường may mắn hơn auto\n🎲 Chẵn lẻ: 1000 xu, thắng x2.5\n🏆 Rank cao = buff xu & cá\n💰 Reset CN 00:00\n🎒 Bán cá = 70% giá\n\n/menu - Menu game\n/stop - Dừng auto"
+        text = "📖 **HƯỚNG DẪN**\n\n🎣 Câu: 10 xu/lần\n🍀 Câu thường may mắn hơn auto\n🎲 Chẵn lẻ: 1K xu, thắng x2.5\n🏆 Rank cao = buff xu & cá\n💰 Reset CN 00:00\n🎒 Bán cá = 70% giá\n\n/menu - Menu game\n/stop - Dừng auto"
         keyboard = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
@@ -751,7 +766,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = data_manager.get_user(user_id)
         current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
         win_rate = (user.get('win_count', 0) / user.get('fishing_count', 1)) * 100 if user.get('fishing_count', 0) > 0 else 0
-        text = f"📊 **THỐNG KÊ**\n\n👤 {user['username']}\n⭐ Level {user['level']}\n🏆 {current_rank['name']}\n\n📈 Thống kê:\n🎣 Câu: {user.get('fishing_count', 0)}\n✅ Thành công: {user.get('win_count', 0)}\n📊 Tỷ lệ: {win_rate:.1f}%\n🎲 Thắng CL: {user.get('win_count', 0)}\n💔 Thua CL: {user.get('lose_count', 0)}"
+        text = f"📊 **THỐNG KÊ**\n\n👤 {user['username']}\n⭐ Level {user['level']}\n🏆 {current_rank['name']}\n\n📈 Thống kê câu:\n🎣 Tổng: {user.get('fishing_count', 0)}\n✅ Thành công: {user.get('win_count', 0)}\n❌ Thất bại: {user.get('lose_count', 0)}\n📊 Tỷ lệ: {win_rate:.1f}%\n\n🎲 Chẵn lẻ:\n✅ Thắng: {user.get('chanle_win', 0)}\n❌ Thua: {user.get('chanle_lose', 0)}"
         keyboard = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
