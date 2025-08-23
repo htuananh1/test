@@ -2,7 +2,7 @@ import logging
 import random
 import json
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import threading
@@ -17,480 +17,133 @@ import gc
 import pytz
 
 load_dotenv()
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-
-# ===== CONFIGURATION =====
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 GITHUB_REPO = os.getenv('GITHUB_REPO', 'htuananh1/Data-manager')
 GITHUB_FILE_PATH = "bot_data.json"
 LOCAL_BACKUP_FILE = "local_backup.json"
-
 VIETNAM_TZ = pytz.timezone('Asia/Ho_Chi_Minh')
 
-# ===== HỆ THỐNG RANK NGƯ HIỆP MỞ RỘNG =====
-FISH_RANKS = {
-    "1": {"name": "🎣 Ngư Tân Thủ", "exp_required": 0, "coin_bonus": 1.0, "fish_bonus": 1.0},
-    "2": {"name": "⚔️ Ngư Tiểu Hiệp", "exp_required": 5000, "coin_bonus": 1.15, "fish_bonus": 1.1},
-    "3": {"name": "🗡️ Ngư Hiệp Khách", "exp_required": 20000, "coin_bonus": 1.35, "fish_bonus": 1.2},
-    "4": {"name": "🛡️ Ngư Tráng Sĩ", "exp_required": 80000, "coin_bonus": 1.6, "fish_bonus": 1.35},
-    "5": {"name": "⚡ Ngư Đại Hiệp", "exp_required": 250000, "coin_bonus": 2.0, "fish_bonus": 1.5},
-    "6": {"name": "🌟 Ngư Tông Sư", "exp_required": 800000, "coin_bonus": 2.5, "fish_bonus": 1.75},
-    "7": {"name": "🔥 Ngư Chân Nhân", "exp_required": 2000000, "coin_bonus": 3.2, "fish_bonus": 2.0},
-    "8": {"name": "💫 Ngư Thánh Giả", "exp_required": 5000000, "coin_bonus": 4.0, "fish_bonus": 2.5},
-    "9": {"name": "⚔️ Ngư Võ Thần", "exp_required": 15000000, "coin_bonus": 5.5, "fish_bonus": 3.0},
-    "10": {"name": "👑 Ngư Minh Chủ", "exp_required": 50000000, "coin_bonus": 8.0, "fish_bonus": 4.0},
-    "11": {"name": "🌊 Ngư Hải Vương", "exp_required": 100000000, "coin_bonus": 10.0, "fish_bonus": 5.0},
-    "12": {"name": "🔱 Ngư Thần Thánh", "exp_required": 200000000, "coin_bonus": 13.0, "fish_bonus": 6.0},
-    "13": {"name": "⭐ Ngư Tiên Vương", "exp_required": 400000000, "coin_bonus": 17.0, "fish_bonus": 7.5},
-    "14": {"name": "🌌 Ngư Thiên Tôn", "exp_required": 800000000, "coin_bonus": 22.0, "fish_bonus": 9.0},
-    "15": {"name": "♾️ Ngư Vĩnh Hằng", "exp_required": 1500000000, "coin_bonus": 30.0, "fish_bonus": 12.0},
-    "16": {"name": "🔮 Ngư Toàn Năng", "exp_required": 3000000000, "coin_bonus": 40.0, "fish_bonus": 15.0},
-    "17": {"name": "🌠 Ngư Sáng Thế", "exp_required": 6000000000, "coin_bonus": 55.0, "fish_bonus": 20.0},
-    "18": {"name": "⚜️ Ngư Tối Cao", "exp_required": 10000000000, "coin_bonus": 75.0, "fish_bonus": 25.0},
-    "19": {"name": "🎭 Ngư Huyền Thoại", "exp_required": 20000000000, "coin_bonus": 100.0, "fish_bonus": 35.0},
-    "20": {"name": "🏆 Ngư Cực Phẩm", "exp_required": 50000000000, "coin_bonus": 150.0, "fish_bonus": 50.0}
-}
+FISH_RANKS = {str(i): {"name": n, "exp_required": e, "coin_bonus": c, "fish_bonus": f} for i, (n, e, c, f) in enumerate([
+    ("🎣 Ngư Tân Thủ", 0, 1.0, 1.0), ("⚔️ Ngư Tiểu Hiệp", 5000, 1.15, 1.1), ("🗡️ Ngư Hiệp Khách", 20000, 1.35, 1.2),
+    ("🛡️ Ngư Tráng Sĩ", 80000, 1.6, 1.35), ("⚡ Ngư Đại Hiệp", 250000, 2.0, 1.5), ("🌟 Ngư Tông Sư", 800000, 2.5, 1.75),
+    ("🔥 Ngư Chân Nhân", 2000000, 3.2, 2.0), ("💫 Ngư Thánh Giả", 5000000, 4.0, 2.5), ("⚔️ Ngư Võ Thần", 15000000, 5.5, 3.0),
+    ("👑 Ngư Minh Chủ", 50000000, 8.0, 4.0), ("🌊 Ngư Hải Vương", 100000000, 10.0, 5.0), ("🔱 Ngư Thần Thánh", 200000000, 13.0, 6.0),
+    ("⭐ Ngư Tiên Vương", 400000000, 17.0, 7.5), ("🌌 Ngư Thiên Tôn", 800000000, 22.0, 9.0), ("♾️ Ngư Vĩnh Hằng", 1500000000, 30.0, 12.0),
+    ("🔮 Ngư Toàn Năng", 3000000000, 40.0, 15.0), ("🌠 Ngư Sáng Thế", 6000000000, 55.0, 20.0), ("⚜️ Ngư Tối Cao", 10000000000, 75.0, 25.0),
+    ("🎭 Ngư Huyền Thoại", 20000000000, 100.0, 35.0), ("🏆 Ngư Cực Phẩm", 50000000000, 150.0, 50.0), ("👑 Ngư Thần", 100000000000, 200.0, 75.0),
+    ("⚡ Ngư Thiên Đế", 200000000000, 300.0, 100.0), ("🌌 Ngư Vũ Trụ", 500000000000, 500.0, 150.0), ("♾️ Ngư Vô Cực", 1000000000000, 750.0, 200.0),
+    ("🔯 Ngư Siêu Việt", 2000000000000, 1000.0, 300.0)
+], 1)}
 
-# ===== DANH SÁCH CÁ MỞ RỘNG =====
-FISH_TYPES = {
-    # Common (35% total)
-    "🍤 Tép": {"value": 2, "chance": 8.0, "exp": 1, "rarity": "common"},
-    "🦐 Tôm": {"value": 5, "chance": 7.5, "exp": 2, "rarity": "common"},
-    "🐟 Cá nhỏ": {"value": 10, "chance": 7.0, "exp": 3, "rarity": "common"},
-    "🐠 Cá vàng": {"value": 30, "chance": 6.5, "exp": 5, "rarity": "common"},
-    "🦀 Cua nhỏ": {"value": 25, "chance": 6.0, "exp": 4, "rarity": "common"},
-    
-    # Uncommon (25% total)
-    "🐡 Cá nóc": {"value": 50, "chance": 5.5, "exp": 8, "rarity": "uncommon"},
-    "🦀 Cua lớn": {"value": 60, "chance": 5.0, "exp": 10, "rarity": "uncommon"},
-    "🦑 Mực": {"value": 80, "chance": 4.5, "exp": 12, "rarity": "uncommon"},
-    "🐚 Sò điệp": {"value": 70, "chance": 4.0, "exp": 11, "rarity": "uncommon"},
-    "🦐 Tôm hùm nhỏ": {"value": 90, "chance": 3.5, "exp": 13, "rarity": "uncommon"},
-    "🦪 Hàu": {"value": 85, "chance": 3.0, "exp": 14, "rarity": "uncommon"},
-    
-    # Rare (20% total)
-    "🦈 Cá mập nhỏ": {"value": 150, "chance": 4.0, "exp": 20, "rarity": "rare"},
-    "🐙 Bạch tuộc": {"value": 200, "chance": 3.5, "exp": 25, "rarity": "rare"},
-    "🦈 Cá mập lớn": {"value": 300, "chance": 3.0, "exp": 30, "rarity": "rare"},
-    "🐢 Rùa biển": {"value": 400, "chance": 2.5, "exp": 35, "rarity": "rare"},
-    "🦞 Tôm hùm": {"value": 500, "chance": 2.0, "exp": 40, "rarity": "rare"},
-    "🦑 Mực khổng lồ": {"value": 600, "chance": 1.8, "exp": 45, "rarity": "rare"},
-    "🐠 Cá chép vàng": {"value": 700, "chance": 1.6, "exp": 50, "rarity": "rare"},
-    "🐟 Cá kiếm": {"value": 750, "chance": 1.4, "exp": 52, "rarity": "rare"},
-    "🦭 Sư tử biển": {"value": 650, "chance": 1.2, "exp": 48, "rarity": "rare"},
-    
-    # Epic (15% total)
-    "🐊 Cá sấu": {"value": 800, "chance": 2.5, "exp": 60, "rarity": "epic"},
-    "🐋 Cá voi": {"value": 1000, "chance": 2.2, "exp": 70, "rarity": "epic"},
-    "🦭 Hải cẩu": {"value": 900, "chance": 2.0, "exp": 65, "rarity": "epic"},
-    "⚡ Cá điện": {"value": 1200, "chance": 1.8, "exp": 75, "rarity": "epic"},
-    "🌟 Cá thần": {"value": 1500, "chance": 1.5, "exp": 80, "rarity": "epic"},
-    "🦈 Megalodon": {"value": 1800, "chance": 1.3, "exp": 85, "rarity": "epic"},
-    "🐙 Kraken nhỏ": {"value": 2000, "chance": 1.1, "exp": 90, "rarity": "epic"},
-    "🌊 Cá thủy tinh": {"value": 2200, "chance": 0.9, "exp": 95, "rarity": "epic"},
-    "🔥 Cá lửa": {"value": 2400, "chance": 0.8, "exp": 98, "rarity": "epic"},
-    "❄️ Cá băng": {"value": 2300, "chance": 0.7, "exp": 96, "rarity": "epic"},
-    "🌈 Cá cầu vồng": {"value": 2100, "chance": 0.6, "exp": 92, "rarity": "epic"},
-    
-    # Legendary (4% total)
-    "🐉 Rồng biển": {"value": 2500, "chance": 0.8, "exp": 120, "rarity": "legendary"},
-    "💎 Kho báu": {"value": 3000, "chance": 0.7, "exp": 140, "rarity": "legendary"},
-    "👑 Vua đại dương": {"value": 5000, "chance": 0.6, "exp": 180, "rarity": "legendary"},
-    "🔱 Thủy thần": {"value": 6000, "chance": 0.5, "exp": 200, "rarity": "legendary"},
-    "🌊 Hải vương": {"value": 7000, "chance": 0.4, "exp": 220, "rarity": "legendary"},
-    "🐙 Kraken": {"value": 8000, "chance": 0.35, "exp": 250, "rarity": "legendary"},
-    "🦕 Thủy quái": {"value": 9000, "chance": 0.3, "exp": 280, "rarity": "legendary"},
-    "⚓ Tàu ma": {"value": 10000, "chance": 0.25, "exp": 300, "rarity": "legendary"},
-    "🏴‍☠️ Hải tặc huyền thoại": {"value": 11000, "chance": 0.2, "exp": 320, "rarity": "legendary"},
-    "🧜‍♀️ Tiên cá": {"value": 12000, "chance": 0.15, "exp": 350, "rarity": "legendary"},
-    "🔮 Pha lê biển": {"value": 13000, "chance": 0.1, "exp": 380, "rarity": "legendary"},
-    
-    # Mythic (1% total)
-    "🦄 Kỳ lân biển": {"value": 15000, "chance": 0.2, "exp": 500, "rarity": "mythic"},
-    "🐲 Long vương": {"value": 20000, "chance": 0.18, "exp": 600, "rarity": "mythic"},
-    "☄️ Thiên thạch": {"value": 25000, "chance": 0.15, "exp": 700, "rarity": "mythic"},
-    "🌌 Vũ trụ": {"value": 30000, "chance": 0.12, "exp": 800, "rarity": "mythic"},
-    "✨ Thần thánh": {"value": 35000, "chance": 0.1, "exp": 900, "rarity": "mythic"},
-    "🎇 Tinh vân": {"value": 40000, "chance": 0.08, "exp": 1000, "rarity": "mythic"},
-    "🌠 Sao băng": {"value": 45000, "chance": 0.06, "exp": 1100, "rarity": "mythic"},
-    "💫 Thiên hà": {"value": 50000, "chance": 0.05, "exp": 1200, "rarity": "mythic"},
-    "🪐 Hành tinh": {"value": 55000, "chance": 0.04, "exp": 1300, "rarity": "mythic"},
-    "☀️ Mặt trời": {"value": 60000, "chance": 0.02, "exp": 1500, "rarity": "mythic"},
-    
-    # Secret (0.1% total)
-    "🎭 Bí ẩn": {"value": 100000, "chance": 0.02, "exp": 2000, "rarity": "secret"},
-    "🗿 Cổ đại": {"value": 150000, "chance": 0.018, "exp": 2500, "rarity": "secret"},
-    "🛸 Ngoài hành tinh": {"value": 200000, "chance": 0.015, "exp": 3000, "rarity": "secret"},
-    "🔮 Hư không": {"value": 300000, "chance": 0.012, "exp": 4000, "rarity": "secret"},
-    "⭐ Vĩnh hằng": {"value": 500000, "chance": 0.01, "exp": 5000, "rarity": "secret"},
-    "🌟 Thần thoại": {"value": 750000, "chance": 0.008, "exp": 6000, "rarity": "secret"},
-    "💠 Vô cực": {"value": 1000000, "chance": 0.006, "exp": 7500, "rarity": "secret"},
-    "🔯 Siêu việt": {"value": 1500000, "chance": 0.004, "exp": 9000, "rarity": "secret"},
-    "⚜️ Tối thượng": {"value": 2000000, "chance": 0.003, "exp": 10000, "rarity": "secret"},
-    "♾️ Vô hạn": {"value": 5000000, "chance": 0.002, "exp": 15000, "rarity": "secret"},
-    "🏆 Ultimate": {"value": 10000000, "chance": 0.001, "exp": 20000, "rarity": "secret"}
-}
+FISH_TYPES = {n: {"value": v, "chance": c, "exp": e, "rarity": r} for n, v, c, e, r in [
+    ("🍤 Tép", 2, 10.0, 1, "common"), ("🦐 Tôm", 5, 9.5, 2, "common"), ("🐟 Cá nhỏ", 10, 9.0, 3, "common"),
+    ("🐠 Cá vàng", 30, 8.5, 5, "common"), ("🦀 Cua nhỏ", 25, 8.0, 4, "common"), ("🐡 Cá nóc", 50, 7.5, 8, "uncommon"),
+    ("🦀 Cua lớn", 60, 7.0, 10, "uncommon"), ("🦑 Mực", 80, 6.5, 12, "uncommon"), ("🐚 Sò điệp", 70, 6.0, 11, "uncommon"),
+    ("🦐 Tôm hùm nhỏ", 90, 5.5, 13, "uncommon"), ("🦪 Hàu", 85, 5.0, 14, "uncommon"), ("🦈 Cá mập nhỏ", 150, 4.5, 20, "rare"),
+    ("🐙 Bạch tuộc", 200, 4.0, 25, "rare"), ("🦈 Cá mập lớn", 300, 3.5, 30, "rare"), ("🐢 Rùa biển", 400, 3.0, 35, "rare"),
+    ("🦞 Tôm hùm", 500, 2.5, 40, "rare"), ("🦑 Mực khổng lồ", 600, 2.3, 45, "rare"), ("🐠 Cá chép vàng", 700, 2.1, 50, "rare"),
+    ("🐟 Cá kiếm", 750, 1.9, 52, "rare"), ("🦭 Sư tử biển", 650, 1.7, 48, "rare"), ("🐊 Cá sấu", 800, 1.5, 60, "epic"),
+    ("🐋 Cá voi", 1000, 1.3, 70, "epic"), ("🦭 Hải cẩu", 900, 1.2, 65, "epic"), ("⚡ Cá điện", 1200, 1.1, 75, "epic"),
+    ("🌟 Cá thần", 1500, 1.0, 80, "epic"), ("🦈 Megalodon", 1800, 0.9, 85, "epic"), ("🐙 Kraken nhỏ", 2000, 0.8, 90, "epic"),
+    ("🌊 Cá thủy tinh", 2200, 0.7, 95, "epic"), ("🔥 Cá lửa", 2400, 0.6, 98, "epic"), ("❄️ Cá băng", 2300, 0.55, 96, "epic"),
+    ("🌈 Cá cầu vồng", 2100, 0.5, 92, "epic"), ("🐉 Rồng biển", 2500, 0.45, 120, "legendary"), ("💎 Cá kim cương", 3000, 0.4, 140, "legendary"),
+    ("👑 Vua đại dương", 5000, 0.35, 180, "legendary"), ("🔱 Thủy thần", 6000, 0.3, 200, "legendary"), ("🌊 Hải vương", 7000, 0.25, 220, "legendary"),
+    ("🐙 Kraken", 8000, 0.22, 250, "legendary"), ("🦕 Thủy quái", 9000, 0.2, 280, "legendary"), ("⚓ Cá ma", 10000, 0.18, 300, "legendary"),
+    ("🏴‍☠️ Cướp biển", 11000, 0.16, 320, "legendary"), ("🧜‍♀️ Tiên cá", 12000, 0.14, 350, "legendary"), ("🔮 Pha lê biển", 13000, 0.12, 380, "legendary"),
+    ("🦄 Kỳ lân biển", 15000, 0.1, 500, "mythic"), ("🐲 Long vương", 20000, 0.09, 600, "mythic"), ("☄️ Thiên thạch", 25000, 0.08, 700, "mythic"),
+    ("🌌 Vũ trụ", 30000, 0.07, 800, "mythic"), ("✨ Thần thánh", 35000, 0.06, 900, "mythic"), ("🎇 Tinh vân", 40000, 0.05, 1000, "mythic"),
+    ("🌠 Sao băng", 45000, 0.04, 1100, "mythic"), ("💫 Thiên hà", 50000, 0.035, 1200, "mythic"), ("🪐 Hành tinh", 55000, 0.03, 1300, "mythic"),
+    ("☀️ Mặt trời", 60000, 0.025, 1500, "mythic"), ("🎭 Bí ẩn", 100000, 0.02, 2000, "secret"), ("🗿 Cổ đại", 150000, 0.018, 2500, "secret"),
+    ("🛸 Ngoài hành tinh", 200000, 0.015, 3000, "secret"), ("🔮 Hư không", 300000, 0.012, 4000, "secret"), ("⭐ Vĩnh hằng", 500000, 0.01, 5000, "secret"),
+    ("🌟 Thần thoại", 750000, 0.008, 6000, "secret"), ("💠 Vô cực", 1000000, 0.006, 7500, "secret"), ("🔯 Siêu việt", 1500000, 0.004, 9000, "secret"),
+    ("⚜️ Tối thượng", 2000000, 0.003, 10000, "secret"), ("♾️ Vô hạn", 5000000, 0.002, 15000, "secret"), ("🏆 Ultimate", 10000000, 0.001, 20000, "secret"),
+    ("👑 Tối Thượng", 15000000, 0.0008, 25000, "secret"), ("🌌 Đa Vũ Trụ", 20000000, 0.0006, 30000, "secret"), ("⚡ Thần Tối Cao", 50000000, 0.0004, 50000, "secret"),
+    ("🔥 Hỗn Mang", 100000000, 0.0002, 100000, "secret")
+]}
 
-# ===== CẦN CÂU ĐẦY ĐỦ =====
-FISHING_RODS = {
-    "1": {
-        "name": "🎣 Cần cơ bản",
-        "price": 0,
-        "speed": 3.0,
-        "auto_speed": 4.0,
-        "common_bonus": 1.0,
-        "rare_bonus": 0.5,
-        "epic_bonus": 0.1,
-        "legendary_bonus": 0.01,
-        "mythic_bonus": 0.001,
-        "secret_bonus": 0.0001,
-        "exp_bonus": 1.0,
-        "description": "Cần mặc định cho người mới"
-    },
-    "2": {
-        "name": "🎋 Cần tre",
-        "price": 100,
-        "speed": 2.8,
-        "auto_speed": 3.8,
-        "common_bonus": 1.1,
-        "rare_bonus": 0.6,
-        "epic_bonus": 0.15,
-        "legendary_bonus": 0.02,
-        "mythic_bonus": 0.002,
-        "secret_bonus": 0.0002,
-        "exp_bonus": 1.1,
-        "description": "Nhẹ và linh hoạt +10% EXP"
-    },
-    "3": {
-        "name": "🪵 Cần gỗ",
-        "price": 500,
-        "speed": 2.5,
-        "auto_speed": 3.5,
-        "common_bonus": 1.2,
-        "rare_bonus": 0.8,
-        "epic_bonus": 0.2,
-        "legendary_bonus": 0.05,
-        "mythic_bonus": 0.005,
-        "secret_bonus": 0.0005,
-        "exp_bonus": 1.2,
-        "description": "Chắc chắn +20% EXP"
-    },
-    "4": {
-        "name": "🥉 Cần đồng",
-        "price": 1500,
-        "speed": 2.3,
-        "auto_speed": 3.3,
-        "common_bonus": 1.3,
-        "rare_bonus": 1.0,
-        "epic_bonus": 0.3,
-        "legendary_bonus": 0.08,
-        "mythic_bonus": 0.008,
-        "secret_bonus": 0.0008,
-        "exp_bonus": 1.3,
-        "description": "Kim loại bền +30% EXP"
-    },
-    "5": {
-        "name": "⚙️ Cần sắt",
-        "price": 5000,
-        "speed": 2.0,
-        "auto_speed": 3.0,
-        "common_bonus": 1.4,
-        "rare_bonus": 1.5,
-        "epic_bonus": 0.5,
-        "legendary_bonus": 0.15,
-        "mythic_bonus": 0.015,
-        "secret_bonus": 0.001,
-        "exp_bonus": 1.5,
-        "description": "Cứng cáp +50% EXP"
-    },
-    "6": {
-        "name": "🥈 Cần bạc",
-        "price": 15000,
-        "speed": 1.8,
-        "auto_speed": 2.8,
-        "common_bonus": 1.5,
-        "rare_bonus": 2.0,
-        "epic_bonus": 0.8,
-        "legendary_bonus": 0.25,
-        "mythic_bonus": 0.025,
-        "secret_bonus": 0.0015,
-        "exp_bonus": 1.75,
-        "description": "Quý kim +75% EXP"
-    },
-    "7": {
-        "name": "🥇 Cần vàng",
-        "price": 50000,
-        "speed": 1.5,
-        "auto_speed": 2.5,
-        "common_bonus": 1.6,
-        "rare_bonus": 3.0,
-        "epic_bonus": 1.5,
-        "legendary_bonus": 0.5,
-        "mythic_bonus": 0.05,
-        "secret_bonus": 0.002,
-        "exp_bonus": 2.0,
-        "description": "Cao cấp x2 EXP"
-    },
-    "8": {
-        "name": "💍 Cần bạch kim",
-        "price": 150000,
-        "speed": 1.3,
-        "auto_speed": 2.3,
-        "common_bonus": 1.7,
-        "rare_bonus": 4.0,
-        "epic_bonus": 2.5,
-        "legendary_bonus": 1.0,
-        "mythic_bonus": 0.1,
-        "secret_bonus": 0.003,
-        "exp_bonus": 2.5,
-        "description": "Siêu quý x2.5 EXP"
-    },
-    "9": {
-        "name": "💎 Cần pha lê",
-        "price": 500000,
-        "speed": 1.0,
-        "auto_speed": 2.0,
-        "common_bonus": 1.8,
-        "rare_bonus": 5.0,
-        "epic_bonus": 4.0,
-        "legendary_bonus": 2.0,
-        "mythic_bonus": 0.2,
-        "secret_bonus": 0.005,
-        "exp_bonus": 3.0,
-        "description": "Tinh thể x3 EXP"
-    },
-    "10": {
-        "name": "💠 Cần kim cương",
-        "price": 1500000,
-        "speed": 0.8,
-        "auto_speed": 1.8,
-        "common_bonus": 2.0,
-        "rare_bonus": 6.0,
-        "epic_bonus": 6.0,
-        "legendary_bonus": 3.5,
-        "mythic_bonus": 0.5,
-        "secret_bonus": 0.008,
-        "exp_bonus": 4.0,
-        "description": "Cứng nhất x4 EXP"
-    },
-    "11": {
-        "name": "🗿 Cần hắc diệu",
-        "price": 5000000,
-        "speed": 0.6,
-        "auto_speed": 1.5,
-        "common_bonus": 2.2,
-        "rare_bonus": 8.0,
-        "epic_bonus": 10.0,
-        "legendary_bonus": 6.0,
-        "mythic_bonus": 1.0,
-        "secret_bonus": 0.01,
-        "exp_bonus": 5.0,
-        "description": "Cổ đại x5 EXP"
-    },
-    "12": {
-        "name": "⚔️ Cần mythril",
-        "price": 15000000,
-        "speed": 0.5,
-        "auto_speed": 1.3,
-        "common_bonus": 2.5,
-        "rare_bonus": 10.0,
-        "epic_bonus": 15.0,
-        "legendary_bonus": 10.0,
-        "mythic_bonus": 2.0,
-        "secret_bonus": 0.02,
-        "exp_bonus": 7.0,
-        "description": "Huyền thoại x7 EXP"
-    },
-    "13": {
-        "name": "✨ Cần thiên thần",
-        "price": 50000000,
-        "speed": 0.4,
-        "auto_speed": 1.0,
-        "common_bonus": 3.0,
-        "rare_bonus": 15.0,
-        "epic_bonus": 25.0,
-        "legendary_bonus": 20.0,
-        "mythic_bonus": 5.0,
-        "secret_bonus": 0.05,
-        "exp_bonus": 10.0,
-        "description": "Thiên giới x10 EXP"
-    },
-    "14": {
-        "name": "🌌 Cần vũ trụ",
-        "price": 150000000,
-        "speed": 0.3,
-        "auto_speed": 0.8,
-        "common_bonus": 3.5,
-        "rare_bonus": 20.0,
-        "epic_bonus": 40.0,
-        "legendary_bonus": 35.0,
-        "mythic_bonus": 10.0,
-        "secret_bonus": 0.1,
-        "exp_bonus": 15.0,
-        "description": "Vũ trụ x15 EXP"
-    },
-    "15": {
-        "name": "♾️ Cần vĩnh hằng",
-        "price": 500000000,
-        "speed": 0.2,
-        "auto_speed": 0.5,
-        "common_bonus": 5.0,
-        "rare_bonus": 30.0,
-        "epic_bonus": 60.0,
-        "legendary_bonus": 50.0,
-        "mythic_bonus": 20.0,
-        "secret_bonus": 0.5,
-        "exp_bonus": 20.0,
-        "description": "Bất tử x20 EXP"
-    },
-    "16": {
-        "name": "🔮 Cần toàn năng",
-        "price": 1000000000,
-        "speed": 0.1,
-        "auto_speed": 0.3,
-        "common_bonus": 10.0,
-        "rare_bonus": 50.0,
-        "epic_bonus": 100.0,
-        "legendary_bonus": 100.0,
-        "mythic_bonus": 50.0,
-        "secret_bonus": 1.0,
-        "exp_bonus": 30.0,
-        "description": "Tối thượng x30 EXP"
-    },
-    "17": {
-        "name": "🌟 Cần thần thoại",
-        "price": 2000000000,
-        "speed": 0.08,
-        "auto_speed": 0.25,
-        "common_bonus": 15.0,
-        "rare_bonus": 75.0,
-        "epic_bonus": 150.0,
-        "legendary_bonus": 150.0,
-        "mythic_bonus": 75.0,
-        "secret_bonus": 1.5,
-        "exp_bonus": 40.0,
-        "description": "Thần thoại x40 EXP"
-    },
-    "18": {
-        "name": "⚡ Cần lôi thần",
-        "price": 5000000000,
-        "speed": 0.06,
-        "auto_speed": 0.2,
-        "common_bonus": 20.0,
-        "rare_bonus": 100.0,
-        "epic_bonus": 200.0,
-        "legendary_bonus": 200.0,
-        "mythic_bonus": 100.0,
-        "secret_bonus": 2.0,
-        "exp_bonus": 50.0,
-        "description": "Sấm sét x50 EXP"
-    },
-    "19": {
-        "name": "🏆 Cần tối cao",
-        "price": 10000000000,
-        "speed": 0.04,
-        "auto_speed": 0.15,
-        "common_bonus": 30.0,
-        "rare_bonus": 150.0,
-        "epic_bonus": 300.0,
-        "legendary_bonus": 300.0,
-        "mythic_bonus": 150.0,
-        "secret_bonus": 3.0,
-        "exp_bonus": 75.0,
-        "description": "Đỉnh cao x75 EXP"
-    },
-    "20": {
-        "name": "👑 Cần chúa tể",
-        "price": 50000000000,
-        "speed": 0.02,
-        "auto_speed": 0.1,
-        "common_bonus": 50.0,
-        "rare_bonus": 250.0,
-        "epic_bonus": 500.0,
-        "legendary_bonus": 500.0,
-        "mythic_bonus": 250.0,
-        "secret_bonus": 5.0,
-        "exp_bonus": 100.0,
-        "description": "Bá chủ x100 EXP"
-    }
-}
+FISHING_RODS = {str(i): {"name": n, "price": p, "speed": s, "auto_speed": a, "common_bonus": cb, "rare_bonus": rb, "epic_bonus": eb, 
+    "legendary_bonus": lb, "mythic_bonus": mb, "secret_bonus": sb, "exp_bonus": ex, "description": d} 
+    for i, (n, p, s, a, cb, rb, eb, lb, mb, sb, ex, d) in enumerate([
+    ("🎣 Cần cơ bản", 0, 3.0, 4.0, 1.0, 0.5, 0.1, 0.01, 0.001, 0.0001, 1.0, "Mặc định"),
+    ("🎋 Cần tre", 100, 2.8, 3.8, 1.1, 0.6, 0.15, 0.02, 0.002, 0.0002, 1.1, "+10% EXP"),
+    ("🪵 Cần gỗ", 500, 2.5, 3.5, 1.2, 0.8, 0.2, 0.05, 0.005, 0.0005, 1.2, "+20% EXP"),
+    ("🥉 Cần đồng", 1500, 2.3, 3.3, 1.3, 1.0, 0.3, 0.08, 0.008, 0.0008, 1.3, "+30% EXP"),
+    ("⚙️ Cần sắt", 5000, 2.0, 3.0, 1.4, 1.5, 0.5, 0.15, 0.015, 0.001, 1.5, "+50% EXP"),
+    ("🥈 Cần bạc", 15000, 1.8, 2.8, 1.5, 2.0, 0.8, 0.25, 0.025, 0.0015, 1.75, "+75% EXP"),
+    ("🥇 Cần vàng", 50000, 1.5, 2.5, 1.6, 3.0, 1.5, 0.5, 0.05, 0.002, 2.0, "x2 EXP"),
+    ("💍 Cần bạch kim", 150000, 1.3, 2.3, 1.7, 4.0, 2.5, 1.0, 0.1, 0.003, 2.5, "x2.5 EXP"),
+    ("💎 Cần pha lê", 500000, 1.0, 2.0, 1.8, 5.0, 4.0, 2.0, 0.2, 0.005, 3.0, "x3 EXP"),
+    ("💠 Cần kim cương", 1500000, 0.8, 1.8, 2.0, 6.0, 6.0, 3.5, 0.5, 0.008, 4.0, "x4 EXP"),
+    ("🗿 Cần hắc diệu", 5000000, 0.6, 1.5, 2.2, 8.0, 10.0, 6.0, 1.0, 0.01, 5.0, "x5 EXP"),
+    ("⚔️ Cần mythril", 15000000, 0.5, 1.3, 2.5, 10.0, 15.0, 10.0, 2.0, 0.02, 7.0, "x7 EXP"),
+    ("✨ Cần thiên thần", 50000000, 0.4, 1.0, 3.0, 15.0, 25.0, 20.0, 5.0, 0.05, 10.0, "x10 EXP"),
+    ("🌌 Cần vũ trụ", 150000000, 0.3, 0.8, 3.5, 20.0, 40.0, 35.0, 10.0, 0.1, 15.0, "x15 EXP"),
+    ("♾️ Cần vĩnh hằng", 500000000, 0.2, 0.5, 5.0, 30.0, 60.0, 50.0, 20.0, 0.5, 20.0, "x20 EXP"),
+    ("🔮 Cần toàn năng", 1000000000, 0.1, 0.3, 10.0, 50.0, 100.0, 100.0, 50.0, 1.0, 30.0, "x30 EXP"),
+    ("🌟 Cần thần thoại", 2000000000, 0.08, 0.25, 15.0, 75.0, 150.0, 150.0, 75.0, 1.5, 40.0, "x40 EXP"),
+    ("⚡ Cần lôi thần", 5000000000, 0.06, 0.2, 20.0, 100.0, 200.0, 200.0, 100.0, 2.0, 50.0, "x50 EXP"),
+    ("🏆 Cần tối cao", 10000000000, 0.04, 0.15, 30.0, 150.0, 300.0, 300.0, 150.0, 3.0, 75.0, "x75 EXP"),
+    ("👑 Cần chúa tể", 50000000000, 0.02, 0.1, 50.0, 250.0, 500.0, 500.0, 250.0, 5.0, 100.0, "x100 EXP"),
+    ("🔥 Cần địa ngục", 100000000000, 0.015, 0.08, 75.0, 350.0, 700.0, 700.0, 350.0, 7.0, 150.0, "x150 EXP"),
+    ("❄️ Cần băng giá", 200000000000, 0.012, 0.06, 100.0, 500.0, 1000.0, 1000.0, 500.0, 10.0, 200.0, "x200 EXP"),
+    ("🌊 Cần thủy tinh", 500000000000, 0.01, 0.05, 150.0, 750.0, 1500.0, 1500.0, 750.0, 15.0, 300.0, "x300 EXP"),
+    ("⭐ Cần ngân hà", 1000000000000, 0.008, 0.04, 200.0, 1000.0, 2000.0, 2000.0, 1000.0, 20.0, 500.0, "x500 EXP"),
+    ("♾️ Cần vô hạn", 5000000000000, 0.005, 0.02, 500.0, 2000.0, 5000.0, 5000.0, 2000.0, 50.0, 1000.0, "x1000 EXP")
+], 1)}
 
-# ===== CACHE SYSTEM =====
 class CacheManager:
-    """Quản lý cache để giảm tải GitHub API"""
     def __init__(self):
         self.cache = {}
-        self.cache_timeout = 60  # 60 giây
-        
+        self.cache_timeout = 60
     def get(self, key):
         if key in self.cache:
             data, timestamp = self.cache[key]
             if time.time() - timestamp < self.cache_timeout:
                 return data
         return None
-    
     def set(self, key, value):
         self.cache[key] = (value, time.time())
-        
     def clear(self):
         self.cache = {}
 
 cache_manager = CacheManager()
 
-# ===== UTILITY FUNCTIONS =====
 def get_next_sunday():
-    """Lấy thời gian reset tuần tiếp theo (Chủ nhật)"""
     now = datetime.now(VIETNAM_TZ)
     days_until_sunday = (6 - now.weekday()) % 7
     if days_until_sunday == 0 and now.hour >= 0:
         days_until_sunday = 7
     next_sunday = now + timedelta(days=days_until_sunday)
-    next_sunday = next_sunday.replace(hour=0, minute=0, second=0, microsecond=0)
-    return next_sunday
+    return next_sunday.replace(hour=0, minute=0, second=0, microsecond=0)
 
 def should_reset_weekly():
-    """Kiểm tra xem có phải thời điểm reset tuần không"""
     now = datetime.now(VIETNAM_TZ)
     return now.weekday() == 6 and now.hour == 0 and now.minute < 1
 
 def get_user_rank(exp):
-    """Lấy thông tin rank dựa trên EXP"""
     current_rank = FISH_RANKS["1"]
     rank_level = 1
-    
     for level, rank_data in FISH_RANKS.items():
         if exp >= rank_data["exp_required"]:
             current_rank = rank_data
             rank_level = int(level)
         else:
             break
-    
-    next_rank = None
-    exp_to_next = 0
-    if rank_level < len(FISH_RANKS):
-        next_rank = FISH_RANKS.get(str(rank_level + 1))
-        if next_rank:
-            exp_to_next = next_rank["exp_required"] - exp
-    
+    next_rank = FISH_RANKS.get(str(rank_level + 1)) if rank_level < len(FISH_RANKS) else None
+    exp_to_next = next_rank["exp_required"] - exp if next_rank else 0
     return current_rank, rank_level, next_rank, exp_to_next
 
-# ===== LOCAL STORAGE CLASS =====
 class LocalStorage:
-    """Quản lý lưu trữ dữ liệu local"""
     @staticmethod
     def save_local(data):
         try:
             with open(LOCAL_BACKUP_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            logging.info("Saved to local backup")
         except Exception as e:
-            logging.error(f"Error saving local backup: {e}")
-    
+            logging.error(f"Error saving local: {e}")
     @staticmethod
     def load_local():
         try:
@@ -499,20 +152,12 @@ class LocalStorage:
         except:
             return {}
 
-# ===== RESOURCE MONITOR CLASS =====
 class ResourceMonitor:
-    """Giám sát tài nguyên hệ thống"""
     @staticmethod
     def get_system_stats():
-        cpu_percent = psutil.cpu_percent(interval=0.1)
-        memory = psutil.virtual_memory()
-        return {
-            "cpu": cpu_percent,
-            "ram": memory.percent,
-            "ram_used": memory.used / (1024**3),
-            "ram_total": memory.total / (1024**3)
-        }
-    
+        cpu = psutil.cpu_percent(interval=0.1)
+        mem = psutil.virtual_memory()
+        return {"cpu": cpu, "ram": mem.percent, "ram_used": mem.used/(1024**3), "ram_total": mem.total/(1024**3)}
     @staticmethod
     def check_resources():
         stats = ResourceMonitor.get_system_stats()
@@ -521,43 +166,34 @@ class ResourceMonitor:
             return False
         return True
 
-# ===== DATA MANAGER CLASS =====
 class DataManager:
-    """Quản lý dữ liệu người chơi với GitHub"""
     def __init__(self):
         self.github = Github(GITHUB_TOKEN)
         self.repo = self.github.get_repo(GITHUB_REPO)
         self.auto_fishing_tasks = {}
         self.save_queue = []
         self.lock = threading.Lock()
-        self.executor = ThreadPoolExecutor(max_workers=2)
+        self.executor = ThreadPoolExecutor(max_workers=4)
         self.start_auto_save()
         self.start_weekly_reset_check()
     
     def check_and_reset_weekly(self):
-        """Kiểm tra và thực hiện reset tuần"""
         while True:
             if should_reset_weekly():
-                logging.info("Starting weekly reset...")
                 self.reset_all_users_coins()
                 time.sleep(60)
             time.sleep(30)
     
     def start_weekly_reset_check(self):
-        """Khởi động thread kiểm tra reset tuần"""
-        reset_thread = threading.Thread(target=self.check_and_reset_weekly, daemon=True)
-        reset_thread.start()
+        threading.Thread(target=self.check_and_reset_weekly, daemon=True).start()
     
     def reset_all_users_coins(self):
-        """Reset xu của tất cả người chơi về 100"""
         try:
             all_users = {}
             try:
                 file_content = self.repo.get_contents(GITHUB_FILE_PATH)
                 content_str = base64.b64decode(file_content.content).decode()
-                lines = content_str.strip().split('\n')
-                
-                for line in lines:
+                for line in content_str.strip().split('\n'):
                     if line.strip():
                         try:
                             user_data = json.loads(line)
@@ -569,137 +205,67 @@ class DataManager:
                             pass
             except:
                 pass
-            
             if all_users:
-                lines = []
-                for user_id, data in all_users.items():
-                    data['user_id'] = user_id
-                    lines.append(json.dumps(data, ensure_ascii=False))
-                
+                lines = [json.dumps(data, ensure_ascii=False) for data in all_users.values()]
                 content = '\n'.join(lines)
-                
                 try:
                     file = self.repo.get_contents(GITHUB_FILE_PATH)
-                    self.repo.update_file(
-                        GITHUB_FILE_PATH,
-                        f"Weekly reset - {datetime.now(VIETNAM_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
-                        content,
-                        file.sha
-                    )
-                    logging.info("Weekly reset completed!")
+                    self.repo.update_file(GITHUB_FILE_PATH, f"Reset - {datetime.now().strftime('%Y-%m-%d %H:%M')}", content, file.sha)
                 except:
-                    self.repo.create_file(
-                        GITHUB_FILE_PATH,
-                        f"Weekly reset - {datetime.now(VIETNAM_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
-                        content
-                    )
-            
-            # Clear cache sau khi reset
+                    self.repo.create_file(GITHUB_FILE_PATH, f"Reset - {datetime.now().strftime('%Y-%m-%d %H:%M')}", content)
             cache_manager.clear()
         except Exception as e:
-            logging.error(f"Error in weekly reset: {e}")
+            logging.error(f"Reset error: {e}")
     
     def load_user_from_github(self, user_id):
-        """Load dữ liệu người chơi từ GitHub với cache"""
-        # Kiểm tra cache trước
-        cached_data = cache_manager.get(f"user_{user_id}")
-        if cached_data:
-            return cached_data
-        
+        cached = cache_manager.get(f"user_{user_id}")
+        if cached:
+            return cached
         try:
             file_content = self.repo.get_contents(GITHUB_FILE_PATH)
             content_str = base64.b64decode(file_content.content).decode()
-            lines = content_str.strip().split('\n')
-            
-            for line in lines:
+            for line in content_str.strip().split('\n'):
                 if line.strip():
                     try:
                         user_data = json.loads(line)
                         if user_data.get('user_id') == str(user_id):
-                            # Validate và fix data
-                            if 'owned_rods' not in user_data:
-                                user_data['owned_rods'] = ["1"]
-                            if 'inventory' not in user_data:
-                                user_data['inventory'] = {"rod": "1", "fish": {}}
-                            elif 'rod' not in user_data['inventory']:
-                                user_data['inventory']['rod'] = "1"
-                            if 'total_exp' not in user_data:
-                                user_data['total_exp'] = user_data.get('exp', 0)
-                            
-                            # Lưu vào cache
+                            user_data.setdefault('owned_rods', ["1"])
+                            user_data.setdefault('inventory', {"rod": "1", "fish": {}})
+                            user_data.setdefault('total_exp', user_data.get('exp', 0))
                             cache_manager.set(f"user_{user_id}", user_data)
                             return user_data
                     except:
                         pass
-        except Exception as e:
-            logging.error(f"Error loading from GitHub: {e}")
-            # Fallback to local backup
+        except:
             local_data = LocalStorage.load_local()
             if str(user_id) in local_data:
-                user_data = local_data[str(user_id)]
-                if 'owned_rods' not in user_data:
-                    user_data['owned_rods'] = ["1"]
-                if 'inventory' not in user_data:
-                    user_data['inventory'] = {"rod": "1", "fish": {}}
-                elif 'rod' not in user_data['inventory']:
-                    user_data['inventory']['rod'] = "1"
-                if 'total_exp' not in user_data:
-                    user_data['total_exp'] = user_data.get('exp', 0)
-                return user_data
-        
+                return local_data[str(user_id)]
         return self.create_new_user(str(user_id))
     
     def create_new_user(self, user_id):
-        """Tạo người chơi mới"""
-        return {
-            "user_id": str(user_id),
-            "username": "",
-            "coins": 100,
-            "exp": 0,
-            "total_exp": 0,
-            "level": 1,
-            "fishing_count": 0,
-            "win_count": 0,
-            "lose_count": 0,
-            "treasures_found": 0,
-            "best_multiplier": 0,
-            "owned_rods": ["1"],
-            "inventory": {
-                "rod": "1",
-                "fish": {}
-            },
-            "daily_claimed": None,
-            "last_reset": None,
-            "created_at": datetime.now().isoformat()
-        }
+        return {"user_id": str(user_id), "username": "", "coins": 100, "exp": 0, "total_exp": 0, "level": 1,
+                "fishing_count": 0, "win_count": 0, "lose_count": 0, "owned_rods": ["1"],
+                "inventory": {"rod": "1", "fish": {}}, "created_at": datetime.now().isoformat()}
     
     def save_user_to_github(self, user_data):
-        """Thêm user vào queue để save"""
         with self.lock:
-            # Update cache
             cache_manager.set(f"user_{user_data['user_id']}", user_data)
             self.save_queue.append(user_data)
     
     def batch_save_to_github(self):
-        """Save batch data lên GitHub"""
         if not self.save_queue or not ResourceMonitor.check_resources():
             return
-        
         with self.lock:
             if not self.save_queue:
                 return
-            
             users_to_save = self.save_queue.copy()
             self.save_queue.clear()
-        
         try:
             all_users = {}
             try:
                 file_content = self.repo.get_contents(GITHUB_FILE_PATH)
                 content_str = base64.b64decode(file_content.content).decode()
-                lines = content_str.strip().split('\n')
-                
-                for line in lines:
+                for line in content_str.strip().split('\n'):
                     if line.strip():
                         try:
                             user_data = json.loads(line)
@@ -709,277 +275,107 @@ class DataManager:
                             pass
             except:
                 pass
-            
-            # Update users
             for user_data in users_to_save:
                 all_users[user_data['user_id']] = user_data
-            
-            # Save local backup
             LocalStorage.save_local(all_users)
-            
-            # Prepare content
-            lines = []
-            for user_id, data in all_users.items():
-                data['user_id'] = user_id
-                lines.append(json.dumps(data, ensure_ascii=False))
-            
+            lines = [json.dumps(data, ensure_ascii=False) for data in all_users.values()]
             content = '\n'.join(lines)
-            
-            # Save to GitHub
             try:
                 file = self.repo.get_contents(GITHUB_FILE_PATH)
-                self.repo.update_file(
-                    GITHUB_FILE_PATH,
-                    f"Update - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    content,
-                    file.sha
-                )
+                self.repo.update_file(GITHUB_FILE_PATH, f"Update - {datetime.now().strftime('%Y-%m-%d %H:%M')}", content, file.sha)
             except:
-                self.repo.create_file(
-                    GITHUB_FILE_PATH,
-                    f"Create - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    content
-                )
-            
-            logging.info(f"Saved {len(users_to_save)} users")
+                self.repo.create_file(GITHUB_FILE_PATH, f"Create - {datetime.now().strftime('%Y-%m-%d %H:%M')}", content)
         except Exception as e:
-            logging.error(f"Error saving: {e}")
+            logging.error(f"Save error: {e}")
     
     def auto_save(self):
-        """Auto save định kỳ"""
         while True:
-            time.sleep(30)  # Save mỗi 30 giây
+            time.sleep(20)
             if self.save_queue:
                 self.executor.submit(self.batch_save_to_github)
     
     def start_auto_save(self):
-        """Khởi động auto save thread"""
-        save_thread = threading.Thread(target=self.auto_save, daemon=True)
-        save_thread.start()
+        threading.Thread(target=self.auto_save, daemon=True).start()
     
     def get_user(self, user_id):
-        """Lấy thông tin user với validation"""
         user_data = self.load_user_from_github(user_id)
-        # Validate data
-        if 'inventory' not in user_data or 'rod' not in user_data['inventory']:
-            user_data['inventory'] = {"rod": "1", "fish": {}}
-        if user_data['inventory']['rod'] not in FISHING_RODS:
+        user_data.setdefault('inventory', {"rod": "1", "fish": {}})
+        if user_data['inventory'].get('rod') not in FISHING_RODS:
             user_data['inventory']['rod'] = "1"
-        if 'total_exp' not in user_data:
-            user_data['total_exp'] = user_data.get('exp', 0)
+        user_data.setdefault('total_exp', user_data.get('exp', 0))
         return user_data
     
     def update_user(self, user_id, data):
-        """Update thông tin user"""
         data['user_id'] = str(user_id)
         self.save_user_to_github(data)
 
-# Khởi tạo data manager
 data_manager = DataManager()
 
-# ===== HELPER FUNCTIONS =====
 def format_number(num):
-    """Format số với dấu phẩy"""
     return "{:,}".format(num)
 
-def get_level_title(level):
-    """Lấy danh hiệu theo level"""
-    titles = {
-        1: "🐣 Người mới",
-        5: "🎣 Thợ câu",
-        10: "🐠 Ngư dân",
-        20: "🦈 Thủy thủ",
-        30: "⚓ Thuyền trưởng",
-        50: "🏴‍☠️ Hải tặc",
-        75: "🧜‍♂️ Vua biển cả",
-        100: "🔱 Poseidon",
-        150: "🌊 Thần đại dương",
-        200: "⚡ Huyền thoại",
-        300: "🌌 Vũ trụ",
-        500: "♾️ Vĩnh hằng",
-        1000: "🏆 Tối cao",
-        2000: "👑 Chúa tể"
-    }
-    
-    for min_level in sorted(titles.keys(), reverse=True):
-        if level >= min_level:
-            return titles[min_level]
-    return titles[1]
-
 def get_rarity_color(rarity):
-    """Lấy icon màu theo độ hiếm"""
-    colors = {
-        "common": "⚪",
-        "uncommon": "🟢",
-        "rare": "🔵",
-        "epic": "🟣",
-        "legendary": "🟡",
-        "mythic": "🔴",
-        "secret": "⚫"
-    }
-    return colors.get(rarity, "⚪")
+    return {"common": "⚪", "uncommon": "🟢", "rare": "🔵", "epic": "🟣", 
+            "legendary": "🟡", "mythic": "🔴", "secret": "⚫"}.get(rarity, "⚪")
 
 def get_current_rod_name(user):
-    """Lấy tên cần câu hiện tại của người chơi"""
     rod_id = user.get('inventory', {}).get('rod', '1')
-    if rod_id in FISHING_RODS:
-        return FISHING_RODS[rod_id]['name']
-    return FISHING_RODS['1']['name']
+    return FISHING_RODS.get(rod_id, FISHING_RODS['1'])['name']
 
-# ===== GAME FUNCTIONS =====
-async def treasure_hunt(user_id):
-    """
-    Chức năng tìm kho báu
-    Chi phí: 50 xu
-    Cơ hội thắng: 30%
-    Phần thưởng: x3-x10 số xu đặt cược
-    """
+async def odd_even_game(user_id, choice, bet_amount=1000):
     user = data_manager.get_user(user_id)
-    
-    # Kiểm tra xu
-    if user["coins"] < 50:
-        return None, "❌ Cần 50 xu để tìm kho báu!"
-    
-    # Trừ xu
-    user["coins"] -= 50
-    
-    # Tính toán kết quả (30% cơ hội thắng)
-    win = random.random() < 0.3
-    
-    if win:
-        # Random hệ số nhân từ 3-10
-        multiplier = random.uniform(3, 10)
-        reward = int(50 * multiplier)
-        user["coins"] += reward
-        user["treasures_found"] = user.get("treasures_found", 0) + 1
-        
-        # Cập nhật best multiplier
-        if multiplier > user.get("best_multiplier", 0):
-            user["best_multiplier"] = round(multiplier, 2)
-        
-        data_manager.update_user(user_id, user)
-        return {
-            "success": True,
-            "reward": reward,
-            "multiplier": round(multiplier, 2),
-            "coins": user["coins"]
-        }, None
-    else:
-        data_manager.update_user(user_id, user)
-        return {
-            "success": False,
-            "coins": user["coins"]
-        }, None
-
-async def odd_even_game(user_id, choice, bet_amount):
-    """
-    Chức năng chẵn lẻ
-    Người chơi đoán kết quả tung xúc xắc là chẵn hay lẻ
-    Thắng: x2 số xu cược
-    """
-    user = data_manager.get_user(user_id)
-    
-    # Kiểm tra xu
     if user["coins"] < bet_amount:
         return None, f"❌ Không đủ xu! (Có: {format_number(user['coins'])} xu)"
-    
-    if bet_amount < 10:
-        return None, "❌ Cược tối thiểu 10 xu!"
-    
-    if bet_amount > 10000:
-        return None, "❌ Cược tối đa 10,000 xu!"
-    
-    # Trừ xu cược
     user["coins"] -= bet_amount
-    
-    # Tung xúc xắc (1-6)
     dice = random.randint(1, 6)
     dice_is_even = (dice % 2 == 0)
     player_wins = (choice == "even" and dice_is_even) or (choice == "odd" and not dice_is_even)
-    
     if player_wins:
-        # Thắng x2
-        winnings = bet_amount * 2
+        winnings = int(bet_amount * 2.5)
         user["coins"] += winnings
         user["win_count"] = user.get("win_count", 0) + 1
-        
         data_manager.update_user(user_id, user)
-        return {
-            "success": True,
-            "dice": dice,
-            "winnings": winnings,
-            "coins": user["coins"],
-            "choice": choice
-        }, None
+        return {"success": True, "dice": dice, "winnings": winnings, "coins": user["coins"], "choice": choice}, None
     else:
         user["lose_count"] = user.get("lose_count", 0) + 1
         data_manager.update_user(user_id, user)
-        return {
-            "success": False,
-            "dice": dice,
-            "coins": user["coins"],
-            "choice": choice
-        }, None
+        return {"success": False, "dice": dice, "coins": user["coins"], "choice": choice}, None
 
 async def process_fishing(user_id, is_auto=False):
-    """Xử lý logic câu cá"""
     user = data_manager.get_user(user_id)
-    
     if user["coins"] < 10:
         return None, "❌ Cần 10 xu!"
-    
     user["coins"] -= 10
     rod_id = user.get('inventory', {}).get('rod', '1')
-    if rod_id not in FISHING_RODS:
-        rod_id = '1'
-    rod_data = FISHING_RODS[rod_id]
-    
+    rod_data = FISHING_RODS.get(rod_id, FISHING_RODS['1'])
     current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
     
-    # Tính toán câu cá với xác suất mượt hơn
     rand = random.uniform(0, 100)
     cumulative = 0
     caught_fish = None
-    reward = 0
-    exp = 0
     
-    # Shuffle để tránh bias
     fish_items = list(FISH_TYPES.items())
     random.shuffle(fish_items)
     
     for fish_name, fish_data in fish_items:
         rarity = fish_data['rarity']
-        chance_map = {
-            'common': rod_data['common_bonus'],
-            'uncommon': rod_data['common_bonus'],
-            'rare': rod_data['rare_bonus'],
-            'epic': rod_data['epic_bonus'],
-            'legendary': rod_data['legendary_bonus'],
-            'mythic': rod_data['mythic_bonus'],
-            'secret': rod_data['secret_bonus']
-        }
-        
+        chance_map = {'common': rod_data['common_bonus'], 'uncommon': rod_data['common_bonus'],
+                     'rare': rod_data['rare_bonus'], 'epic': rod_data['epic_bonus'],
+                     'legendary': rod_data['legendary_bonus'], 'mythic': rod_data['mythic_bonus'],
+                     'secret': rod_data['secret_bonus']}
         chance = fish_data["chance"] * chance_map.get(rarity, 1.0) * current_rank['fish_bonus']
-        
-        # Giảm tỷ lệ cá hiếm khi auto
         if is_auto and rarity in ['epic', 'legendary', 'mythic', 'secret']:
-            chance *= 0.5
-        
+            chance *= 0.7
         cumulative += chance
         if rand <= cumulative:
             caught_fish = fish_name
-            base_reward = int(fish_data["value"] * current_rank['coin_bonus'])
+            reward = int(fish_data["value"] * current_rank['coin_bonus'])
             exp = int(fish_data["exp"] * rod_data.get('exp_bonus', 1.0))
-            reward = base_reward
             break
     
     if caught_fish:
-        if 'fish' not in user['inventory']:
-            user['inventory']['fish'] = {}
-        if caught_fish not in user['inventory']['fish']:
-            user['inventory']['fish'][caught_fish] = 0
-        user['inventory']['fish'][caught_fish] += 1
-        
+        user['inventory'].setdefault('fish', {})
+        user['inventory']['fish'][caught_fish] = user['inventory']['fish'].get(caught_fish, 0) + 1
         user["coins"] += reward
         user["exp"] += exp
         user["total_exp"] = user.get('total_exp', 0) + exp
@@ -987,503 +383,347 @@ async def process_fishing(user_id, is_auto=False):
         leveled_up = new_level > user["level"]
         if leveled_up:
             user["level"] = new_level
-        
         user["fishing_count"] += 1
         user["win_count"] += 1
-        
         data_manager.update_user(user_id, user)
-        
-        fish_rarity = ""
-        for fname, fdata in FISH_TYPES.items():
-            if fname == caught_fish:
-                fish_rarity = fdata['rarity']
-                break
-        
-        return {
-            "success": True,
-            "fish": caught_fish,
-            "rarity": fish_rarity,
-            "reward": reward,
-            "exp": exp,
-            "leveled_up": leveled_up,
-            "new_level": user["level"],
-            "coins": user["coins"]
-        }, None
+        return {"success": True, "fish": caught_fish, "rarity": FISH_TYPES[caught_fish]['rarity'],
+                "reward": reward, "exp": exp, "leveled_up": leveled_up, "new_level": user["level"],
+                "coins": user["coins"]}, None
     else:
         user["fishing_count"] += 1
         data_manager.update_user(user_id, user)
         return {"success": False, "coins": user["coins"]}, None
 
-async def auto_fishing_task(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, message_id: int, chat_id: int):
-    """Task auto câu cá"""
+async def auto_fishing_task(update, context, user_id, message_id, chat_id):
     count = 0
     total_coins = 0
     total_exp = 0
-    fish_caught = {}
-    rarity_count = {
-        "common": 0, "uncommon": 0, "rare": 0,
-        "epic": 0, "legendary": 0, "mythic": 0, "secret": 0
-    }
+    rarity_count = {r: 0 for r in ["common", "uncommon", "rare", "epic", "legendary", "mythic", "secret"]}
     
     while user_id in data_manager.auto_fishing_tasks and data_manager.auto_fishing_tasks[user_id]:
-        # Kiểm tra resource mỗi 10 lần
-        if count % 10 == 0 and not ResourceMonitor.check_resources():
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=f"⛔ **TẠM DỪNG**\nHệ thống quá tải!\nĐã câu {count} lần",
-                parse_mode='Markdown'
-            )
-            await asyncio.sleep(5)
+        if count % 5 == 0 and not ResourceMonitor.check_resources():
+            await asyncio.sleep(3)
             continue
-        
         count += 1
-        
         result, error = await process_fishing(user_id, is_auto=True)
-        
         if error:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=f"⛔ **DỪNG AUTO**\n{error}\nĐã câu {count-1} lần\n💰 Thu được: {format_number(total_coins)} xu",
-                parse_mode='Markdown'
-            )
-            data_manager.auto_fishing_tasks[user_id] = False
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id,
+                text=f"⛔ Dừng: {error}\nĐã câu {count-1} lần\n💰 Thu: {format_number(total_coins)} xu")
             break
-        
         if result["success"]:
-            fish_name = result["fish"]
-            if fish_name not in fish_caught:
-                fish_caught[fish_name] = 0
-            fish_caught[fish_name] += 1
-            
             rarity_count[result["rarity"]] += 1
             total_coins += result["reward"] - 10
             total_exp += result["exp"]
         else:
             total_coins -= 10
         
-        # Update UI mỗi lần câu
-        user = data_manager.get_user(user_id)
-        current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-        rod_id = user.get('inventory', {}).get('rod', '1')
-        if rod_id not in FISHING_RODS:
-            rod_id = '1'
-        rod_data = FISHING_RODS[rod_id]
-        
-        status_text = f"""
-🤖 **AUTO FISHING** 🤖
-
-📊 **Thống kê:**
-├ 🔄 Số lần: {count}
-├ 💰 Thu được: {format_number(total_coins)} xu
-├ ⭐ Tổng EXP: {total_exp}
-└ 💰 Xu hiện tại: {format_number(result['coins'] if result else user['coins'])} xu
-
-🏆 **Rank:** {current_rank['name']}
-📈 **Buff:** 💰x{current_rank['coin_bonus']} | 🎣x{current_rank['fish_bonus']}
-
-📈 **Độ hiếm đã câu:**
-"""
-        for rarity, cnt in rarity_count.items():
-            if cnt > 0:
-                status_text += f"{get_rarity_color(rarity)} {cnt} "
-        
-        status_text += f"\n\n🎣 **Cần:** {rod_data['name']}"
-        status_text += f"\n⏱️ **Tốc độ:** {rod_data['auto_speed']}s"
-        
-        keyboard = [[InlineKeyboardButton("🛑 DỪNG AUTO", callback_data='stop_auto')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=status_text,
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-        except:
-            pass  # Ignore telegram flood errors
-        
-        # Delay theo tốc độ cần câu
-        await asyncio.sleep(rod_data['auto_speed'])
+        if count % 3 == 0:
+            user = data_manager.get_user(user_id)
+            current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+            rod_data = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), FISHING_RODS['1'])
+            status_text = f"🤖 AUTO FISHING\n\n📊 Lần: {count}\n💰 Thu: {format_number(total_coins)} xu\n⭐ EXP: {total_exp}\n💰 Xu: {format_number(user['coins'])}\n\n🏆 {current_rank['name']}\n📈 Buff: 💰x{current_rank['coin_bonus']} 🎣x{current_rank['fish_bonus']}\n\n"
+            status_text += "📈 " + " ".join([f"{get_rarity_color(r)}{c}" for r, c in rarity_count.items() if c > 0])
+            status_text += f"\n\n🎣 {rod_data['name']}\n⏱️ {rod_data['auto_speed']}s"
+            keyboard = [[InlineKeyboardButton("🛑 DỪNG", callback_data='stop_auto')]]
+            try:
+                await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=status_text,
+                    reply_markup=InlineKeyboardMarkup(keyboard))
+            except:
+                pass
+        await asyncio.sleep(FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), FISHING_RODS['1'])['auto_speed'])
     
-    # Cleanup
     if user_id in data_manager.auto_fishing_tasks:
         del data_manager.auto_fishing_tasks[user_id]
 
-# ===== TELEGRAM HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler /start command"""
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
-    
     user = data_manager.get_user(user_id)
     user["username"] = user_name
     data_manager.update_user(user_id, user)
-    
-    current_rank, rank_level, next_rank, exp_to_next = get_user_rank(user.get('total_exp', 0))
+    current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
     stats = ResourceMonitor.get_system_stats()
     next_reset = get_next_sunday()
-    
-    welcome_text = f"""
-🎮 **FISHING GAME BOT** 🎮
-
-👤 **Xin chào {user_name}!**
-
-📊 **Thông tin của bạn:**
-├ 💰 Xu: {format_number(user['coins'])}
-├ ⭐ Level: {user['level']} - {get_level_title(user['level'])}
-├ 🎯 Tổng EXP: {format_number(user.get('total_exp', 0))}
-├ 🏆 Rank: {current_rank['name']}
-└ 🎣 Cần: {get_current_rod_name(user)}
-
-⏰ **Reset xu:** Chủ nhật {next_reset.strftime('%d/%m %H:%M')} GMT+7
-
-📜 **Commands:**
-├ /menu - Menu chính
-├ /fish - Câu cá nhanh
-├ /rank - Xem hệ thống rank
-├ /rods - Shop cần câu
-└ /stats - Thống kê cá nhân
-
-💻 **Hệ thống:** CPU {stats['cpu']:.1f}% | RAM {stats['ram']:.1f}%
-    """
-    
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+    await update.message.reply_text(f"🎮 **FISHING GAME**\n\n👤 {user_name}\n💰 {format_number(user['coins'])} xu\n⭐ Lv.{user['level']}\n🎯 {format_number(user.get('total_exp', 0))} EXP\n🏆 {current_rank['name']}\n🎣 {get_current_rod_name(user)}\n\n⏰ Reset: CN {next_reset.strftime('%d/%m %H:%M')}\n\n/menu /rank /stats\n\n💻 CPU {stats['cpu']:.1f}% | RAM {stats['ram']:.1f}%", parse_mode='Markdown')
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler /menu command"""
     user_id = update.effective_user.id
     user = data_manager.get_user(user_id)
     current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-    
     keyboard = [
-        [
-            InlineKeyboardButton("🎣 Câu Cá", callback_data='game_fishing'),
-            InlineKeyboardButton("🤖 Auto Câu", callback_data='auto_fishing')
-        ],
-        [
-            InlineKeyboardButton("🎣 Shop Cần", callback_data='shop_rods'),
-            InlineKeyboardButton("🗺️ Kho Báu", callback_data='game_treasure')
-        ],
-        [
-            InlineKeyboardButton("🎒 Kho Đồ", callback_data='view_inventory'),
-            InlineKeyboardButton("🎲 Chẵn Lẻ", callback_data='game_chanle')
-        ],
-        [
-            InlineKeyboardButton("📊 Thống Kê", callback_data='view_stats'),
-            InlineKeyboardButton("🏆 BXH", callback_data='leaderboard')
-        ],
-        [
-            InlineKeyboardButton("🏆 Hệ Thống Rank", callback_data='view_rank'),
-            InlineKeyboardButton("🎁 Quà Hàng Ngày", callback_data='daily_reward')
-        ]
+        [InlineKeyboardButton("🎣 Câu Cá", callback_data='game_fishing'),
+         InlineKeyboardButton("🤖 Auto", callback_data='auto_fishing')],
+        [InlineKeyboardButton("🎣 Shop Cần", callback_data='shop_rods'),
+         InlineKeyboardButton("🎲 Chẵn Lẻ", callback_data='game_chanle')],
+        [InlineKeyboardButton("🎒 Kho Đồ", callback_data='view_inventory'),
+         InlineKeyboardButton("📊 Thống Kê", callback_data='view_stats')],
+        [InlineKeyboardButton("🏆 BXH Xu", callback_data='leaderboard_coins'),
+         InlineKeyboardButton("🏆 BXH Rank", callback_data='leaderboard_rank')],
+        [InlineKeyboardButton("🏆 Rank", callback_data='view_rank')]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
     next_reset = get_next_sunday()
-    
-    menu_text = f"""
-🎮 **MENU CHÍNH** 🎮
-
-👤 **{user['username']}** | Level {user['level']}
-💰 **Xu:** {format_number(user['coins'])}
-⭐ **EXP:** {format_number(user.get('total_exp', 0))}
-🏆 **Rank:** {current_rank['name']}
-🎣 **Cần:** {get_current_rod_name(user)}
-
-⏰ **Reset xu:** Chủ nhật {next_reset.strftime('%d/%m')}
-
-Chọn chức năng bên dưới:
-    """
-    
-    await update.message.reply_text(menu_text, reply_markup=reply_markup, parse_mode='Markdown')
+    await update.message.reply_text(f"🎮 **MENU**\n\n👤 {user['username']} Lv.{user['level']}\n💰 {format_number(user['coins'])} xu\n⭐ {format_number(user.get('total_exp', 0))} EXP\n🏆 {current_rank['name']}\n🎣 {get_current_rod_name(user)}\n\n⏰ Reset: CN {next_reset.strftime('%d/%m')}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def rank_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler /rank command"""
     user_id = update.effective_user.id
     user = data_manager.get_user(user_id)
-    
     current_rank, rank_level, next_rank, exp_to_next = get_user_rank(user.get('total_exp', 0))
-    
-    text = f"""
-🏆 **HỆ THỐNG RANK NGƯ HIỆP** 🏆
-
-👤 **{user['username']}**
-🎯 **Tổng EXP:** {format_number(user.get('total_exp', 0))}
-🏆 **Rank hiện tại:** {current_rank['name']}
-
-📊 **Buff hiện tại:**
-├ 💰 Xu câu cá: x{current_rank['coin_bonus']}
-└ 🎣 Tỷ lệ cá hiếm: x{current_rank['fish_bonus']}
-"""
-    
+    text = f"🏆 **RANK NGƯ HIỆP**\n\n👤 {user['username']}\n🎯 EXP: {format_number(user.get('total_exp', 0))}\n🏆 {current_rank['name']}\n\n📊 Buff:\n💰 Xu: x{current_rank['coin_bonus']}\n🎣 Cá: x{current_rank['fish_bonus']}"
     if next_rank:
         progress = user.get('total_exp', 0) - current_rank['exp_required']
         total_needed = next_rank['exp_required'] - current_rank['exp_required']
         percent = (progress / total_needed * 100) if total_needed > 0 else 0
-        
-        text += f"""
-📈 **Tiến độ lên rank:**
-├ Rank tiếp theo: {next_rank['name']}
-├ Cần thêm: {format_number(exp_to_next)} EXP
-└ Tiến độ: {percent:.1f}%
-"""
+        text += f"\n\n📈 Tiến độ:\nTiếp: {next_rank['name']}\nCần: {format_number(exp_to_next)} EXP\n{percent:.1f}%"
     else:
-        text += "\n👑 **Bạn đã đạt rank cao nhất!**"
-    
-    text += "\n\n📋 **Danh sách Rank:**"
-    
-    # Hiển thị rank xung quanh rank hiện tại
-    start_rank = max(1, rank_level - 2)
-    end_rank = min(len(FISH_RANKS), rank_level + 3)
-    
-    for level in range(start_rank, end_rank + 1):
-        rank_data = FISH_RANKS.get(str(level))
-        if rank_data:
-            if level <= rank_level:
-                text += f"\n✅ {rank_data['name']} - {format_number(rank_data['exp_required'])} EXP"
-            else:
-                text += f"\n⬜ {rank_data['name']} - {format_number(rank_data['exp_required'])} EXP"
-    
+        text += "\n\n👑 Max rank!"
     await update.message.reply_text(text, parse_mode='Markdown')
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Xử lý callback từ các nút bấm"""
     query = update.callback_query
     await query.answer()
-    
     user_id = query.from_user.id
     data = query.data
     
-    # === CHỨC NĂNG CẦN CÂU ===
     if data == 'shop_rods':
-        """Hiển thị shop cần câu"""
         user = data_manager.get_user(user_id)
         current_rod = user.get('inventory', {}).get('rod', '1')
         owned_rods = user.get('owned_rods', ['1'])
-        
-        text = f"""
-🎣 **SHOP CẦN CÂU** 🎣
-
-💰 **Xu hiện có:** {format_number(user['coins'])}
-🎣 **Đang dùng:** {FISHING_RODS[current_rod]['name']}
-
-📋 **Danh sách cần câu:**
-"""
-        
+        text = f"🎣 **SHOP CẦN**\n\n💰 {format_number(user['coins'])} xu\n🎣 {FISHING_RODS[current_rod]['name']}\n\n"
         keyboard = []
-        
-        # Hiển thị 5 cần gần nhất với cần hiện tại
         current_rod_num = int(current_rod)
         start_rod = max(1, current_rod_num - 2)
         end_rod = min(len(FISHING_RODS), current_rod_num + 3)
-        
         for rod_id in range(start_rod, end_rod + 1):
             rod_id_str = str(rod_id)
             if rod_id_str in FISHING_RODS:
                 rod_data = FISHING_RODS[rod_id_str]
-                
                 if rod_id_str in owned_rods:
-                    text += f"\n✅ **{rod_data['name']}**"
-                    text += f"\n   {rod_data['description']}"
+                    text += f"✅ {rod_data['name']} - {rod_data['description']}\n"
                     if rod_id_str != current_rod:
-                        keyboard.append([InlineKeyboardButton(
-                            f"Dùng {rod_data['name']}", 
-                            callback_data=f'equip_rod_{rod_id_str}'
-                        )])
+                        keyboard.append([InlineKeyboardButton(f"Dùng {rod_data['name']}", callback_data=f'equip_rod_{rod_id_str}')])
                 else:
-                    text += f"\n⬜ **{rod_data['name']}** - {format_number(rod_data['price'])} xu"
-                    text += f"\n   {rod_data['description']}"
+                    text += f"⬜ {rod_data['name']} - {format_number(rod_data['price'])} xu - {rod_data['description']}\n"
                     if user['coins'] >= rod_data['price']:
-                        keyboard.append([InlineKeyboardButton(
-                            f"Mua {rod_data['name']} ({format_number(rod_data['price'])} xu)", 
-                            callback_data=f'buy_rod_{rod_id_str}'
-                        )])
-        
-        keyboard.append([InlineKeyboardButton("↩️ Quay lại", callback_data='back_menu')])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+                        keyboard.append([InlineKeyboardButton(f"Mua {rod_data['name']}", callback_data=f'buy_rod_{rod_id_str}')])
+        keyboard.append([InlineKeyboardButton("↩️ Menu", callback_data='back_menu')])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
     elif data.startswith('buy_rod_'):
-        """Mua cần câu"""
         rod_id = data.replace('buy_rod_', '')
         user = data_manager.get_user(user_id)
-        
-        if rod_id not in FISHING_RODS:
+        rod_data = FISHING_RODS.get(rod_id)
+        if not rod_data:
             await query.edit_message_text("❌ Cần không tồn tại!")
             return
-        
-        rod_data = FISHING_RODS[rod_id]
-        
         if user['coins'] < rod_data['price']:
             await query.edit_message_text(f"❌ Không đủ xu! Cần {format_number(rod_data['price'])} xu")
             return
-        
-        # Mua cần
         user['coins'] -= rod_data['price']
-        if 'owned_rods' not in user:
-            user['owned_rods'] = ['1']
-        user['owned_rods'].append(rod_id)
+        user.setdefault('owned_rods', ['1']).append(rod_id)
         user['inventory']['rod'] = rod_id
-        
         data_manager.update_user(user_id, user)
-        
-        await query.edit_message_text(
-            f"✅ **MUA THÀNH CÔNG!**\n\n{rod_data['name']}\n{rod_data['description']}\n\n💰 Xu còn lại: {format_number(user['coins'])}",
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text(f"✅ Mua thành công!\n{rod_data['name']}\n{rod_data['description']}\n💰 Còn: {format_number(user['coins'])} xu", parse_mode='Markdown')
     
     elif data.startswith('equip_rod_'):
-        """Trang bị cần câu"""
         rod_id = data.replace('equip_rod_', '')
         user = data_manager.get_user(user_id)
-        
         if rod_id not in user.get('owned_rods', []):
-            await query.edit_message_text("❌ Bạn chưa sở hữu cần này!")
+            await query.edit_message_text("❌ Chưa sở hữu cần này!")
             return
-        
         user['inventory']['rod'] = rod_id
         data_manager.update_user(user_id, user)
-        
         rod_data = FISHING_RODS[rod_id]
-        await query.edit_message_text(
-            f"✅ **Đã trang bị:** {rod_data['name']}\n\n{rod_data['description']}",
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text(f"✅ Đã trang bị: {rod_data['name']}\n{rod_data['description']}", parse_mode='Markdown')
     
-    # === CHỨC NĂNG KHO BÁU ===
-    elif data == 'game_treasure':
-        """Menu tìm kho báu"""
+    elif data == 'game_chanle':
         user = data_manager.get_user(user_id)
-        
-        text = f"""
-🗺️ **TÌM KHO BÁU** 🗺️
-
-💰 **Xu hiện có:** {format_number(user['coins'])}
-🏆 **Đã tìm thấy:** {user.get('treasures_found', 0)} kho báu
-🎯 **Kỷ lục:** x{user.get('best_multiplier', 0)}
-
-📋 **Luật chơi:**
-├ 💰 Chi phí: 50 xu
-├ 🎲 Cơ hội thắng: 30%
-├ 💎 Phần thưởng: x3 - x10 tiền cược
-└ 🏆 Tối đa có thể nhận: 500 xu
-
-Bạn có muốn thử vận may không?
-"""
-        
-        keyboard = [
-            [InlineKeyboardButton("🗺️ Tìm kho báu (50 xu)", callback_data='treasure_hunt')],
-            [InlineKeyboardButton("↩️ Quay lại", callback_data='back_menu')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        text = f"🎲 **CHẴN LẺ**\n\n💰 {format_number(user['coins'])} xu\n🏆 Thắng: {user.get('win_count', 0)}\n💔 Thua: {user.get('lose_count', 0)}\n\n📋 Luật:\n🎲 Xúc xắc 1-6\n💰 Cược: 1000 xu\n🏆 Thắng: x2.5 (2500 xu)\n\nChọn CHẴN hoặc LẺ:"
+        keyboard = [[InlineKeyboardButton("CHẴN", callback_data='chanle_even'), InlineKeyboardButton("LẺ", callback_data='chanle_odd')],
+                   [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
-    elif data == 'treasure_hunt':
-        """Thực hiện tìm kho báu"""
-        await query.edit_message_text("🗺️ Đang tìm kiếm kho báu...")
-        await asyncio.sleep(2)
-        
-        result, error = await treasure_hunt(user_id)
-        
+    elif data in ['chanle_even', 'chanle_odd']:
+        choice = 'even' if data == 'chanle_even' else 'odd'
+        await query.edit_message_text("🎲 Đang tung...")
+        await asyncio.sleep(1)
+        result, error = await odd_even_game(user_id, choice)
         if error:
             await query.edit_message_text(error)
             return
-        
+        dice_display = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"][result['dice'] - 1]
+        choice_text = "CHẴN" if choice == "even" else "LẺ"
+        result_text = "CHẴN" if result['dice'] % 2 == 0 else "LẺ"
         if result["success"]:
-            text = f"""
-🎉 **TÌM THẤY KHO BÁU!** 🎉
-
-💎 **Hệ số nhân:** x{result['multiplier']}
-💰 **Phần thưởng:** {format_number(result['reward'])} xu
-💰 **Tổng xu:** {format_number(result['coins'])}
-
-Chúc mừng bạn đã tìm thấy kho báu!
-"""
+            text = f"🎉 **THẮNG!**\n\n{dice_display} Kết quả: {result['dice']} ({result_text})\nBạn chọn: {choice_text}\n\n💰 Thắng: {format_number(result['winnings'])} xu\n💰 Tổng: {format_number(result['coins'])} xu"
         else:
-            text = f"""
-😢 **KHÔNG TÌM THẤY!**
-
-Kho báu đã bị ai đó lấy mất rồi!
-
-💰 **Xu còn lại:** {format_number(result['coins'])}
-
-Hãy thử lại lần nữa nhé!
-"""
-        
-        keyboard = [
-            [InlineKeyboardButton("🗺️ Tìm tiếp", callback_data='treasure_hunt')],
-            [InlineKeyboardButton("↩️ Quay lại", callback_data='back_menu')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+            text = f"😢 **THUA!**\n\n{dice_display} Kết quả: {result['dice']} ({result_text})\nBạn chọn: {choice_text}\n\n💸 Mất: 1000 xu\n💰 Còn: {format_number(result['coins'])} xu"
+        keyboard = [[InlineKeyboardButton("🎲 Chơi tiếp", callback_data='game_chanle')], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
-    # === CHỨC NĂNG CHẴN LẺ ===
-    elif data == 'game_chanle':
-        """Menu game chẵn lẻ"""
+    elif data == 'view_inventory':
         user = data_manager.get_user(user_id)
-        
-        text = f"""
-🎲 **GAME CHẴN LẺ** 🎲
-
-💰 **Xu hiện có:** {format_number(user['coins'])}
-🏆 **Thắng:** {user.get('win_count', 0)} lần
-💔 **Thua:** {user.get('lose_count', 0)} lần
-
-📋 **Luật chơi:**
-├ 🎲 Tung xúc xắc (1-6)
-├ 🎯 Đoán kết quả chẵn hoặc lẻ
-├ 💰 Thắng: x2 tiền cược
-├ 📉 Cược tối thiểu: 10 xu
-└ 📈 Cược tối đa: 10,000 xu
-
-Chọn số xu muốn cược:
-"""
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("10 xu", callback_data='chanle_bet_10'),
-                InlineKeyboardButton("50 xu", callback_data='chanle_bet_50'),
-                InlineKeyboardButton("100 xu", callback_data='chanle_bet_100')
-            ],
-            [
-                InlineKeyboardButton("500 xu", callback_data='chanle_bet_500'),
-                InlineKeyboardButton("1000 xu", callback_data='chanle_bet_1000'),
-                InlineKeyboardButton("5000 xu", callback_data='chanle_bet_5000')
-            ],
-            [InlineKeyboardButton("↩️ Quay lại", callback_data='back_menu')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        fish_inv = user.get('inventory', {}).get('fish', {})
+        text = f"🎒 **KHO ĐỒ**\n\n💰 {format_number(user['coins'])} xu\n🎣 {get_current_rod_name(user)}\n\n📦 Cá:\n"
+        total_value = 0
+        total_count = 0
+        if fish_inv:
+            sorted_fish = sorted(fish_inv.items(), key=lambda x: FISH_TYPES.get(x[0], {}).get('value', 0), reverse=True)[:15]
+            for fish_name, count in sorted_fish:
+                if fish_name in FISH_TYPES:
+                    value = FISH_TYPES[fish_name]['value'] * count
+                    total_value += value * 0.7
+                    total_count += count
+                    text += f"{get_rarity_color(FISH_TYPES[fish_name]['rarity'])} {fish_name}: {count}\n"
+            text += f"\n📊 Tổng: {total_count} con\n💰 Giá: {format_number(int(total_value))} xu"
+            keyboard = [[InlineKeyboardButton("💰 Bán tất cả", callback_data='sell_fish')], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+        else:
+            text += "❌ Chưa có cá!"
+            keyboard = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
-    elif data.startswith('chanle_bet_'):
-        """Chọn số xu cược"""
-        bet_amount = int(data.replace('chanle_bet_', ''))
-        
-        # Lưu số xu cược vào context
-        context.user_data['chanle_bet'] = bet_amount
-        
-        text = f"💰 **Cược:** {format_number(bet_amount)} xu\n\nChọn CHẴN hoặc LẺ:"
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("CHẴN", callback_data='chanle_even'),
-                InlineKeyboardButton("LẺ", callback_data='chanle_odd')
-            ],
-            [InlineKeyboardButton("↩️ Quay lại", callback_data='game_chanle')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    elif data == 'sell_fish':
+        user = data_manager.get_user(user_id)
+        current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+        total_value = 0
+        total_count = 0
+        fish_inv = user.get('inventory', {}).get('fish', {})
+        if fish_inv:
+            for fish_name, count in fish_inv.items():
+                if fish_name in FISH_TYPES:
+                    total_value += FISH_TYPES[fish_name]['value'] * count * 0.7 * current_rank['coin_bonus']
+                    total_count += count
+            user['inventory']['fish'] = {}
+            user["coins"] += int(total_value)
+            data_manager.update_user(user_id, user)
+            await query.edit_message_text(f"💰 **BÁN THÀNH CÔNG!**\n{total_count} con\n+{format_number(int(total_value))} xu (Rank x{current_rank['coin_bonus']})\n💰 Xu: {format_number(user['coins'])}", parse_mode='Markdown')
+        else:
+            await query.edit_message_text("❌ Không có cá!")
     
-    elif data in ['chanle_even', 'chanle_odd']:
-        """Thực hiện game chẵn lẻ"""
-        choice = 'even' if data == 'chanle_even' else 'odd'
-        bet_amount = context
+    elif data == 'leaderboard_coins':
+        all_users = []
+        try:
+            file_content = data_manager.repo.get_contents(GITHUB_FILE_PATH)
+            content_str = base64.b64decode(file_content.content).decode()
+            for line in content_str.strip().split('\n'):
+                if line.strip():
+                    try:
+                        all_users.append(json.loads(line))
+                    except:
+                        pass
+        except:
+            pass
+        sorted_users = sorted(all_users, key=lambda x: x.get('coins', 0), reverse=True)[:10]
+        text = "🏆 **TOP 10 XU**\n\n"
+        medals = ["🥇", "🥈", "🥉"]
+        for i, user_data in enumerate(sorted_users, 1):
+            medal = medals[i-1] if i <= 3 else f"{i}."
+            text += f"{medal} {user_data.get('username', 'User')} - {format_number(user_data.get('coins', 0))} xu\n"
+        await query.edit_message_text(text, parse_mode='Markdown')
+    
+    elif data == 'leaderboard_rank':
+        all_users = []
+        try:
+            file_content = data_manager.repo.get_contents(GITHUB_FILE_PATH)
+            content_str = base64.b64decode(file_content.content).decode()
+            for line in content_str.strip().split('\n'):
+                if line.strip():
+                    try:
+                        all_users.append(json.loads(line))
+                    except:
+                        pass
+        except:
+            pass
+        sorted_users = sorted(all_users, key=lambda x: x.get('total_exp', 0), reverse=True)[:10]
+        text = "🏆 **TOP 10 RANK**\n\n"
+        medals = ["🥇", "🥈", "🥉"]
+        for i, user_data in enumerate(sorted_users, 1):
+            medal = medals[i-1] if i <= 3 else f"{i}."
+            user_rank, _, _, _ = get_user_rank(user_data.get('total_exp', 0))
+            text += f"{medal} {user_data.get('username', 'User')}\n   {user_rank['name']} - {format_number(user_data.get('total_exp', 0))} EXP\n"
+        await query.edit_message_text(text, parse_mode='Markdown')
+    
+    elif data == 'view_rank':
+        user = data_manager.get_user(user_id)
+        current_rank, rank_level, next_rank, exp_to_next = get_user_rank(user.get('total_exp', 0))
+        text = f"🏆 **RANK**\n\n🎯 {format_number(user.get('total_exp', 0))} EXP\n🏆 {current_rank['name']}\n\n📊 Buff:\n💰 x{current_rank['coin_bonus']}\n🎣 x{current_rank['fish_bonus']}"
+        if next_rank:
+            progress = user.get('total_exp', 0) - current_rank['exp_required']
+            total_needed = next_rank['exp_required'] - current_rank['exp_required']
+            percent = (progress / total_needed * 100) if total_needed > 0 else 0
+            text += f"\n\n📈 Tiếp: {next_rank['name']}\nCần: {format_number(exp_to_next)} EXP\n{percent:.1f}%"
+        else:
+            text += "\n\n👑 Max!"
+        await query.edit_message_text(text, parse_mode='Markdown')
+    
+    elif data == 'game_fishing':
+        user = data_manager.get_user(user_id)
+        rod_data = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), FISHING_RODS['1'])
+        current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+        await query.edit_message_text(f"🎣 Đang câu... ({rod_data['speed']}s)")
+        await asyncio.sleep(rod_data['speed'])
+        result, error = await process_fishing(user_id, is_auto=False)
+        if error:
+            await query.edit_message_text(error)
+            return
+        if result["success"]:
+            text = f"🎉 **BẮT ĐƯỢC!**\n{result['fish']} {get_rarity_color(result['rarity'])}\n💰 +{format_number(result['reward'])} xu (x{current_rank['coin_bonus']})\n⭐ +{result['exp']} EXP\n💰 {format_number(result['coins'])} xu"
+            if result['leveled_up']:
+                text += f"\n\n🎊 **LEVEL {result['new_level']}!**"
+        else:
+            text = f"😢 Trượt!\n💰 {format_number(result['coins'])} xu"
+        await query.edit_message_text(text, parse_mode='Markdown')
+    
+    elif data == 'auto_fishing':
+        if user_id in data_manager.auto_fishing_tasks and data_manager.auto_fishing_tasks[user_id]:
+            await query.edit_message_text("⚠️ Đang auto rồi!")
+            return
+        if not ResourceMonitor.check_resources():
+            await query.edit_message_text("⚠️ Hệ thống quá tải!")
+            return
+        data_manager.auto_fishing_tasks[user_id] = True
+        await query.edit_message_text("🤖 **BẮT ĐẦU AUTO...**")
+        asyncio.create_task(auto_fishing_task(update, context, user_id, query.message.message_id, query.message.chat_id))
+    
+    elif data == 'stop_auto':
+        if user_id in data_manager.auto_fishing_tasks:
+            data_manager.auto_fishing_tasks[user_id] = False
+            await query.edit_message_text("🛑 **ĐÃ DỪNG**")
+    
+    elif data == 'view_stats':
+        user = data_manager.get_user(user_id)
+        current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+        win_rate = (user.get('win_count', 0) / user.get('fishing_count', 1)) * 100 if user.get('fishing_count', 0) > 0 else 0
+        text = f"📊 **THỐNG KÊ**\n\n👤 {user['username']}\n⭐ Level {user['level']}\n🏆 {current_rank['name']}\n\n📈 Thống kê:\n🎣 Câu: {user.get('fishing_count', 0)} lần\n✅ Thành công: {user.get('win_count', 0)}\n📊 Tỷ lệ: {win_rate:.1f}%\n🎲 Thắng CL: {user.get('win_count', 0)}\n💔 Thua CL: {user.get('lose_count', 0)}"
+        await query.edit_message_text(text, parse_mode='Markdown')
+    
+    elif data == 'back_menu':
+        user = data_manager.get_user(user_id)
+        current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+        keyboard = [
+            [InlineKeyboardButton("🎣 Câu Cá", callback_data='game_fishing'),
+             InlineKeyboardButton("🤖 Auto", callback_data='auto_fishing')],
+            [InlineKeyboardButton("🎣 Shop Cần", callback_data='shop_rods'),
+             InlineKeyboardButton("🎲 Chẵn Lẻ", callback_data='game_chanle')],
+            [InlineKeyboardButton("🎒 Kho Đồ", callback_data='view_inventory'),
+             InlineKeyboardButton("📊 Thống Kê", callback_data='view_stats')],
+            [InlineKeyboardButton("🏆 BXH Xu", callback_data='leaderboard_coins'),
+             InlineKeyboardButton("🏆 BXH Rank", callback_data='leaderboard_rank')],
+            [InlineKeyboardButton("🏆 Rank", callback_data='view_rank')]
+        ]
+        next_reset = get_next_sunday()
+        await query.edit_message_text(f"🎮 **MENU**\n\n👤 {user['username']} Lv.{user['level']}\n💰 {format_number(user['coins'])} xu\n⭐ {format_number(user.get('total_exp', 0))} EXP\n🏆 {current_rank['name']}\n🎣 {get_current_rod_name(user)}\n\n⏰ Reset: CN {next_reset.strftime('%d/%m')}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+def main():
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", menu))
+    application.add_handler(CommandHandler("rank", rank_info))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    next_reset = get_next_sunday()
+    print(f"🤖 Bot started\n🏆 Ranks: {len(FISH_RANKS)}\n🐟 Fish: {len(FISH_TYPES)}\n🎣 Rods: {len(FISHING_RODS)}\n⏰ Reset: {next_reset.strftime('%d/%m/%Y %H:%M')}")
+    stats = ResourceMonitor.get_system_stats()
+    print(f"💻 CPU: {stats['cpu']:.1f}% | RAM: {stats['ram']:.1f}%")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
