@@ -15,809 +15,1414 @@ from concurrent.futures import ThreadPoolExecutor
 import psutil
 import gc
 import pytz
+import queue
+import traceback
+import re
 
 load_dotenv()
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
+GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')  
 GITHUB_REPO = os.getenv('GITHUB_REPO', 'htuananh1/Data-manager')
 GITHUB_FILE_PATH = "bot_data.json"
+GITHUB_CONFIG_PATH = "game_config.json"
 LOCAL_BACKUP_FILE = "local_backup.json"
+LOCAL_CONFIG_FILE = "local_config.json"
 VIETNAM_TZ = pytz.timezone('Asia/Ho_Chi_Minh')
 
-FISH_RANKS = {str(i+1): {"name": n, "exp_required": e, "coin_bonus": c, "fish_bonus": f} for i, (n, e, c, f) in enumerate([
-    ("🎣 Ngư Tân Thủ", 0, 1.0, 1.0), ("⚔️ Ngư Tiểu Hiệp", 5000, 1.15, 1.1), ("🗡️ Ngư Hiệp Khách", 20000, 1.35, 1.2),
-    ("🛡️ Ngư Tráng Sĩ", 80000, 1.6, 1.35), ("⚡ Ngư Đại Hiệp", 250000, 2.0, 1.5), ("🌟 Ngư Tông Sư", 800000, 2.5, 1.75),
-    ("🔥 Ngư Chân Nhân", 2000000, 3.2, 2.0), ("💫 Ngư Thánh Giả", 5000000, 4.0, 2.5), ("⚔️ Ngư Võ Thần", 15000000, 5.5, 3.0),
-    ("👑 Ngư Minh Chủ", 50000000, 8.0, 4.0), ("🌊 Ngư Hải Vương", 100000000, 10.0, 5.0), ("🔱 Ngư Thần Thánh", 200000000, 13.0, 6.0),
-    ("⭐ Ngư Tiên Vương", 400000000, 17.0, 7.5), ("🌌 Ngư Thiên Tôn", 800000000, 22.0, 9.0), ("♾️ Ngư Vĩnh Hằng", 1500000000, 30.0, 12.0),
-    ("🔮 Ngư Toàn Năng", 3000000000, 40.0, 15.0), ("🌠 Ngư Sáng Thế", 6000000000, 55.0, 20.0), ("⚜️ Ngư Tối Cao", 10000000000, 75.0, 25.0),
-    ("🎭 Ngư Huyền Thoại", 20000000000, 100.0, 35.0), ("🏆 Ngư Cực Phẩm", 50000000000, 150.0, 50.0), ("👑 Ngư Thần", 100000000000, 200.0, 75.0),
-    ("⚡ Ngư Thiên Đế", 200000000000, 300.0, 100.0), ("🌌 Ngư Vũ Trụ", 500000000000, 500.0, 150.0), ("♾️ Ngư Vô Cực", 1000000000000, 750.0, 200.0),
-    ("🔯 Ngư Siêu Việt", 2000000000000, 1000.0, 300.0)
-])}
+MAX_CONCURRENT_AUTO = 25
+AUTO_UPDATE_INTERVAL = 60
+COUNTDOWN_INTERVAL = 15
+SAVE_INTERVAL = 30
+CONFIG_UPDATE_INTERVAL = 600
+MIN_UPDATE_INTERVAL = 1.5
+GLOBAL_RATE_LIMIT = 20
 
-FISH_TYPES = {n: {"value": v, "chance": c, "exp": e, "rarity": r} for n, v, c, e, r in [
-    ("🍤 Tép", 2, 10.0, 1, "common"), ("🦐 Tôm", 5, 9.5, 2, "common"), ("🐟 Cá nhỏ", 10, 9.0, 3, "common"),
-    ("🐠 Cá vàng", 30, 8.5, 5, "common"), ("🦀 Cua nhỏ", 25, 8.0, 4, "common"), ("🐡 Cá nóc", 50, 7.5, 8, "uncommon"),
-    ("🦀 Cua lớn", 60, 7.0, 10, "uncommon"), ("🦑 Mực", 80, 6.5, 12, "uncommon"), ("🐚 Sò điệp", 70, 6.0, 11, "uncommon"),
-    ("🦐 Tôm hùm nhỏ", 90, 5.5, 13, "uncommon"), ("🦪 Hàu", 85, 5.0, 14, "uncommon"), ("🦈 Cá mập nhỏ", 150, 4.5, 20, "rare"),
-    ("🐙 Bạch tuộc", 200, 4.0, 25, "rare"), ("🦈 Cá mập lớn", 300, 3.5, 30, "rare"), ("🐢 Rùa biển", 400, 3.0, 35, "rare"),
-    ("🦞 Tôm hùm", 500, 2.5, 40, "rare"), ("🦑 Mực khổng lồ", 600, 2.3, 45, "rare"), ("🐠 Cá chép vàng", 700, 2.1, 50, "rare"),
-    ("🐟 Cá kiếm", 750, 1.9, 52, "rare"), ("🦭 Sư tử biển", 650, 1.7, 48, "rare"), ("🐊 Cá sấu", 800, 1.5, 60, "epic"),
-    ("🐋 Cá voi", 1000, 1.3, 70, "epic"), ("🦭 Hải cẩu", 900, 1.2, 65, "epic"), ("⚡ Cá điện", 1200, 1.1, 75, "epic"),
-    ("🌟 Cá thần", 1500, 1.0, 80, "epic"), ("🦈 Megalodon", 1800, 0.9, 85, "epic"), ("🐙 Kraken nhỏ", 2000, 0.8, 90, "epic"),
-    ("🌊 Cá thủy tinh", 2200, 0.7, 95, "epic"), ("🔥 Cá lửa", 2400, 0.6, 98, "epic"), ("❄️ Cá băng", 2300, 0.55, 96, "epic"),
-    ("🌈 Cá cầu vồng", 2100, 0.5, 92, "epic"), ("🐉 Rồng biển", 2500, 0.45, 120, "legendary"), ("💎 Cá kim cương", 3000, 0.4, 140, "legendary"),
-    ("👑 Vua đại dương", 5000, 0.35, 180, "legendary"), ("🔱 Thủy thần", 6000, 0.3, 200, "legendary"), ("🌊 Hải vương", 7000, 0.25, 220, "legendary"),
-    ("🐙 Kraken", 8000, 0.22, 250, "legendary"), ("🦕 Thủy quái", 9000, 0.2, 280, "legendary"), ("⚓ Cá ma", 10000, 0.18, 300, "legendary"),
-    ("🏴‍☠️ Cướp biển", 11000, 0.16, 320, "legendary"), ("🧜‍♀️ Tiên cá", 12000, 0.14, 350, "legendary"), ("🔮 Pha lê biển", 13000, 0.12, 380, "legendary"),
-    ("🦄 Kỳ lân biển", 15000, 0.1, 500, "mythic"), ("🐲 Long vương", 20000, 0.09, 600, "mythic"), ("☄️ Thiên thạch", 25000, 0.08, 700, "mythic"),
-    ("🌌 Vũ trụ", 30000, 0.07, 800, "mythic"), ("✨ Thần thánh", 35000, 0.06, 900, "mythic"), ("🎇 Tinh vân", 40000, 0.05, 1000, "mythic"),
-    ("🌠 Sao băng", 45000, 0.04, 1100, "mythic"), ("💫 Thiên hà", 50000, 0.035, 1200, "mythic"), ("🪐 Hành tinh", 55000, 0.03, 1300, "mythic"),
-    ("☀️ Mặt trời", 60000, 0.025, 1500, "mythic"), ("🎭 Bí ẩn", 100000, 0.02, 2000, "secret"), ("🗿 Cổ đại", 150000, 0.018, 2500, "secret"),
-    ("🛸 Ngoài hành tinh", 200000, 0.015, 3000, "secret"), ("🔮 Hư không", 300000, 0.012, 4000, "secret"), ("⭐ Vĩnh hằng", 500000, 0.01, 5000, "secret"),
-    ("🌟 Thần thoại", 750000, 0.008, 6000, "secret"), ("💠 Vô cực", 1000000, 0.006, 7500, "secret"), ("🔯 Siêu việt", 1500000, 0.004, 9000, "secret"),
-    ("⚜️ Tối thượng", 2000000, 0.003, 10000, "secret"), ("♾️ Vô hạn", 5000000, 0.002, 15000, "secret"), ("🏆 Ultimate", 10000000, 0.001, 20000, "secret")
-]}
-
-FISHING_RODS = {str(i+1): {"name": n, "price": p, "speed": s, "auto_speed": a, "common_bonus": cb, "rare_bonus": rb, "epic_bonus": eb, 
-    "legendary_bonus": lb, "mythic_bonus": mb, "secret_bonus": sb, "exp_bonus": ex, "description": d} 
-    for i, (n, p, s, a, cb, rb, eb, lb, mb, sb, ex, d) in enumerate([
-    ("🎣 Cần cơ bản", 0, 3.0, 4.0, 1.0, 0.5, 0.1, 0.01, 0.001, 0.0001, 1.0, "Mặc định"),
-    ("🎋 Cần tre", 100, 2.8, 3.8, 1.1, 0.6, 0.15, 0.02, 0.002, 0.0002, 1.1, "+10% EXP"),
-    ("🪵 Cần gỗ", 500, 2.5, 3.5, 1.2, 0.8, 0.2, 0.05, 0.005, 0.0005, 1.2, "+20% EXP"),
-    ("🥉 Cần đồng", 1500, 2.3, 3.3, 1.3, 1.0, 0.3, 0.08, 0.008, 0.0008, 1.3, "+30% EXP"),
-    ("⚙️ Cần sắt", 5000, 2.0, 3.0, 1.4, 1.5, 0.5, 0.15, 0.015, 0.001, 1.5, "+50% EXP"),
-    ("🥈 Cần bạc", 15000, 1.8, 2.8, 1.5, 2.0, 0.8, 0.25, 0.025, 0.0015, 1.75, "+75% EXP"),
-    ("🥇 Cần vàng", 50000, 1.5, 2.5, 1.6, 3.0, 1.5, 0.5, 0.05, 0.002, 2.0, "x2 EXP"),
-    ("💍 Cần bạch kim", 150000, 1.3, 2.3, 1.7, 4.0, 2.5, 1.0, 0.1, 0.003, 2.5, "x2.5 EXP"),
-    ("💎 Cần pha lê", 500000, 1.0, 2.0, 1.8, 5.0, 4.0, 2.0, 0.2, 0.005, 3.0, "x3 EXP"),
-    ("💠 Cần kim cương", 1500000, 0.8, 1.8, 2.0, 6.0, 6.0, 3.5, 0.5, 0.008, 4.0, "x4 EXP"),
-    ("🗿 Cần hắc diệu", 5000000, 0.6, 1.5, 2.2, 8.0, 10.0, 6.0, 1.0, 0.01, 5.0, "x5 EXP"),
-    ("⚔️ Cần mythril", 15000000, 0.5, 1.3, 2.5, 10.0, 15.0, 10.0, 2.0, 0.02, 7.0, "x7 EXP"),
-    ("✨ Cần thiên thần", 50000000, 0.4, 1.0, 3.0, 15.0, 25.0, 20.0, 5.0, 0.05, 10.0, "x10 EXP"),
-    ("🌌 Cần vũ trụ", 150000000, 0.3, 0.8, 3.5, 20.0, 40.0, 35.0, 10.0, 0.1, 15.0, "x15 EXP"),
-    ("♾️ Cần vĩnh hằng", 500000000, 0.2, 0.5, 5.0, 30.0, 60.0, 50.0, 20.0, 0.5, 20.0, "x20 EXP"),
-    ("🔮 Cần toàn năng", 1000000000, 0.1, 0.3, 10.0, 50.0, 100.0, 100.0, 50.0, 1.0, 30.0, "x30 EXP"),
-    ("🌟 Cần thần thoại", 2000000000, 0.08, 0.25, 15.0, 75.0, 150.0, 150.0, 75.0, 1.5, 40.0, "x40 EXP"),
-    ("⚡ Cần lôi thần", 5000000000, 0.06, 0.2, 20.0, 100.0, 200.0, 200.0, 100.0, 2.0, 50.0, "x50 EXP"),
-    ("🏆 Cần tối cao", 10000000000, 0.04, 0.15, 30.0, 150.0, 300.0, 300.0, 150.0, 3.0, 75.0, "x75 EXP"),
-    ("👑 Cần chúa tể", 50000000000, 0.02, 0.1, 50.0, 250.0, 500.0, 500.0, 250.0, 5.0, 100.0, "x100 EXP")
-])}
-
-class CacheManager:
+class RateLimiter:
+    """Rate limiter để tránh flood"""
     def __init__(self):
-        self.cache = {}
-        self.cache_timeout = 60
-    def get(self, key):
-        if key in self.cache:
-            data, timestamp = self.cache[key]
-            if time.time() - timestamp < self.cache_timeout:
-                return data
-        return None
-    def set(self, key, value):
-        self.cache[key] = (value, time.time())
-    def clear(self):
-        self.cache = {}
+        self.user_last_action = {}
+        self.global_semaphore = asyncio.Semaphore(GLOBAL_RATE_LIMIT)
+        self.lock = threading.Lock()
+        
+    async def acquire(self, user_id):
+        """Đợi cho đến khi có thể thực hiện action"""
+        async with self.global_semaphore:
+            with self.lock:
+                last_time = self.user_last_action.get(user_id, 0)
+                current_time = time.time()
+                wait_time = MIN_UPDATE_INTERVAL - (current_time - last_time)
+                
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
+                
+                self.user_last_action[user_id] = time.time()
+                return True
+    
+    def check_can_update(self, user_id):
+        """Kiểm tra xem có thể update ngay không"""
+        with self.lock:
+            last_time = self.user_last_action.get(user_id, 0)
+            return time.time() - last_time >= MIN_UPDATE_INTERVAL
 
-cache_manager = CacheManager()
+rate_limiter = RateLimiter()
+
+class ConfigManager:
+    def __init__(self):
+        self.config = None
+        self.last_update = 0
+        self.github = Github(GITHUB_TOKEN)
+        self.repo = self.github.get_repo(GITHUB_REPO)
+        self.lock = threading.Lock()
+        
+    def load_config(self):
+        with self.lock:
+            try:
+                if self.config and (time.time() - self.last_update < CONFIG_UPDATE_INTERVAL):
+                    return self.config
+                
+                try:
+                    file_content = self.repo.get_contents(GITHUB_CONFIG_PATH)
+                    config_str = base64.b64decode(file_content.content).decode()
+                    self.config = json.loads(config_str)
+                    
+                    with open(LOCAL_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(self.config, f, ensure_ascii=False, indent=2)
+                    
+                    self.last_update = time.time()
+                    logging.info("✅ Config loaded from GitHub")
+                    return self.config
+                    
+                except Exception as e:
+                    logging.warning(f"⚠️ Cannot load from GitHub: {e}")
+                    try:
+                        with open(LOCAL_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                            self.config = json.load(f)
+                        logging.info("✅ Using local config")
+                        return self.config
+                    except:
+                        logging.error("❌ No config found, please create game_config.json on GitHub")
+                        return None
+                        
+            except Exception as e:
+                logging.error(f"❌ Config error: {e}")
+                return None
+    
+    def reload_config(self):
+        with self.lock:
+            self.last_update = 0
+            return self.load_config()
+    
+    def get_fish_ranks(self):
+        config = self.load_config()
+        if not config:
+            return {}
+        ranks = {}
+        for rank in config.get("FISH_RANKS", []):
+            ranks[rank["id"]] = rank
+        return ranks
+    
+    def get_fish_types(self):
+        config = self.load_config()
+        if not config:
+            return {}
+        fish = {}
+        for f in config.get("FISH_TYPES", []):
+            fish[f["name"]] = f
+        return fish
+    
+    def get_fishing_rods(self):
+        config = self.load_config()
+        if not config:
+            return {}
+        rods = {}
+        for rod in config.get("FISHING_RODS", []):
+            rods[rod["id"]] = rod
+        return rods
+
+config_manager = ConfigManager()
+
+class AutoFishingManager:
+    def __init__(self):
+        self.active_sessions = {}
+        self.session_stats = {}
+        self.message_info = {}
+        self.lock = threading.Lock()
+        self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_AUTO)
+        self.flood_control = {}  # Track flood control per user
+        
+    def add_session(self, uid, mid, cid):
+        with self.lock:
+            self.active_sessions[uid] = {
+                "active": True,
+                "start_time": time.time(),
+                "last_update": 0
+            }
+            self.message_info[uid] = {
+                "mid": mid,
+                "cid": cid,
+                "last_update": time.time()
+            }
+            self.session_stats[uid] = {
+                "count": 0,
+                "coins": 0,
+                "exp": 0,
+                "rarity_count": {r: 0 for r in ["C","U","R","E","L","M","S","X","Z"]},
+                "best_catch": None,
+                "best_value": 0
+            }
+            self.flood_control[uid] = {
+                "retry_count": 0,
+                "last_error": 0
+            }
+    
+    def stop_session(self, uid):
+        with self.lock:
+            if uid in self.active_sessions:
+                self.active_sessions[uid]["active"] = False
+    
+    def is_active(self, uid):
+        with self.lock:
+            return uid in self.active_sessions and self.active_sessions[uid]["active"]
+    
+    def get_message_info(self, uid):
+        with self.lock:
+            return self.message_info.get(uid, {}).copy()
+    
+    def update_message_info(self, uid, mid, cid):
+        with self.lock:
+            self.message_info[uid] = {
+                "mid": mid,
+                "cid": cid,
+                "last_update": time.time()
+            }
+    
+    def update_stats(self, uid, result):
+        with self.lock:
+            if uid in self.session_stats:
+                stats = self.session_stats[uid]
+                stats["count"] += 1
+                
+                if result and result.get("success"):
+                    stats["coins"] += result["reward"] - 10
+                    stats["exp"] += result["exp"]
+                    stats["rarity_count"][result["rarity"]] += 1
+                    
+                    if result["reward"] > stats["best_value"]:
+                        stats["best_catch"] = result["fish"]
+                        stats["best_value"] = result["reward"]
+                else:
+                    stats["coins"] -= 10
+    
+    def get_stats(self, uid):
+        with self.lock:
+            return self.session_stats.get(uid, {}).copy()
+    
+    def get_session_info(self, uid):
+        with self.lock:
+            return self.active_sessions.get(uid, {}).copy()
+    
+    def should_update(self, uid):
+        """Kiểm tra xem có nên update message không"""
+        with self.lock:
+            if uid not in self.active_sessions:
+                return False
+            session = self.active_sessions[uid]
+            current_time = time.time()
+            time_since_update = current_time - session.get("last_update", 0)
+            
+            # Update nếu đã qua đủ thời gian và không có flood control
+            if time_since_update >= AUTO_UPDATE_INTERVAL:
+                session["last_update"] = current_time
+                return True
+            return False
+    
+    def cleanup_session(self, uid):
+        with self.lock:
+            if uid in self.active_sessions:
+                del self.active_sessions[uid]
+            if uid in self.session_stats:
+                del self.session_stats[uid]
+            if uid in self.message_info:
+                del self.message_info[uid]
+            if uid in self.flood_control:
+                del self.flood_control[uid]
+
+auto_manager = AutoFishingManager()
+
+def get_level_exp(level):
+    return 1000 if level <= 10 else int(1000 * (1.5 ** ((level - 10) // 10)))
 
 def get_next_sunday():
     now = datetime.now(VIETNAM_TZ)
-    days_until_sunday = (6 - now.weekday()) % 7
-    if days_until_sunday == 0 and now.hour >= 0:
-        days_until_sunday = 7
-    next_sunday = now + timedelta(days=days_until_sunday)
-    return next_sunday.replace(hour=0, minute=0, second=0, microsecond=0)
+    days = (6 - now.weekday()) % 7
+    if days == 0 and now.hour >= 0:
+        days = 7
+    return (now + timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
 
-def should_reset_weekly():
+def should_reset():
     now = datetime.now(VIETNAM_TZ)
     return now.weekday() == 6 and now.hour == 0 and now.minute < 1
 
 def get_user_rank(exp):
-    current_rank = FISH_RANKS["1"]
-    rank_level = 1
-    for level, rank_data in FISH_RANKS.items():
-        if exp >= rank_data["exp_required"]:
-            current_rank = rank_data
-            rank_level = int(level)
+    FISH_RANKS = config_manager.get_fish_ranks()
+    if not FISH_RANKS:
+        return {"name": "🎣 Tân Thủ", "exp_required": 0, "coin_bonus": 1.0, "fish_bonus": 1.0, "luck_bonus": 1.0}, 1, None, 0
+    
+    rank = list(FISH_RANKS.values())[0]
+    level = 1
+    
+    for rid, r in FISH_RANKS.items():
+        if exp >= r["exp_required"]:
+            rank = r
+            level = int(rid)
         else:
             break
-    next_rank = FISH_RANKS.get(str(rank_level + 1)) if rank_level < len(FISH_RANKS) else None
-    exp_to_next = next_rank["exp_required"] - exp if next_rank else 0
-    return current_rank, rank_level, next_rank, exp_to_next
+    
+    next_r = FISH_RANKS.get(str(level + 1)) if level < len(FISH_RANKS) else None
+    exp_next = next_r["exp_required"] - exp if next_r else 0
+    return rank, level, next_r, exp_next
 
-def format_number(num):
-    if num >= 1000000000:
-        return f"{num/1000000000:.1f}B".replace('.0B', 'B')
-    elif num >= 1000000:
-        return f"{num/1000000:.1f}M".replace('.0M', 'M')
-    elif num >= 1000:
-        return f"{num/1000:.1f}K".replace('.0K', 'K')
-    else:
-        return str(num)
+def fmt(num):
+    if num >= 1e12: return f"{num/1e12:.1f}T".replace('.0T', 'T')
+    elif num >= 1e9: return f"{num/1e9:.1f}B".replace('.0B', 'B')
+    elif num >= 1e6: return f"{num/1e6:.1f}M".replace('.0M', 'M')
+    elif num >= 1e3: return f"{num/1e3:.1f}K".replace('.0K', 'K')
+    else: return str(int(num))
 
-class LocalStorage:
+def get_color(r):
+    return {"C":"⚪","U":"🟢","R":"🔵","E":"🟣","L":"🟡","M":"🔴","S":"⚫","X":"💠","Z":"✨"}.get(r,"⚪")
+
+def extract_flood_wait(error_str):
+    """Extract số giây cần đợi từ flood error"""
+    try:
+        match = re.search(r'retry after (\d+)', str(error_str).lower())
+        if match:
+            return int(match.group(1)) + 1
+        return 5
+    except:
+        return 5
+
+def truncate_text(text, max_length=4096):
+    """Cắt text để không vượt quá giới hạn"""
+    if len(text) <= max_length:
+        return text
+    return text[:max_length-3] + "..."
+
+class Cache:
+    def __init__(self):
+        self.data = {}
+        self.timeout = 30
+        self.lock = threading.Lock()
+        
+    def get(self, k):
+        with self.lock:
+            if k in self.data:
+                d, t = self.data[k]
+                if time.time() - t < self.timeout:
+                    return d
+                else:
+                    del self.data[k]
+            return None
+            
+    def set(self, k, v):
+        with self.lock:
+            self.data[k] = (v, time.time())
+            
+    def clear(self):
+        with self.lock:
+            self.data = {}
+
+cache = Cache()
+
+class Storage:
     @staticmethod
-    def save_local(data):
+    def save(data):
         try:
             with open(LOCAL_BACKUP_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logging.error(f"Error saving local: {e}")
+        except:
+            pass
+            
     @staticmethod
-    def load_local():
+    def load():
         try:
             with open(LOCAL_BACKUP_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except:
             return {}
 
-class ResourceMonitor:
+class Monitor:
     @staticmethod
-    def get_system_stats():
-        cpu = psutil.cpu_percent(interval=0.1)
-        mem = psutil.virtual_memory()
-        return {"cpu": cpu, "ram": mem.percent, "ram_used": mem.used/(1024**3), "ram_total": mem.total/(1024**3)}
+    def stats():
+        try:
+            cpu = psutil.cpu_percent(interval=0.1)
+            mem = psutil.virtual_memory()
+            return {"cpu": cpu, "ram": mem.percent}
+        except:
+            return {"cpu": 0, "ram": 0}
+            
     @staticmethod
-    def check_resources():
-        stats = ResourceMonitor.get_system_stats()
-        if stats["cpu"] > 80 or stats["ram"] > 85:
-            gc.collect()
-            return False
-        return True
+    def check():
+        try:
+            s = Monitor.stats()
+            if s["cpu"] > 90 or s["ram"] > 90:
+                gc.collect()
+                time.sleep(0.1)
+                return False
+            return True
+        except:
+            return True
 
 class DataManager:
     def __init__(self):
         self.github = Github(GITHUB_TOKEN)
         self.repo = self.github.get_repo(GITHUB_REPO)
-        self.auto_fishing_tasks = {}
-        self.save_queue = []
+        self.queue = []
         self.lock = threading.Lock()
         self.executor = ThreadPoolExecutor(max_workers=4)
-        self.start_auto_save()
-        self.start_weekly_reset_check()
+        self.last_save = time.time()
+        threading.Thread(target=self.auto_save, daemon=True).start()
+        threading.Thread(target=self.reset_check, daemon=True).start()
     
-    def check_and_reset_weekly(self):
+    def reset_check(self):
         while True:
-            if should_reset_weekly():
-                self.reset_all_users_coins()
-                time.sleep(60)
-            time.sleep(30)
-    
-    def start_weekly_reset_check(self):
-        threading.Thread(target=self.check_and_reset_weekly, daemon=True).start()
-    
-    def reset_all_users_coins(self):
-        try:
-            all_users = {}
             try:
-                file_content = self.repo.get_contents(GITHUB_FILE_PATH)
-                content_str = base64.b64decode(file_content.content).decode()
-                for line in content_str.strip().split('\n'):
+                if should_reset():
+                    self.reset_coins()
+                    time.sleep(60)
+                time.sleep(30)
+            except:
+                time.sleep(60)
+    
+    def reset_coins(self):
+        try:
+            users = {}
+            try:
+                file = self.repo.get_contents(GITHUB_FILE_PATH)
+                for line in base64.b64decode(file.content).decode().strip().split('\n'):
                     if line.strip():
                         try:
-                            user_data = json.loads(line)
-                            if 'user_id' in user_data:
-                                user_data['coins'] = 100
-                                user_data['last_reset'] = datetime.now(VIETNAM_TZ).isoformat()
-                                all_users[user_data['user_id']] = user_data
+                            d = json.loads(line)
+                            if 'user_id' in d:
+                                d['coins'] = 100
+                                d['last_reset'] = datetime.now(VIETNAM_TZ).isoformat()
+                                users[d['user_id']] = d
                         except:
                             pass
             except:
                 pass
-            if all_users:
-                lines = [json.dumps(data, ensure_ascii=False) for data in all_users.values()]
-                content = '\n'.join(lines)
+            
+            if users:
+                content = '\n'.join([json.dumps(d, ensure_ascii=False) for d in users.values()])
                 try:
                     file = self.repo.get_contents(GITHUB_FILE_PATH)
-                    self.repo.update_file(GITHUB_FILE_PATH, f"Reset - {datetime.now().strftime('%Y-%m-%d %H:%M')}", content, file.sha)
+                    self.repo.update_file(GITHUB_FILE_PATH, f"Reset {datetime.now().strftime('%Y%m%d')}", content, file.sha)
                 except:
-                    self.repo.create_file(GITHUB_FILE_PATH, f"Reset - {datetime.now().strftime('%Y-%m-%d %H:%M')}", content)
-            cache_manager.clear()
-        except Exception as e:
-            logging.error(f"Reset error: {e}")
+                    self.repo.create_file(GITHUB_FILE_PATH, f"Reset {datetime.now().strftime('%Y%m%d')}", content)
+            cache.clear()
+        except:
+            pass
     
-    def load_user_from_github(self, user_id):
-        cached = cache_manager.get(f"user_{user_id}")
+    def load_user(self, uid):
+        uid = str(uid)
+        cached = cache.get(f"u_{uid}")
         if cached:
             return cached
+            
         try:
-            file_content = self.repo.get_contents(GITHUB_FILE_PATH)
-            content_str = base64.b64decode(file_content.content).decode()
-            for line in content_str.strip().split('\n'):
+            file = self.repo.get_contents(GITHUB_FILE_PATH)
+            for line in base64.b64decode(file.content).decode().strip().split('\n'):
                 if line.strip():
                     try:
-                        user_data = json.loads(line)
-                        if user_data.get('user_id') == str(user_id):
-                            user_data.setdefault('owned_rods', ["1"])
-                            user_data.setdefault('inventory', {"rod": "1", "fish": {}})
-                            user_data.setdefault('total_exp', user_data.get('exp', 0))
-                            user_data.setdefault('chanle_win', 0)
-                            user_data.setdefault('chanle_lose', 0)
-                            cache_manager.set(f"user_{user_id}", user_data)
-                            return user_data
+                        d = json.loads(line)
+                        if d.get('user_id') == uid:
+                            d.setdefault('owned_rods', ["1"])
+                            d.setdefault('inventory', {"rod": "1", "fish": {}})
+                            d.setdefault('total_exp', d.get('exp', 0))
+                            d.setdefault('chanle_win', 0)
+                            d.setdefault('chanle_lose', 0)
+                            d.setdefault('level_exp', 0)
+                            cache.set(f"u_{uid}", d)
+                            return d
                     except:
                         pass
         except:
-            local_data = LocalStorage.load_local()
-            if str(user_id) in local_data:
-                return local_data[str(user_id)]
-        return self.create_new_user(str(user_id))
+            local = Storage.load()
+            if uid in local:
+                return local[uid]
+        return self.new_user(uid)
     
-    def create_new_user(self, user_id):
-        return {"user_id": str(user_id), "username": "", "coins": 100, "exp": 0, "total_exp": 0, "level": 1,
-                "fishing_count": 0, "win_count": 0, "lose_count": 0, "chanle_win": 0, "chanle_lose": 0,
-                "owned_rods": ["1"], "inventory": {"rod": "1", "fish": {}}, "created_at": datetime.now().isoformat()}
+    def new_user(self, uid):
+        return {
+            "user_id": str(uid), 
+            "username": "", 
+            "coins": 100, 
+            "exp": 0, 
+            "total_exp": 0, 
+            "level": 1,
+            "level_exp": 0, 
+            "fishing_count": 0, 
+            "win_count": 0, 
+            "lose_count": 0, 
+            "chanle_win": 0, 
+            "chanle_lose": 0, 
+            "owned_rods": ["1"], 
+            "inventory": {"rod": "1", "fish": {}}, 
+            "created_at": datetime.now().isoformat()
+        }
     
-    def save_user_to_github(self, user_data):
+    def save_user(self, data):
         with self.lock:
-            cache_manager.set(f"user_{user_data['user_id']}", user_data)
-            self.save_queue.append(user_data)
+            cache.set(f"u_{data['user_id']}", data)
+            self.queue.append(data)
+            
+            if len(self.queue) >= 10 or (time.time() - self.last_save > SAVE_INTERVAL):
+                self.executor.submit(self.batch_save)
     
-    def batch_save_to_github(self):
-        if not self.save_queue or not ResourceMonitor.check_resources():
-            return
+    def batch_save(self):
         with self.lock:
-            if not self.save_queue:
+            if not self.queue:
                 return
-            users_to_save = self.save_queue.copy()
-            self.save_queue.clear()
+            to_save = self.queue.copy()
+            self.queue.clear()
+            self.last_save = time.time()
+            
         try:
-            all_users = {}
+            users = {}
             try:
-                file_content = self.repo.get_contents(GITHUB_FILE_PATH)
-                content_str = base64.b64decode(file_content.content).decode()
-                for line in content_str.strip().split('\n'):
+                file = self.repo.get_contents(GITHUB_FILE_PATH)
+                for line in base64.b64decode(file.content).decode().strip().split('\n'):
                     if line.strip():
                         try:
-                            user_data = json.loads(line)
-                            if 'user_id' in user_data:
-                                all_users[user_data['user_id']] = user_data
+                            d = json.loads(line)
+                            if 'user_id' in d:
+                                users[d['user_id']] = d
                         except:
                             pass
             except:
                 pass
-            for user_data in users_to_save:
-                all_users[user_data['user_id']] = user_data
-            LocalStorage.save_local(all_users)
-            lines = [json.dumps(data, ensure_ascii=False) for data in all_users.values()]
-            content = '\n'.join(lines)
+            
+            for d in to_save:
+                users[d['user_id']] = d
+                
+            Storage.save(users)
+            content = '\n'.join([json.dumps(d, ensure_ascii=False) for d in users.values()])
+            
             try:
                 file = self.repo.get_contents(GITHUB_FILE_PATH)
-                self.repo.update_file(GITHUB_FILE_PATH, f"Update - {datetime.now().strftime('%Y-%m-%d %H:%M')}", content, file.sha)
+                self.repo.update_file(GITHUB_FILE_PATH, f"U{datetime.now().strftime('%H%M')}", content, file.sha)
             except:
-                self.repo.create_file(GITHUB_FILE_PATH, f"Create - {datetime.now().strftime('%Y-%m-%d %H:%M')}", content)
-        except Exception as e:
-            logging.error(f"Save error: {e}")
+                self.repo.create_file(GITHUB_FILE_PATH, f"C{datetime.now().strftime('%H%M')}", content)
+        except:
+            pass
     
     def auto_save(self):
         while True:
-            time.sleep(20)
-            if self.save_queue:
-                self.executor.submit(self.batch_save_to_github)
+            try:
+                time.sleep(SAVE_INTERVAL)
+                if self.queue and Monitor.check():
+                    self.batch_save()
+            except:
+                time.sleep(60)
     
-    def start_auto_save(self):
-        threading.Thread(target=self.auto_save, daemon=True).start()
+    def get_user(self, uid):
+        user = self.load_user(uid)
+        user.setdefault('inventory', {"rod": "1", "fish": {}})
+        FISHING_RODS = config_manager.get_fishing_rods()
+        if FISHING_RODS and user['inventory'].get('rod') not in FISHING_RODS:
+            user['inventory']['rod'] = "1"
+        user.setdefault('total_exp', user.get('exp', 0))
+        user.setdefault('chanle_win', 0)
+        user.setdefault('chanle_lose', 0)
+        user.setdefault('level_exp', 0)
+        return user
     
-    def get_user(self, user_id):
-        user_data = self.load_user_from_github(user_id)
-        user_data.setdefault('inventory', {"rod": "1", "fish": {}})
-        if user_data['inventory'].get('rod') not in FISHING_RODS:
-            user_data['inventory']['rod'] = "1"
-        user_data.setdefault('total_exp', user_data.get('exp', 0))
-        user_data.setdefault('chanle_win', 0)
-        user_data.setdefault('chanle_lose', 0)
-        return user_data
+    def update_user(self, uid, data):
+        data['user_id'] = str(uid)
+        self.save_user(data)
     
-    def update_user(self, user_id, data):
-        data['user_id'] = str(user_id)
-        self.save_user_to_github(data)
+    def best_rod(self, owned):
+        FISHING_RODS = config_manager.get_fishing_rods()
+        if not FISHING_RODS:
+            return "1"
+        best = "1"
+        best_val = 0
+        for rid in owned:
+            if rid in FISHING_RODS:
+                val = FISHING_RODS[rid].get('coin_multiplier', 1.0)
+                if val > best_val:
+                    best_val = val
+                    best = rid
+        return best
 
-data_manager = DataManager()
+dm = DataManager()
 
-def get_rarity_color(rarity):
-    return {"common": "⚪", "uncommon": "🟢", "rare": "🔵", "epic": "🟣", 
-            "legendary": "🟡", "mythic": "🔴", "secret": "⚫"}.get(rarity, "⚪")
+def get_rod_name(user):
+    FISHING_RODS = config_manager.get_fishing_rods()
+    if not FISHING_RODS:
+        return "🎣 Cơ bản"
+    rid = user.get('inventory', {}).get('rod', '1')
+    return FISHING_RODS.get(rid, {"name": "🎣 Cơ bản"})['name']
 
-def get_current_rod_name(user):
-    rod_id = user.get('inventory', {}).get('rod', '1')
-    return FISHING_RODS.get(rod_id, FISHING_RODS['1'])['name']
+async def safe_edit_message(bot, chat_id, message_id, text, reply_markup=None, max_retries=3):
+    """Edit message với xử lý lỗi tốt"""
+    text = truncate_text(text)
+    
+    for attempt in range(max_retries):
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return True
+        except Exception as e:
+            error_str = str(e).lower()
+            
+            if "message is not modified" in error_str:
+                return True
+            
+            if "flood" in error_str:
+                wait_time = extract_flood_wait(error_str)
+                logging.warning(f"Flood control, waiting {wait_time}s")
+                await asyncio.sleep(wait_time)
+                continue
+            
+            if "message to edit not found" in error_str:
+                return False
+            
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1.5 * (attempt + 1))
+            else:
+                logging.error(f"Failed to edit message after {max_retries} attempts: {e}")
+                return False
+    
+    return False
 
-async def odd_even_game(user_id, choice, bet_amount=1000):
-    user = data_manager.get_user(user_id)
-    if user["coins"] < bet_amount:
-        return None, f"❌ Không đủ xu! (Có: {format_number(user['coins'])} xu)"
-    user["coins"] -= bet_amount
+async def safe_send_message(bot, chat_id, text, reply_markup=None, max_retries=3):
+    """Send message với xử lý lỗi"""
+    text = truncate_text(text)
+    
+    for attempt in range(max_retries):
+        try:
+            msg = await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return msg
+        except Exception as e:
+            error_str = str(e).lower()
+            
+            if "flood" in error_str:
+                wait_time = extract_flood_wait(error_str)
+                logging.warning(f"Flood control on send, waiting {wait_time}s")
+                await asyncio.sleep(wait_time)
+                continue
+            
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1.5 * (attempt + 1))
+            else:
+                logging.error(f"Failed to send message: {e}")
+                return None
+    
+    return None
+
+async def chanle(uid, choice, bet=1000):
+    user = dm.get_user(uid)
+    if user["coins"] < bet:
+        return None, f"❌ Cần {fmt(bet)} xu!"
+    user["coins"] -= bet
     dice = random.randint(1, 6)
-    dice_is_even = (dice % 2 == 0)
-    player_wins = (choice == "even" and dice_is_even) or (choice == "odd" and not dice_is_even)
-    if player_wins:
-        winnings = int(bet_amount * 2.5)
-        user["coins"] += winnings
+    win = (choice == "even" and dice % 2 == 0) or (choice == "odd" and dice % 2 != 0)
+    
+    if win:
+        prize = int(bet * 2.5)
+        user["coins"] += prize
         user["chanle_win"] = user.get("chanle_win", 0) + 1
-        data_manager.update_user(user_id, user)
-        return {"success": True, "dice": dice, "winnings": winnings, "coins": user["coins"], "choice": choice}, None
+        dm.update_user(uid, user)
+        return {"success": True, "dice": dice, "win": prize, "coins": user["coins"]}, None
     else:
         user["chanle_lose"] = user.get("chanle_lose", 0) + 1
-        data_manager.update_user(user_id, user)
-        return {"success": False, "dice": dice, "coins": user["coins"], "choice": choice}, None
+        dm.update_user(uid, user)
+        return {"success": False, "dice": dice, "coins": user["coins"]}, None
 
-async def process_fishing(user_id, is_auto=False):
-    user = data_manager.get_user(user_id)
+async def fish(uid, auto=False):
+    user = dm.get_user(uid)
     if user["coins"] < 10:
         return None, "❌ Cần 10 xu!"
     user["coins"] -= 10
-    rod_id = user.get('inventory', {}).get('rod', '1')
-    rod_data = FISHING_RODS.get(rod_id, FISHING_RODS['1'])
-    current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
     
-    luck_bonus = 1.0
-    if not is_auto:
-        if random.random() < 0.1:
-            luck_bonus = 2.0
-        elif random.random() < 0.3:
-            luck_bonus = 1.5
+    FISHING_RODS = config_manager.get_fishing_rods()
+    FISH_TYPES = config_manager.get_fish_types()
+    
+    if not FISHING_RODS or not FISH_TYPES:
+        user["coins"] += 10
+        dm.update_user(uid, user)
+        return None, "❌ Config chưa được load!"
+    
+    rod = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), list(FISHING_RODS.values())[0])
+    rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+    
+    luck = 1.0
+    if not auto:
+        r = random.random()
+        if r < 0.01: luck = 5.0
+        elif r < 0.03: luck = 3.0
+        elif r < 0.08: luck = 2.0
+        elif r < 0.2: luck = 1.5
+    else:
+        if random.random() < 0.005: luck = 2.0
+        elif random.random() < 0.02: luck = 1.5
+    
+    luck *= rank.get('luck_bonus', 1.0)
     
     rand = random.uniform(0, 100)
-    cumulative = 0
-    caught_fish = None
+    total = 0
+    caught = None
     
-    fish_items = list(FISH_TYPES.items())
-    random.shuffle(fish_items)
+    items = list(FISH_TYPES.items())
+    random.shuffle(items)
     
-    for fish_name, fish_data in fish_items:
-        rarity = fish_data['rarity']
-        chance_map = {'common': rod_data['common_bonus'], 'uncommon': rod_data['common_bonus'],
-                     'rare': rod_data['rare_bonus'], 'epic': rod_data['epic_bonus'],
-                     'legendary': rod_data['legendary_bonus'], 'mythic': rod_data['mythic_bonus'],
-                     'secret': rod_data['secret_bonus']}
-        chance = fish_data["chance"] * chance_map.get(rarity, 1.0) * current_rank['fish_bonus'] * luck_bonus
-        if is_auto and rarity in ['epic', 'legendary', 'mythic', 'secret']:
-            chance *= 0.7
-        cumulative += chance
-        if rand <= cumulative:
-            caught_fish = fish_name
-            reward = int(fish_data["value"] * current_rank['coin_bonus'])
-            exp = int(fish_data["exp"] * rod_data.get('exp_bonus', 1.0))
+    for name, data in items:
+        chance = data["chance"] * rod.get('bonus', 1.0) * rank.get('fish_bonus', 1.0) * luck
+        
+        if auto:
+            if data['rarity'] in ['L', 'M', 'S', 'X', 'Z']:
+                chance *= 0.2
+            elif data['rarity'] == 'E':
+                chance *= 0.5
+            elif data['rarity'] == 'R':
+                chance *= 0.7
+        
+        total += chance
+        if rand <= total:
+            caught = name
+            reward = int(data["value"] * rank.get('coin_bonus', 1.0) * rod.get('coin_multiplier', 1.0))
+            exp = int(data["exp"] * rod.get('exp_bonus', 1.0))
             break
     
-    if caught_fish:
+    if caught:
         user['inventory'].setdefault('fish', {})
-        user['inventory']['fish'][caught_fish] = user['inventory']['fish'].get(caught_fish, 0) + 1
+        user['inventory']['fish'][caught] = user['inventory']['fish'].get(caught, 0) + 1
         user["coins"] += reward
         user["exp"] += exp
         user["total_exp"] = user.get('total_exp', 0) + exp
-        new_level = (user["exp"] // 100) + 1
-        leveled_up = new_level > user["level"]
-        if leveled_up:
-            user["level"] = new_level
+        user["level_exp"] = user.get('level_exp', 0) + exp
+        
+        exp_req = get_level_exp(user["level"])
+        leveled = False
+        while user["level_exp"] >= exp_req:
+            user["level_exp"] -= exp_req
+            user["level"] += 1
+            exp_req = get_level_exp(user["level"])
+            leveled = True
+        
         user["fishing_count"] += 1
         user["win_count"] += 1
-        data_manager.update_user(user_id, user)
-        return {"success": True, "fish": caught_fish, "rarity": FISH_TYPES[caught_fish]['rarity'],
-                "reward": reward, "exp": exp, "leveled_up": leveled_up, "new_level": user["level"],
-                "coins": user["coins"], "luck_bonus": luck_bonus}, None
+        dm.update_user(uid, user)
+        
+        return {
+            "success": True, 
+            "fish": caught, 
+            "rarity": FISH_TYPES[caught]['rarity'],
+            "reward": reward, 
+            "exp": exp, 
+            "leveled": leveled, 
+            "level": user["level"],
+            "coins": user["coins"], 
+            "luck": luck
+        }, None
     else:
         user["fishing_count"] += 1
         user["lose_count"] += 1
-        data_manager.update_user(user_id, user)
+        dm.update_user(uid, user)
         return {"success": False, "coins": user["coins"]}, None
 
-async def auto_fishing_task(user_id, message_id, chat_id, bot):
-    count = 0
-    total_coins = 0
-    total_exp = 0
-    rarity_count = {r: 0 for r in ["common", "uncommon", "rare", "epic", "legendary", "mythic", "secret"]}
-    last_update_time = time.time()
-    
-    try:
-        data_manager.auto_fishing_tasks[user_id] = True
+async def auto_fish_optimized(uid, mid, cid, bot):
+    """Auto fishing với rate limiting và error handling tốt"""
+    async with auto_manager.semaphore:
+        auto_manager.add_session(uid, mid, cid)
         
-        while user_id in data_manager.auto_fishing_tasks and data_manager.auto_fishing_tasks.get(user_id, False):
-            if count % 5 == 0 and not ResourceMonitor.check_resources():
-                await asyncio.sleep(3)
-                continue
-            
-            count += 1
-            result, error = await process_fishing(user_id, is_auto=True)
-            
-            if error:
-                try:
-                    await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
-                        text=f"⛔ **AUTO DỪNG**\n{error}\n\n📊 Kết quả:\n🔄 Đã câu: {count-1} lần\n💰 Thu được: {format_number(total_coins)} xu\n⭐ Tổng EXP: {total_exp}",
-                        parse_mode='Markdown')
-                except:
-                    await bot.send_message(chat_id=chat_id,
-                        text=f"⛔ **AUTO DỪNG**\n{error}\n\n📊 Kết quả:\n🔄 Đã câu: {count-1} lần\n💰 Thu được: {format_number(total_coins)} xu",
-                        parse_mode='Markdown')
-                break
-            
-            if result and result["success"]:
-                rarity_count[result["rarity"]] += 1
-                total_coins += result["reward"] - 10
-                total_exp += result["exp"]
-            else:
-                total_coins -= 10
-            
-            current_time = time.time()
-            if current_time - last_update_time >= 2 or count % 3 == 0:
-                last_update_time = current_time
-                user = data_manager.get_user(user_id)
-                current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-                rod_data = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), FISHING_RODS['1'])
-                
-                status_text = f"🤖 **AUTO FISHING**\n\n📊 **Thống kê:**\n├ 🔄 Số lần: {count}\n├ 💰 Thu được: {format_number(total_coins)} xu\n├ ⭐ Tổng EXP: {total_exp}\n└ 💰 Xu hiện tại: {format_number(user['coins'])}\n\n🏆 Rank: {current_rank['name']}\n📈 Buff: 💰x{current_rank['coin_bonus']} | 🎣x{current_rank['fish_bonus']}\n\n📈 Độ hiếm: "
-                for rarity, cnt in rarity_count.items():
-                    if cnt > 0:
-                        status_text += f"{get_rarity_color(rarity)}{cnt} "
-                status_text += f"\n\n🎣 Cần: {rod_data['name']}\n⏱️ Tốc độ: {rod_data['auto_speed']}s\n\n💡 Dùng /stop hoặc nút bên dưới để dừng"
-                
-                keyboard = [[InlineKeyboardButton("🛑 DỪNG AUTO", callback_data='stop_auto')]]
-                
-                try:
-                    await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=status_text,
-                        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-                except Exception as e:
-                    if "message to edit not found" in str(e).lower() or "message can't be edited" in str(e).lower():
-                        try:
-                            new_msg = await bot.send_message(chat_id=chat_id, text=status_text,
-                                reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-                            message_id = new_msg.message_id
-                        except:
-                            pass
-            
-            user = data_manager.get_user(user_id)
-            rod_data = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), FISHING_RODS['1'])
-            await asyncio.sleep(rod_data['auto_speed'])
-    
-    except Exception as e:
-        logging.error(f"Auto fishing error for user {user_id}: {e}")
-    
-    finally:
-        if user_id in data_manager.auto_fishing_tasks:
-            del data_manager.auto_fishing_tasks[user_id]
+        last_full_update = 0
+        error_count = 0
+        consecutive_errors = 0
+        update_failures = 0
         
         try:
-            final_text = f"✅ **AUTO KẾT THÚC**\n\n📊 **Tổng kết:**\n├ 🔄 Tổng câu: {count} lần\n├ 💰 Thu được: {format_number(total_coins)} xu\n├ ⭐ Tổng EXP: {total_exp}\n└ 📈 Độ hiếm: "
-            for rarity, cnt in rarity_count.items():
-                if cnt > 0:
-                    final_text += f"{get_rarity_color(rarity)}{cnt} "
-            final_text += "\n\n💡 Dùng /menu để chơi tiếp"
-            await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=final_text, parse_mode='Markdown')
-        except:
+            # Initial message
+            await rate_limiter.acquire(uid)
+            initial_msg = await safe_edit_message(
+                bot, cid, mid,
+                "🤖 **KHỞI ĐỘNG AUTO...**\n\n⏳ Đang chuẩn bị..."
+            )
+            
+            if not initial_msg:
+                logging.error(f"Failed to start auto for {uid}")
+                return
+            
+            while auto_manager.is_active(uid):
+                # Check system resources
+                if not Monitor.check():
+                    await asyncio.sleep(2)
+                    continue
+                
+                # Fishing với delay ngẫu nhiên
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+                
+                res, err = await fish(uid, auto=True)
+                
+                if err:
+                    error_count += 1
+                    consecutive_errors += 1
+                    
+                    if error_count >= 5 or consecutive_errors >= 3:
+                        await rate_limiter.acquire(uid)
+                        await safe_edit_message(
+                            bot, cid, mid,
+                            f"⛔ **AUTO DỪNG**\n\n{err}\n\nLỗi liên tục!"
+                        )
+                        break
+                    
+                    await asyncio.sleep(3)
+                    continue
+                
+                # Reset consecutive errors on success
+                consecutive_errors = 0
+                auto_manager.update_stats(uid, res)
+                
+                # Check if should update message
+                current_time = time.time()
+                time_since_update = current_time - last_full_update
+                
+                if time_since_update >= AUTO_UPDATE_INTERVAL and auto_manager.should_update(uid):
+                    # Rate limit the update
+                    if rate_limiter.check_can_update(uid):
+                        await rate_limiter.acquire(uid)
+                        
+                        user = dm.get_user(uid)
+                        stats = auto_manager.get_stats(uid)
+                        session_info = auto_manager.get_session_info(uid)
+                        
+                        if not session_info:
+                            break
+                        
+                        runtime = int(current_time - session_info.get('start_time', current_time))
+                        rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+                        
+                        # Create compact message
+                        txt = f"🤖 **AUTO**\n"
+                        txt += f"📊 {stats['count']} câu | ⏱️ {runtime}s\n"
+                        txt += f"💰 +{fmt(stats['coins'])} | ⭐ +{stats['exp']}\n"
+                        txt += f"💰 Xu: {fmt(user['coins'])}\n"
+                        
+                        # Rarity summary
+                        rarity_line = ""
+                        for r in ["Z", "X", "S", "M", "L", "E", "R", "U", "C"]:
+                            if stats['rarity_count'][r] > 0:
+                                rarity_line += f"{get_color(r)}{stats['rarity_count'][r]} "
+                        
+                        if rarity_line:
+                            txt += f"\n{rarity_line}\n"
+                        
+                        if stats['best_catch']:
+                            txt += f"\n🎯 Best: {stats['best_catch'][:20]}\n"
+                        
+                        txt += f"\n🔄 Update: {AUTO_UPDATE_INTERVAL}s"
+                        
+                        kb = [
+                            [InlineKeyboardButton("🛑 DỪNG", callback_data='stop_auto')],
+                            [InlineKeyboardButton("↩️ Menu", callback_data='back_menu_auto')]
+                        ]
+                        
+                        success = await safe_edit_message(
+                            bot, cid, mid, txt,
+                            reply_markup=InlineKeyboardMarkup(kb)
+                        )
+                        
+                        if success:
+                            last_full_update = current_time
+                            update_failures = 0
+                        else:
+                            update_failures += 1
+                            
+                            # Try sending new message if too many failures
+                            if update_failures >= 3:
+                                new_msg = await safe_send_message(
+                                    bot, cid, txt,
+                                    reply_markup=InlineKeyboardMarkup(kb)
+                                )
+                                if new_msg:
+                                    auto_manager.update_message_info(uid, new_msg.message_id, cid)
+                                    mid = new_msg.message_id
+                                    update_failures = 0
+                
+                # Delay based on rod speed với jitter
+                user = dm.get_user(uid)
+                FISHING_RODS = config_manager.get_fishing_rods()
+                rod = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), {"auto_speed": 4.0}) if FISHING_RODS else {"auto_speed": 4.0}
+                
+                base_delay = rod.get('auto_speed', 4.0)
+                jitter = random.uniform(-0.5, 0.5)
+                actual_delay = max(2.5, base_delay + jitter)  # Minimum 2.5s
+                
+                await asyncio.sleep(actual_delay)
+        
+        except asyncio.CancelledError:
+            logging.info(f"Auto fishing cancelled for {uid}")
+        except Exception as e:
+            logging.error(f"Auto error for {uid}: {e}")
+            logging.error(traceback.format_exc())
+        
+        finally:
+            # Cleanup và final message
+            stats = auto_manager.get_stats(uid)
+            auto_manager.cleanup_session(uid)
+            
             try:
-                await bot.send_message(chat_id=chat_id, text=final_text, parse_mode='Markdown')
+                await rate_limiter.acquire(uid)
+                
+                txt = f"✅ **KẾT THÚC**\n\n"
+                txt += f"📊 Tổng: {stats['count']} câu\n"
+                txt += f"💰 Thu: +{fmt(stats['coins'])}\n"
+                txt += f"⭐ EXP: +{stats['exp']}\n"
+                
+                if stats['best_catch']:
+                    txt += f"\n🎯 Tốt nhất: {stats['best_catch'][:30]}"
+                
+                kb = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+                
+                await safe_edit_message(
+                    bot, cid, mid, txt,
+                    reply_markup=InlineKeyboardMarkup(kb)
+                )
             except:
                 pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_name = update.effective_user.username or update.effective_user.first_name
-    user = data_manager.get_user(user_id)
-    user["username"] = f"@{user_name}" if update.effective_user.username else user_name
-    data_manager.update_user(user_id, user)
-    current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-    stats = ResourceMonitor.get_system_stats()
-    next_reset = get_next_sunday()
-    await update.message.reply_text(f"🎮 **FISHING GAME**\n\n👤 {user['username']}\n💰 {format_number(user['coins'])} xu\n⭐ Lv.{user['level']}\n🎯 {format_number(user.get('total_exp', 0))} EXP\n🏆 {current_rank['name']}\n🎣 {get_current_rod_name(user)}\n\n⏰ Reset: CN {next_reset.strftime('%d/%m %H:%M')}\n\n/menu - Menu game\n/stop - Dừng auto\n\n💻 CPU {stats['cpu']:.1f}% | RAM {stats['ram']:.1f}%", parse_mode='Markdown')
+    uid = update.effective_user.id
+    
+    # Rate limiting
+    await rate_limiter.acquire(uid)
+    
+    name = update.effective_user.username or update.effective_user.first_name
+    user = dm.get_user(uid)
+    user["username"] = f"@{name}" if update.effective_user.username else name
+    dm.update_user(uid, user)
+    rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+    s = Monitor.stats()
+    reset = get_next_sunday()
+    
+    txt = truncate_text(
+        f"🎮 **GAME CÂU CÁ**\n\n"
+        f"👤 {user['username']}\n"
+        f"💰 {fmt(user['coins'])} xu\n"
+        f"⭐ Lv.{user['level']}\n"
+        f"🎯 {fmt(user.get('total_exp', 0))} EXP\n"
+        f"🏆 {rank['name']}\n"
+        f"🎣 {get_rod_name(user)}\n\n"
+        f"⏰ Reset: CN {reset.strftime('%d/%m')}\n\n"
+        f"/menu - Menu\n"
+        f"/stop - Dừng auto\n"
+        f"/reload - Reload config\n\n"
+        f"💻 CPU {s['cpu']:.0f}% RAM {s['ram']:.0f}%"
+    )
+    
+    await update.message.reply_text(txt, parse_mode='Markdown')
+
+async def reload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    await rate_limiter.acquire(uid)
+    
+    config_manager.reload_config()
+    await update.message.reply_text("✅ **Config đã được reload!**\n\n/menu", parse_mode='Markdown')
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = data_manager.get_user(user_id)
+    uid = update.effective_user.id
+    
+    # Rate limiting
+    await rate_limiter.acquire(uid)
+    
+    user = dm.get_user(uid)
     if not user.get("username"):
         user["username"] = f"@{update.effective_user.username}" if update.effective_user.username else update.effective_user.first_name
-        data_manager.update_user(user_id, user)
-    current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-    keyboard = [
-        [InlineKeyboardButton("🎣 Câu Cá", callback_data='game_fishing'),
-         InlineKeyboardButton("🤖 Auto", callback_data='auto_fishing')],
-        [InlineKeyboardButton("🎣 Shop Cần", callback_data='shop_rods'),
-         InlineKeyboardButton("🎲 Chẵn Lẻ", callback_data='game_chanle')],
-        [InlineKeyboardButton("🎒 Kho Đồ", callback_data='view_inventory'),
-         InlineKeyboardButton("📊 Thống Kê", callback_data='view_stats')],
-        [InlineKeyboardButton("🏆 BXH Xu", callback_data='leaderboard_coins'),
-         InlineKeyboardButton("🏆 BXH Rank", callback_data='leaderboard_rank')],
-        [InlineKeyboardButton("🏆 Hệ Thống Rank", callback_data='view_rank'),
-         InlineKeyboardButton("📖 Hướng Dẫn", callback_data='help')]
+        dm.update_user(uid, user)
+    
+    rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+    kb = [
+        [InlineKeyboardButton("🎣 Câu", callback_data='fish'),
+         InlineKeyboardButton("🤖 Auto", callback_data='auto')],
+        [InlineKeyboardButton("🎣 Shop", callback_data='shop'),
+         InlineKeyboardButton("🎲 Chẵn Lẻ", callback_data='chanle')],
+        [InlineKeyboardButton("🎒 Kho", callback_data='inv'),
+         InlineKeyboardButton("📊 Stats", callback_data='stats')],
+        [InlineKeyboardButton("🏆 Top Xu", callback_data='top_coins'),
+         InlineKeyboardButton("🏆 Top Rank", callback_data='top_rank')],
+        [InlineKeyboardButton("🏆 Rank", callback_data='rank'),
+         InlineKeyboardButton("📖 Help", callback_data='help')]
     ]
-    next_reset = get_next_sunday()
-    await update.message.reply_text(f"🎮 **MENU**\n\n👤 {user['username']} Lv.{user['level']}\n💰 {format_number(user['coins'])} xu\n⭐ {format_number(user.get('total_exp', 0))} EXP\n🏆 {current_rank['name']}\n🎣 {get_current_rod_name(user)}\n\n⏰ Reset: CN {next_reset.strftime('%d/%m')}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    
+    reset = get_next_sunday()
+    exp_req = get_level_exp(user['level'])
+    exp_prog = user.get('level_exp', 0)
+    
+    txt = truncate_text(
+        f"🎮 **MENU**\n\n"
+        f"👤 {user['username']} Lv.{user['level']}\n"
+        f"💰 {fmt(user['coins'])} xu\n"
+        f"⭐ {fmt(user.get('total_exp', 0))} EXP\n"
+        f"📊 {exp_prog}/{exp_req}\n"
+        f"🏆 {rank['name']}\n"
+        f"🎣 {get_rod_name(user)}\n\n"
+        f"⏰ Reset: CN {reset.strftime('%d/%m')}"
+    )
+    
+    await update.message.reply_text(
+        txt, 
+        reply_markup=InlineKeyboardMarkup(kb), 
+        parse_mode='Markdown'
+    )
 
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in data_manager.auto_fishing_tasks:
-        data_manager.auto_fishing_tasks[user_id] = False
-        await update.message.reply_text("🛑 **ĐANG DỪNG AUTO...**\n\nĐang tổng kết kết quả...", parse_mode='Markdown')
+async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    await rate_limiter.acquire(uid)
+    
+    if auto_manager.is_active(uid):
+        auto_manager.stop_session(uid)
+        await update.message.reply_text("🛑 **Đang dừng auto...**", parse_mode='Markdown')
     else:
-        await update.message.reply_text("❌ Bạn không có auto nào đang chạy!\n\nDùng /menu để bắt đầu", parse_mode='Markdown')
+        await update.message.reply_text("❌ Không có auto!\n\n/menu", parse_mode='Markdown')
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = query.data
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    data = q.data
     
-    if data == 'shop_rods':
-        user = data_manager.get_user(user_id)
-        current_rod = user.get('inventory', {}).get('rod', '1')
-        owned_rods = user.get('owned_rods', ['1'])
-        text = f"🎣 **SHOP CẦN**\n\n💰 {format_number(user['coins'])} xu\n🎣 {FISHING_RODS[current_rod]['name']}\n\n"
-        keyboard = []
-        current_rod_num = int(current_rod)
-        start_rod = max(1, current_rod_num - 2)
-        end_rod = min(len(FISHING_RODS), current_rod_num + 3)
-        for rod_id in range(start_rod, end_rod + 1):
-            rod_id_str = str(rod_id)
-            if rod_id_str in FISHING_RODS:
-                rod_data = FISHING_RODS[rod_id_str]
-                if rod_id_str in owned_rods:
-                    text += f"✅ {rod_data['name']} - {rod_data['description']}\n"
-                    if rod_id_str != current_rod:
-                        keyboard.append([InlineKeyboardButton(f"Dùng {rod_data['name']}", callback_data=f'equip_rod_{rod_id_str}')])
-                else:
-                    text += f"⬜ {rod_data['name']} - {format_number(rod_data['price'])} xu - {rod_data['description']}\n"
-                    if user['coins'] >= rod_data['price'] and rod_id_str not in owned_rods:
-                        keyboard.append([InlineKeyboardButton(f"Mua {rod_data['name']}", callback_data=f'buy_rod_{rod_id_str}')])
-        keyboard.append([InlineKeyboardButton("↩️ Menu", callback_data='back_menu')])
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    # Rate limiting cho callbacks
+    await rate_limiter.acquire(uid)
     
-    elif data.startswith('buy_rod_'):
-        rod_id = data.replace('buy_rod_', '')
-        user = data_manager.get_user(user_id)
-        rod_data = FISHING_RODS.get(rod_id)
-        if not rod_data:
-            await query.edit_message_text("❌ Cần không tồn tại!")
+    if data == 'back_menu_auto':
+        if auto_manager.is_active(uid):
+            auto_manager.stop_session(uid)
+            await q.edit_message_text("🛑 **Đang dừng...**", parse_mode='Markdown')
+            await asyncio.sleep(2)
+        data = 'back_menu'
+    
+    if data == 'shop':
+        user = dm.get_user(uid)
+        FISHING_RODS = config_manager.get_fishing_rods()
+        if not FISHING_RODS:
+            await q.edit_message_text("❌ Config chưa được load!", parse_mode='Markdown')
             return
-        if user['coins'] < rod_data['price']:
-            await query.edit_message_text(f"❌ Không đủ xu! Cần {format_number(rod_data['price'])} xu")
-            return
-        user['coins'] -= rod_data['price']
-        user.setdefault('owned_rods', ['1']).append(rod_id)
-        user['inventory']['rod'] = rod_id
-        data_manager.update_user(user_id, user)
-        await query.edit_message_text(f"✅ Mua thành công!\n{rod_data['name']}\n{rod_data['description']}\n💰 Còn: {format_number(user['coins'])} xu", parse_mode='Markdown')
+            
+        rod = user.get('inventory', {}).get('rod', '1')
+        owned = user.get('owned_rods', ['1'])
+        best = dm.best_rod(owned)
+        txt = f"🎣 **SHOP CẦN**\n\n💰 {fmt(user['coins'])} xu\n🎣 {FISHING_RODS.get(rod, {'name': '🎣 Cơ bản'})['name']}\n\n"
+        kb = []
+        
+        if rod != best:
+            kb.append([InlineKeyboardButton(f"⚡ Trang bị tốt nhất", callback_data=f'equip_{best}')])
+        
+        cnt = 0
+        for rid, rd in FISHING_RODS.items():
+            if rid not in owned and cnt < 5:
+                txt += f"⬜ {rd['name']} - {fmt(rd['price'])}\n   {rd['desc'][:50]}\n"
+                if user['coins'] >= rd['price']:
+                    kb.append([InlineKeyboardButton(f"Mua {rd['name'][:20]}", callback_data=f'buy_{rid}')])
+                cnt += 1
+        
+        if cnt == 0:
+            txt += "\n✅ Đã có tất cả!"
+        
+        kb.append([InlineKeyboardButton("↩️", callback_data='back_menu')])
+        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     
-    elif data.startswith('equip_rod_'):
-        rod_id = data.replace('equip_rod_', '')
-        user = data_manager.get_user(user_id)
-        if rod_id not in user.get('owned_rods', []):
-            await query.edit_message_text("❌ Chưa sở hữu cần này!")
+    elif data.startswith('buy_'):
+        rid = data.replace('buy_', '')
+        user = dm.get_user(uid)
+        FISHING_RODS = config_manager.get_fishing_rods()
+        if not FISHING_RODS:
+            await q.edit_message_text("❌ Config chưa được load!", parse_mode='Markdown')
             return
-        user['inventory']['rod'] = rod_id
-        data_manager.update_user(user_id, user)
-        rod_data = FISHING_RODS[rod_id]
-        await query.edit_message_text(f"✅ Đã trang bị: {rod_data['name']}\n{rod_data['description']}", parse_mode='Markdown')
-    
-    elif data == 'game_chanle':
-        user = data_manager.get_user(user_id)
-        text = f"🎲 **CHẴN LẺ**\n\n💰 {format_number(user['coins'])} xu\n🏆 Thắng: {user.get('chanle_win', 0)}\n💔 Thua: {user.get('chanle_lose', 0)}\n\n📋 Luật:\n🎲 Xúc xắc 1-6\n💰 Cược: 1K xu\n🏆 Thắng: x2.5 (2.5K xu)\n\nChọn:"
-        keyboard = [[InlineKeyboardButton("CHẴN", callback_data='chanle_even'), InlineKeyboardButton("LẺ", callback_data='chanle_odd')],
-                   [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-    
-    elif data in ['chanle_even', 'chanle_odd']:
-        choice = 'even' if data == 'chanle_even' else 'odd'
-        await query.edit_message_text("🎲 Đang tung...")
-        await asyncio.sleep(1)
-        result, error = await odd_even_game(user_id, choice)
-        if error:
-            await query.edit_message_text(error)
+            
+        rd = FISHING_RODS.get(rid)
+        if not rd:
+            await q.edit_message_text("❌ Lỗi!")
             return
-        dice_display = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"][result['dice'] - 1]
-        choice_text = "CHẴN" if choice == "even" else "LẺ"
-        result_text = "CHẴN" if result['dice'] % 2 == 0 else "LẺ"
-        if result["success"]:
-            text = f"🎉 **THẮNG!**\n\n{dice_display} Kết quả: {result['dice']} ({result_text})\nBạn chọn: {choice_text}\n\n💰 Thắng: {format_number(result['winnings'])} xu\n💰 Tổng: {format_number(result['coins'])} xu"
+        if user['coins'] < rd['price']:
+            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+            await q.edit_message_text(f"❌ Cần {fmt(rd['price'])} xu!", reply_markup=InlineKeyboardMarkup(kb))
+            return
+        user['coins'] -= rd['price']
+        user.setdefault('owned_rods', ['1']).append(rid)
+        best = dm.best_rod(user['owned_rods'])
+        user['inventory']['rod'] = best
+        dm.update_user(uid, user)
+        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+        await q.edit_message_text(
+            truncate_text(f"✅ Mua thành công!\n{rd['name']}\n{rd['desc'][:100]}\n\n🎣 Đã trang bị!\n💰 Còn: {fmt(user['coins'])}"),
+            reply_markup=InlineKeyboardMarkup(kb), 
+            parse_mode='Markdown'
+        )
+    
+    elif data.startswith('equip_'):
+        rid = data.replace('equip_', '')
+        user = dm.get_user(uid)
+        if rid not in user.get('owned_rods', []):
+            await q.edit_message_text("❌ Chưa có!")
+            return
+        user['inventory']['rod'] = rid
+        dm.update_user(uid, user)
+        FISHING_RODS = config_manager.get_fishing_rods()
+        rd = FISHING_RODS.get(rid, {'name': '🎣 Cơ bản', 'desc': 'Mặc định'})
+        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+        await q.edit_message_text(
+            truncate_text(f"✅ Trang bị: {rd['name']}\n{rd['desc'][:100]}"),
+            reply_markup=InlineKeyboardMarkup(kb), 
+            parse_mode='Markdown'
+        )
+    
+    elif data == 'chanle':
+        user = dm.get_user(uid)
+        txt = f"🎲 **CHẴN LẺ**\n\n💰 {fmt(user['coins'])} xu\n🏆 Thắng: {user.get('chanle_win', 0)}\n💔 Thua: {user.get('chanle_lose', 0)}\n\n📋 Luật:\n🎲 1-6\n💰 1K xu\n🏆 x2.5"
+        kb = [
+            [InlineKeyboardButton("CHẴN", callback_data='cl_even'), 
+             InlineKeyboardButton("LẺ", callback_data='cl_odd')],
+            [InlineKeyboardButton("↩️", callback_data='back_menu')]
+        ]
+        await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    
+    elif data in ['cl_even', 'cl_odd']:
+        choice = 'even' if data == 'cl_even' else 'odd'
+        await q.edit_message_text("🎲 Đang tung...")
+        await asyncio.sleep(1.5)
+        res, err = await chanle(uid, choice)
+        if err:
+            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+            await q.edit_message_text(err, reply_markup=InlineKeyboardMarkup(kb))
+            return
+        dice_ico = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"][res['dice'] - 1]
+        choice_txt = "CHẴN" if choice == "even" else "LẺ"
+        res_txt = "CHẴN" if res['dice'] % 2 == 0 else "LẺ"
+        if res["success"]:
+            txt = f"🎉 **THẮNG!**\n\n{dice_ico} {res['dice']} ({res_txt})\nChọn: {choice_txt}\n\n💰 +{fmt(res['win'])}\n💰 Xu: {fmt(res['coins'])}"
         else:
-            text = f"😢 **THUA!**\n\n{dice_display} Kết quả: {result['dice']} ({result_text})\nBạn chọn: {choice_text}\n\n💸 Mất: 1K xu\n💰 Còn: {format_number(result['coins'])} xu"
-        keyboard = [[InlineKeyboardButton("🎲 Chơi tiếp", callback_data='game_chanle')], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            txt = f"😢 **THUA!**\n\n{dice_ico} {res['dice']} ({res_txt})\nChọn: {choice_txt}\n\n💸 -1K\n💰 Xu: {fmt(res['coins'])}"
+        kb = [
+            [InlineKeyboardButton("🎲 Tiếp", callback_data='chanle')], 
+            [InlineKeyboardButton("↩️", callback_data='back_menu')]
+        ]
+        await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     
-    elif data == 'view_inventory':
-        user = data_manager.get_user(user_id)
-        fish_inv = user.get('inventory', {}).get('fish', {})
-        text = f"🎒 **KHO ĐỒ**\n\n💰 {format_number(user['coins'])} xu\n🎣 {get_current_rod_name(user)}\n\n📦 Cá:\n"
-        total_value = 0
-        total_count = 0
-        if fish_inv:
-            sorted_fish = sorted(fish_inv.items(), key=lambda x: FISH_TYPES.get(x[0], {}).get('value', 0), reverse=True)[:15]
-            for fish_name, count in sorted_fish:
-                if fish_name in FISH_TYPES:
-                    value = FISH_TYPES[fish_name]['value'] * count
-                    total_value += value * 0.7
-                    total_count += count
-                    text += f"{get_rarity_color(FISH_TYPES[fish_name]['rarity'])} {fish_name}: {count}\n"
-            text += f"\n📊 Tổng: {total_count} con\n💰 Giá: {format_number(int(total_value))} xu"
-            keyboard = [[InlineKeyboardButton("💰 Bán tất cả", callback_data='sell_fish')], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+    elif data == 'inv':
+        user = dm.get_user(uid)
+        FISH_TYPES = config_manager.get_fish_types()
+        inv = user.get('inventory', {}).get('fish', {})
+        txt = f"🎒 **KHO**\n\n💰 {fmt(user['coins'])}\n🎣 {get_rod_name(user)}\n\n📦 Cá:\n"
+        total_val = 0
+        total_cnt = 0
+        if inv and FISH_TYPES:
+            sorted_inv = sorted(inv.items(), key=lambda x: FISH_TYPES.get(x[0], {}).get('value', 0), reverse=True)[:15]
+            for name, cnt in sorted_inv:
+                if name in FISH_TYPES:
+                    val = FISH_TYPES[name]['value'] * cnt
+                    total_val += val * 0.7
+                    total_cnt += cnt
+                    txt += f"{get_color(FISH_TYPES[name]['rarity'])} {name[:20]}: {cnt}\n"
+            txt += f"\n📊 {total_cnt} con\n💰 {fmt(int(total_val))}"
+            kb = [[InlineKeyboardButton("💰 Bán", callback_data='sell')], [InlineKeyboardButton("↩️", callback_data='back_menu')]]
         else:
-            text += "❌ Chưa có cá!"
-            keyboard = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            txt += "❌ Trống!"
+            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     
-    elif data == 'sell_fish':
-        user = data_manager.get_user(user_id)
-        current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-        total_value = 0
-        total_count = 0
-        fish_inv = user.get('inventory', {}).get('fish', {})
-        if fish_inv:
-            for fish_name, count in fish_inv.items():
-                if fish_name in FISH_TYPES:
-                    total_value += FISH_TYPES[fish_name]['value'] * count * 0.7 * current_rank['coin_bonus']
-                    total_count += count
+    elif data == 'sell':
+        user = dm.get_user(uid)
+        rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+        FISH_TYPES = config_manager.get_fish_types()
+        total_val = 0
+        total_cnt = 0
+        inv = user.get('inventory', {}).get('fish', {})
+        if inv and FISH_TYPES:
+            for name, cnt in inv.items():
+                if name in FISH_TYPES:
+                    total_val += FISH_TYPES[name]['value'] * cnt * 0.7 * rank.get('coin_bonus', 1.0)
+                    total_cnt += cnt
             user['inventory']['fish'] = {}
-            user["coins"] += int(total_value)
-            data_manager.update_user(user_id, user)
-            await query.edit_message_text(f"💰 **BÁN THÀNH CÔNG!**\n{total_count} con\n+{format_number(int(total_value))} xu (Rank x{current_rank['coin_bonus']})\n💰 Xu: {format_number(user['coins'])}", parse_mode='Markdown')
+            user["coins"] += int(total_val)
+            dm.update_user(uid, user)
+            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+            await q.edit_message_text(
+                f"💰 **BÁN OK!**\n{total_cnt} con\n+{fmt(int(total_val))} (x{rank.get('coin_bonus', 1.0):.1f})\n💰 {fmt(user['coins'])}", 
+                reply_markup=InlineKeyboardMarkup(kb), 
+                parse_mode='Markdown'
+            )
         else:
-            await query.edit_message_text("❌ Không có cá!")
+            await q.edit_message_text("❌ Trống!")
     
-    elif data == 'leaderboard_coins':
-        all_users = []
+    elif data == 'top_coins':
+        users = []
         try:
-            file_content = data_manager.repo.get_contents(GITHUB_FILE_PATH)
-            content_str = base64.b64decode(file_content.content).decode()
-            for line in content_str.strip().split('\n'):
+            file = dm.repo.get_contents(GITHUB_FILE_PATH)
+            for line in base64.b64decode(file.content).decode().strip().split('\n'):
                 if line.strip():
                     try:
-                        all_users.append(json.loads(line))
+                        users.append(json.loads(line))
                     except:
                         pass
         except:
             pass
-        sorted_users = sorted(all_users, key=lambda x: x.get('coins', 0), reverse=True)[:10]
-        text = "🏆 **TOP 10 XU**\n\n"
+        sorted_u = sorted(users, key=lambda x: x.get('coins', 0), reverse=True)[:10]
+        txt = "🏆 **TOP XU**\n\n"
         medals = ["🥇", "🥈", "🥉"] + [f"{i}." for i in range(4, 11)]
-        for i, user_data in enumerate(sorted_users, 1):
-            text += f"{medals[i-1]} {user_data.get('username', 'User')} - {format_number(user_data.get('coins', 0))} xu\n"
-        keyboard = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        for i, u in enumerate(sorted_u, 1):
+            txt += f"{medals[i-1]} {u.get('username', 'User')[:20]} - {fmt(u.get('coins', 0))}\n"
+        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     
-    elif data == 'leaderboard_rank':
-        all_users = []
+    elif data == 'top_rank':
+        users = []
         try:
-            file_content = data_manager.repo.get_contents(GITHUB_FILE_PATH)
-            content_str = base64.b64decode(file_content.content).decode()
-            for line in content_str.strip().split('\n'):
+            file = dm.repo.get_contents(GITHUB_FILE_PATH)
+            for line in base64.b64decode(file.content).decode().strip().split('\n'):
                 if line.strip():
                     try:
-                        all_users.append(json.loads(line))
+                        users.append(json.loads(line))
                     except:
                         pass
         except:
             pass
-        sorted_users = sorted(all_users, key=lambda x: x.get('total_exp', 0), reverse=True)[:10]
-        text = "🏆 **TOP 10 RANK**\n\n"
+        sorted_u = sorted(users, key=lambda x: x.get('total_exp', 0), reverse=True)[:10]
+        txt = "🏆 **TOP RANK**\n\n"
         medals = ["🥇", "🥈", "🥉"] + [f"{i}." for i in range(4, 11)]
-        for i, user_data in enumerate(sorted_users, 1):
-            user_rank, _, _, _ = get_user_rank(user_data.get('total_exp', 0))
-            text += f"{medals[i-1]} {user_data.get('username', 'User')}\n   {user_rank['name']} - {format_number(user_data.get('total_exp', 0))} EXP\n"
-        keyboard = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        for i, u in enumerate(sorted_u, 1):
+            r, _, _, _ = get_user_rank(u.get('total_exp', 0))
+            txt += f"{medals[i-1]} {u.get('username', 'User')[:20]}\n   {r['name']} - {fmt(u.get('total_exp', 0))} EXP\n"
+        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     
-    elif data == 'view_rank':
-        user = data_manager.get_user(user_id)
-        current_rank, rank_level, next_rank, exp_to_next = get_user_rank(user.get('total_exp', 0))
-        text = f"🏆 **RANK NGƯ HIỆP**\n\n🎯 {format_number(user.get('total_exp', 0))} EXP\n🏆 {current_rank['name']}\n\n📊 Buff:\n💰 x{current_rank['coin_bonus']}\n🎣 x{current_rank['fish_bonus']}"
-        if next_rank:
-            progress = user.get('total_exp', 0) - current_rank['exp_required']
-            total_needed = next_rank['exp_required'] - current_rank['exp_required']
-            percent = (progress / total_needed * 100) if total_needed > 0 else 0
-            text += f"\n\n📈 Tiếp: {next_rank['name']}\nCần: {format_number(exp_to_next)} EXP\n{percent:.1f}%"
+    elif data == 'rank':
+        user = dm.get_user(uid)
+        rank, level, next_r, exp_next = get_user_rank(user.get('total_exp', 0))
+        exp_req = get_level_exp(user['level'])
+        exp_prog = user.get('level_exp', 0)
+        txt = f"🏆 **RANK**\n\n🎯 {fmt(user.get('total_exp', 0))} EXP\n🏆 {rank['name']}\n⭐ Lv.{user['level']} ({exp_prog}/{exp_req})\n\n📊 Buff:\n💰 Xu x{rank.get('coin_bonus', 1.0):.1f}\n🎣 Cá x{rank.get('fish_bonus', 1.0):.1f}\n🍀 May mắn x{rank.get('luck_bonus', 1.0):.1f}"
+        if next_r:
+            prog = user.get('total_exp', 0) - rank['exp_required']
+            total = next_r['exp_required'] - rank['exp_required']
+            pct = (prog / total * 100) if total > 0 else 0
+            txt += f"\n\n📈 Tiếp: {next_r['name']}\nCần: {fmt(exp_next)} EXP\n{pct:.1f}%"
         else:
-            text += "\n\n👑 Max rank!"
-        keyboard = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            txt += "\n\n👑 MAX!"
+        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     
     elif data == 'help':
-        text = "📖 **HƯỚNG DẪN**\n\n🎣 Câu: 10 xu/lần\n🍀 Câu thường may mắn hơn auto\n🎲 Chẵn lẻ: 1K xu, thắng x2.5\n🏆 Rank cao = buff xu & cá\n💰 Reset CN 00:00\n🎒 Bán cá = 70% giá\n\n/menu - Menu game\n/stop - Dừng auto"
-        keyboard = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        txt = "📖 **HELP**\n\n🎣 10 xu/lần\n🍀 Thường > Auto\n🎲 1K xu, x2.5\n💰 Reset CN 00:00\n🎒 Bán = 70%\n⚡ Auto trang bị tốt nhất\n🔄 Auto update 60s\n📁 Config update 10p\n⚠️ Rate limit: 1 msg/1.5s\n\n/menu - Menu\n/stop - Dừng\n/reload - Reload config"
+        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+        await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     
-    elif data == 'game_fishing':
-        user = data_manager.get_user(user_id)
-        rod_data = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), FISHING_RODS['1'])
-        current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-        await query.edit_message_text(f"🎣 Đang câu... ({rod_data['speed']}s)")
-        await asyncio.sleep(rod_data['speed'])
-        result, error = await process_fishing(user_id, is_auto=False)
-        if error:
-            await query.edit_message_text(error)
+    elif data == 'fish':
+        user = dm.get_user(uid)
+        FISHING_RODS = config_manager.get_fishing_rods()
+        if not FISHING_RODS:
+            await q.edit_message_text("❌ Config chưa được load!", parse_mode='Markdown')
             return
-        if result["success"]:
-            luck_text = ""
-            if result.get("luck_bonus", 1.0) > 1.5:
-                luck_text = "\n🍀 **MAY MẮN x2!**"
-            elif result.get("luck_bonus", 1.0) > 1.0:
-                luck_text = "\n🍀 May mắn x1.5!"
-            text = f"🎉 **BẮT ĐƯỢC!**\n{result['fish']} {get_rarity_color(result['rarity'])}\n💰 +{format_number(result['reward'])} xu (x{current_rank['coin_bonus']})\n⭐ +{result['exp']} EXP\n💰 {format_number(result['coins'])} xu{luck_text}"
-            if result['leveled_up']:
-                text += f"\n\n🎊 **LEVEL {result['new_level']}!**"
+            
+        rod = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), {"speed": 3.0, "name": "🎣 Cơ bản"})
+        rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+        await q.edit_message_text(f"🎣 Câu... ({rod.get('speed', 3.0)}s)")
+        await asyncio.sleep(rod.get('speed', 3.0))
+        res, err = await fish(uid, auto=False)
+        if err:
+            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+            await q.edit_message_text(err, reply_markup=InlineKeyboardMarkup(kb))
+            return
+        if res["success"]:
+            luck_txt = ""
+            total_luck = res.get("luck", 1.0)
+            if total_luck >= 15.0:
+                luck_txt = f"\n🍀 **GODLIKE x{total_luck:.1f}!**"
+            elif total_luck >= 10.0:
+                luck_txt = f"\n🍀 **LEGENDARY x{total_luck:.1f}!**"
+            elif total_luck >= 6.0:
+                luck_txt = f"\n🍀 **EPIC x{total_luck:.1f}!**"
+            elif total_luck >= 3.0:
+                luck_txt = f"\n🍀 **LUCKY x{total_luck:.1f}!**"
+            elif total_luck > 1.5:
+                luck_txt = f"\n🍀 May mắn x{total_luck:.1f}"
+            txt = f"🎉 **BẮT ĐƯỢC!**\n{res['fish'][:30]} {get_color(res['rarity'])}\n💰 +{fmt(res['reward'])}\n⭐ +{res['exp']} EXP\n💰 {fmt(res['coins'])}{luck_txt}"
+            if res['leveled']:
+                txt += f"\n\n🎊 **LEVEL {res['level']}!**"
         else:
-            text = f"😢 Trượt!\n💰 {format_number(result['coins'])} xu"
-        keyboard = [[InlineKeyboardButton("🎣 Câu tiếp", callback_data='game_fishing')], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+            txt = f"😢 Trượt!\n💰 {fmt(res['coins'])}"
+        kb = [
+            [InlineKeyboardButton("🎣 Tiếp", callback_data='fish')], 
+            [InlineKeyboardButton("↩️", callback_data='back_menu')]
+        ]
+        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     
-    elif data == 'auto_fishing':
-        if user_id in data_manager.auto_fishing_tasks and data_manager.auto_fishing_tasks.get(user_id, False):
-            await query.edit_message_text("⚠️ Bạn đang auto rồi!\nDùng /stop để dừng", parse_mode='Markdown')
+    elif data == 'auto':
+        if auto_manager.is_active(uid):
+            await q.edit_message_text("⚠️ Đang auto!\n/stop", parse_mode='Markdown')
             return
-        if not ResourceMonitor.check_resources():
-            await query.edit_message_text("⚠️ Hệ thống đang quá tải!\nVui lòng thử lại sau", parse_mode='Markdown')
+        if not Monitor.check():
+            await q.edit_message_text("⚠️ Quá tải!", parse_mode='Markdown')
             return
-        user = data_manager.get_user(user_id)
+        user = dm.get_user(uid)
         if user["coins"] < 10:
-            await query.edit_message_text("❌ Cần ít nhất 10 xu để auto!", parse_mode='Markdown')
+            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+            await q.edit_message_text("❌ Cần 10 xu!", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
             return
-        await query.edit_message_text("🤖 **KHỞI ĐỘNG AUTO FISHING...**", parse_mode='Markdown')
-        asyncio.create_task(auto_fishing_task(user_id, query.message.message_id, query.message.chat_id, context.bot))
+        await q.edit_message_text("🤖 **KHỞI ĐỘNG AUTO...**", parse_mode='Markdown')
+        asyncio.create_task(auto_fish_optimized(uid, q.message.message_id, q.message.chat_id, context.bot))
     
     elif data == 'stop_auto':
-        if user_id in data_manager.auto_fishing_tasks:
-            data_manager.auto_fishing_tasks[user_id] = False
-            await query.edit_message_text("🛑 **ĐANG DỪNG AUTO...**\n\nVui lòng chờ...", parse_mode='Markdown')
+        if auto_manager.is_active(uid):
+            auto_manager.stop_session(uid)
+            await q.edit_message_text("🛑 **Đang dừng...**", parse_mode='Markdown')
         else:
-            await query.edit_message_text("❌ Không có auto nào đang chạy!", parse_mode='Markdown')
+            await q.edit_message_text("❌ Không có auto!", parse_mode='Markdown')
     
-    elif data == 'view_stats':
-        user = data_manager.get_user(user_id)
-        current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+    elif data == 'stats':
+        user = dm.get_user(uid)
+        rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
         win_rate = (user.get('win_count', 0) / user.get('fishing_count', 1)) * 100 if user.get('fishing_count', 0) > 0 else 0
-        text = f"📊 **THỐNG KÊ**\n\n👤 {user['username']}\n⭐ Level {user['level']}\n🏆 {current_rank['name']}\n\n📈 Thống kê câu:\n🎣 Tổng: {user.get('fishing_count', 0)}\n✅ Thành công: {user.get('win_count', 0)}\n❌ Thất bại: {user.get('lose_count', 0)}\n📊 Tỷ lệ: {win_rate:.1f}%\n\n🎲 Chẵn lẻ:\n✅ Thắng: {user.get('chanle_win', 0)}\n❌ Thua: {user.get('chanle_lose', 0)}"
-        keyboard = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        exp_req = get_level_exp(user['level'])
+        exp_prog = user.get('level_exp', 0)
+        txt = f"📊 **STATS**\n\n👤 {user['username'][:30]}\n⭐ Lv.{user['level']} ({exp_prog}/{exp_req})\n🏆 {rank['name']}\n\n📈 Câu:\n🎣 {user.get('fishing_count', 0)}\n✅ {user.get('win_count', 0)}\n❌ {user.get('lose_count', 0)}\n📊 {win_rate:.1f}%\n\n🎲 Chẵn lẻ:\n✅ {user.get('chanle_win', 0)}\n❌ {user.get('chanle_lose', 0)}"
+        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
+        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     
     elif data == 'back_menu':
-        user = data_manager.get_user(user_id)
-        current_rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-        keyboard = [
-            [InlineKeyboardButton("🎣 Câu Cá", callback_data='game_fishing'),
-             InlineKeyboardButton("🤖 Auto", callback_data='auto_fishing')],
-            [InlineKeyboardButton("🎣 Shop Cần", callback_data='shop_rods'),
-             InlineKeyboardButton("🎲 Chẵn Lẻ", callback_data='game_chanle')],
-            [InlineKeyboardButton("🎒 Kho Đồ", callback_data='view_inventory'),
-             InlineKeyboardButton("📊 Thống Kê", callback_data='view_stats')],
-            [InlineKeyboardButton("🏆 BXH Xu", callback_data='leaderboard_coins'),
-             InlineKeyboardButton("🏆 BXH Rank", callback_data='leaderboard_rank')],
-            [InlineKeyboardButton("🏆 Hệ Thống Rank", callback_data='view_rank'),
-             InlineKeyboardButton("📖 Hướng Dẫn", callback_data='help')]
+        user = dm.get_user(uid)
+        rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
+        kb = [
+            [InlineKeyboardButton("🎣 Câu", callback_data='fish'),
+             InlineKeyboardButton("🤖 Auto", callback_data='auto')],
+            [InlineKeyboardButton("🎣 Shop", callback_data='shop'),
+             InlineKeyboardButton("🎲 Chẵn Lẻ", callback_data='chanle')],
+            [InlineKeyboardButton("🎒 Kho", callback_data='inv'),
+             InlineKeyboardButton("📊 Stats", callback_data='stats')],
+            [InlineKeyboardButton("🏆 Top Xu", callback_data='top_coins'),
+             InlineKeyboardButton("🏆 Top Rank", callback_data='top_rank')],
+            [InlineKeyboardButton("🏆 Rank", callback_data='rank'),
+             InlineKeyboardButton("📖 Help", callback_data='help')]
         ]
-        next_reset = get_next_sunday()
-        await query.edit_message_text(f"🎮 **MENU**\n\n👤 {user['username']} Lv.{user['level']}\n💰 {format_number(user['coins'])} xu\n⭐ {format_number(user.get('total_exp', 0))} EXP\n🏆 {current_rank['name']}\n🎣 {get_current_rod_name(user)}\n\n⏰ Reset: CN {next_reset.strftime('%d/%m')}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        reset = get_next_sunday()
+        exp_req = get_level_exp(user['level'])
+        exp_prog = user.get('level_exp', 0)
+        txt = truncate_text(
+            f"🎮 **MENU**\n\n"
+            f"👤 {user['username'][:30]} Lv.{user['level']}\n"
+            f"💰 {fmt(user['coins'])} xu\n"
+            f"⭐ {fmt(user.get('total_exp', 0))} EXP\n"
+            f"📊 {exp_prog}/{exp_req}\n"
+            f"🏆 {rank['name']}\n"
+            f"🎣 {get_rod_name(user)}\n\n"
+            f"⏰ Reset: CN {reset.strftime('%d/%m')}"
+        )
+        await q.edit_message_text(
+            txt, 
+            reply_markup=InlineKeyboardMarkup(kb), 
+            parse_mode='Markdown'
+        )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Error: {context.error}")
+    
+    # Handle flood control errors globally
+    if "flood" in str(context.error).lower():
+        wait_time = extract_flood_wait(str(context.error))
+        logging.warning(f"Global flood control, waiting {wait_time}s")
+        await asyncio.sleep(wait_time)
 
-def cleanup_on_shutdown():
-    for user_id in list(data_manager.auto_fishing_tasks.keys()):
-        data_manager.auto_fishing_tasks[user_id] = False
-    time.sleep(1)
-    data_manager.auto_fishing_tasks.clear()
+def cleanup():
+    """Cleanup trước khi tắt bot"""
+    logging.info("Starting cleanup...")
+    
+    # Stop all auto sessions
+    for uid in list(auto_manager.active_sessions.keys()):
+        auto_manager.stop_session(uid)
+    
+    # Wait for sessions to stop
+    time.sleep(2)
+    
+    # Clear all data
+    auto_manager.active_sessions.clear()
+    auto_manager.session_stats.clear()
+    auto_manager.message_info.clear()
+    auto_manager.flood_control.clear()
+    
+    # Shutdown executor
+    if hasattr(dm, 'executor'):
+        dm.executor.shutdown(wait=False)
+    
+    # Force garbage collection
+    gc.collect()
+    
+    logging.info("Cleanup completed")
 
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("menu", menu))
-    application.add_handler(CommandHandler("stop", stop_command))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_error_handler(error_handler)
+    """Main function"""
+    # Load config first
+    config = config_manager.load_config()
+    if not config:
+        print("❌ Không thể load config! Vui lòng tạo file game_config.json trên GitHub")
+        print("📁 Repo: " + GITHUB_REPO)
+        print("📄 File: game_config.json")
+        return
     
-    next_reset = get_next_sunday()
-    stats = ResourceMonitor.get_system_stats()
-    print(f"🤖 Bot started\n🏆 Ranks: {len(FISH_RANKS)}\n🐟 Fish: {len(FISH_TYPES)}\n🎣 Rods: {len(FISHING_RODS)}\n⏰ Reset: {next_reset.strftime('%d/%m/%Y %H:%M')}\n💻 CPU: {stats['cpu']:.1f}% | RAM: {stats['ram']:.1f}%")
+    # Create application
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Add handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("stop", stop_cmd))
+    app.add_handler(CommandHandler("reload", reload_cmd))
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_error_handler(error_handler)
+    
+    # Display startup info
+    reset = get_next_sunday()
+    s = Monitor.stats()
+    FISH_RANKS = config_manager.get_fish_ranks()
+    FISH_TYPES = config_manager.get_fish_types()
+    FISHING_RODS = config_manager.get_fishing_rods()
+    
+    print("=" * 50)
+    print("🤖 Bot Started Successfully!")
+    print("=" * 50)
+    print(f"📊 Config loaded from GitHub")
+    print(f"🏆 Ranks: {len(FISH_RANKS)}")
+    print(f"🐟 Fish: {len(FISH_TYPES)}")
+    print(f"🎣 Rods: {len(FISHING_RODS)}")
+    print(f"⏰ Reset: {reset.strftime('%d/%m %H:%M')}")
+    print(f"💻 CPU {s['cpu']:.0f}% | RAM {s['ram']:.0f}%")
+    print(f"🔄 Config auto update every 10 minutes")
+    print(f"⚡ Rate limit: {GLOBAL_RATE_LIMIT} msg/s")
+    print(f"⏱️ Min interval: {MIN_UPDATE_INTERVAL}s per user")
+    print(f"📁 Repository: {GITHUB_REPO}")
+    print("=" * 50)
     
     try:
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Run bot
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     except KeyboardInterrupt:
         print("\n🛑 Shutting down...")
-        cleanup_on_shutdown()
-        print("✅ Cleanup completed")
+        cleanup()
+        print("✅ Bot stopped successfully")
     except Exception as e:
         print(f"❌ Fatal error: {e}")
-        cleanup_on_shutdown()
+        cleanup()
 
 if __name__ == '__main__':
     main()
