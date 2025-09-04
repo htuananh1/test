@@ -1,5 +1,11 @@
-python-telegram-bot==22.3
-PyGithub==2.7.0
-python-dotenv==1.1.1
-psutil==5.9.8
+python-telegram-bot==21.6
 pytz==2025.1
+psutil==5.9.8
+PyGithub==2.7.0
+python-dotenv==1.0.1
+ruff==0.6.9
+pytest==8.3.3
+aiofiles==24.1.0
+aiohttp==3.10.5
+httpx==0.27.2
+openai==1.43.0
