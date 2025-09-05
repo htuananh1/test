@@ -1,1428 +1,1619 @@
-import logging
-import random
-import json
 import asyncio
-from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-import threading
-import time
-from github import Github
 import base64
+import json
+import logging
 import os
-from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor
-import psutil
-import gc
+import random
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+
+import aiofiles
 import pytz
-import queue
-import traceback
-import re
+from dotenv import load_dotenv
+from github import Github
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from openai import AsyncOpenAI
 
 load_dotenv()
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')  
+GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 GITHUB_REPO = os.getenv('GITHUB_REPO', 'htuananh1/Data-manager')
 GITHUB_FILE_PATH = "bot_data.json"
-GITHUB_CONFIG_PATH = "game_config.json"
 LOCAL_BACKUP_FILE = "local_backup.json"
-LOCAL_CONFIG_FILE = "local_config.json"
 VIETNAM_TZ = pytz.timezone('Asia/Ho_Chi_Minh')
-
-MAX_CONCURRENT_AUTO = 25
-AUTO_UPDATE_INTERVAL = 60
-COUNTDOWN_INTERVAL = 15
 SAVE_INTERVAL = 30
-CONFIG_UPDATE_INTERVAL = 600
-MIN_UPDATE_INTERVAL = 1.5
-GLOBAL_RATE_LIMIT = 20
+MIN_UPDATE_INTERVAL = 0.1
+GLOBAL_RATE_LIMIT = 25
+BOT_OWNER_ID = 2026797305
+AI_GATEWAY_API_KEY = os.getenv('AI_GATEWAY_API_KEY')
+AI_MODEL = 'openai/gpt-4o'
+
+ai_client = AsyncOpenAI(
+    api_key=AI_GATEWAY_API_KEY,
+    base_url='https://ai-gateway.vercel.sh/v1'
+)
+
+UserData = Dict[str, Any]
+
+class GuessNumberGame:
+    def __init__(self, min_val: int = 1, max_val: int = 100, bet: int = 0, secret_number: Optional[int] = None, guesses: int = 0, game_over: bool = False):
+        self.min_val = min_val
+        self.max_val = max_val
+        self.secret_number = secret_number if secret_number is not None else random.randint(min_val, max_val)
+        self.guesses = guesses
+        self.game_over = game_over
+        self.bet = bet
+
+    def make_guess(self, guess: int) -> str:
+        self.guesses += 1
+        if guess == self.secret_number:
+            self.game_over = True
+            return "correct"
+        return "higher" if guess < self.secret_number else "lower"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.__dict__
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'GuessNumberGame':
+        return cls(**data)
+
+class HighLowGame:
+    def __init__(self, bet: int = 0, current_card: Optional[int] = None, game_over: bool = False, win: bool = False):
+        self.bet = bet
+        self.current_card = current_card if current_card is not None else random.randint(1, 13)
+        self.game_over = game_over
+        self.win = win
+
+    def play(self, choice: str) -> int:
+        new_card = random.randint(1, 13)
+        if new_card == self.current_card:
+            self.win = False
+        elif (choice == 'high' and new_card > self.current_card) or \
+             (choice == 'low' and new_card < self.current_card):
+            self.win = True
+        else:
+            self.win = False
+        self.game_over = True
+        return new_card
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.__dict__
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'HighLowGame':
+        return cls(**data)
+
+class DiceRollGame:
+    def __init__(self, bet: int = 0, game_over: bool = False, win: bool = False, dice_result: Optional[Tuple[int, int]] = None):
+        self.bet = bet
+        self.game_over = game_over
+        self.win = win
+        self.dice_result = dice_result
+
+    def roll_dice(self) -> Tuple[int, int]:
+        d1 = random.randint(1, 6)
+        d2 = random.randint(1, 6)
+        self.dice_result = (d1, d2)
+        self.game_over = True
+        self.win = (d1 + d2 == 7)
+        return self.dice_result
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.__dict__
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'DiceRollGame':
+        return cls(**data)
 
 class RateLimiter:
-    """Rate limiter để tránh flood"""
     def __init__(self):
-        self.user_last_action = {}
+        self.user_last_action: Dict[int, float] = {}
         self.global_semaphore = asyncio.Semaphore(GLOBAL_RATE_LIMIT)
-        self.lock = threading.Lock()
-        
-    async def acquire(self, user_id):
-        """Đợi cho đến khi có thể thực hiện action"""
+        self.lock = asyncio.Lock()
+
+    async def acquire(self, user_id: int):
         async with self.global_semaphore:
-            with self.lock:
-                last_time = self.user_last_action.get(user_id, 0)
-                current_time = time.time()
-                wait_time = MIN_UPDATE_INTERVAL - (current_time - last_time)
-                
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)
-                
-                self.user_last_action[user_id] = time.time()
-                return True
-    
-    def check_can_update(self, user_id):
-        """Kiểm tra xem có thể update ngay không"""
-        with self.lock:
-            last_time = self.user_last_action.get(user_id, 0)
-            return time.time() - last_time >= MIN_UPDATE_INTERVAL
+            async with self.lock:
+                last_action = self.user_last_action.get(user_id, 0)
+            
+            wait_time = MIN_UPDATE_INTERVAL - (asyncio.get_event_loop().time() - last_action)
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+            
+            async with self.lock:
+                self.user_last_action[user_id] = asyncio.get_event_loop().time()
 
 rate_limiter = RateLimiter()
 
-class ConfigManager:
-    def __init__(self):
-        self.config = None
-        self.last_update = 0
-        self.github = Github(GITHUB_TOKEN)
-        self.repo = self.github.get_repo(GITHUB_REPO)
-        self.lock = threading.Lock()
-        
-    def load_config(self):
-        with self.lock:
-            try:
-                if self.config and (time.time() - self.last_update < CONFIG_UPDATE_INTERVAL):
-                    return self.config
-                
-                try:
-                    file_content = self.repo.get_contents(GITHUB_CONFIG_PATH)
-                    config_str = base64.b64decode(file_content.content).decode()
-                    self.config = json.loads(config_str)
-                    
-                    with open(LOCAL_CONFIG_FILE, 'w', encoding='utf-8') as f:
-                        json.dump(self.config, f, ensure_ascii=False, indent=2)
-                    
-                    self.last_update = time.time()
-                    logging.info("✅ Config loaded from GitHub")
-                    return self.config
-                    
-                except Exception as e:
-                    logging.warning(f"⚠️ Cannot load from GitHub: {e}")
-                    try:
-                        with open(LOCAL_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                            self.config = json.load(f)
-                        logging.info("✅ Using local config")
-                        return self.config
-                    except:
-                        logging.error("❌ No config found, please create game_config.json on GitHub")
-                        return None
-                        
-            except Exception as e:
-                logging.error(f"❌ Config error: {e}")
-                return None
-    
-    def reload_config(self):
-        with self.lock:
-            self.last_update = 0
-            return self.load_config()
-    
-    def get_fish_ranks(self):
-        config = self.load_config()
-        if not config:
-            return {}
-        ranks = {}
-        for rank in config.get("FISH_RANKS", []):
-            ranks[rank["id"]] = rank
-        return ranks
-    
-    def get_fish_types(self):
-        config = self.load_config()
-        if not config:
-            return {}
-        fish = {}
-        for f in config.get("FISH_TYPES", []):
-            fish[f["name"]] = f
-        return fish
-    
-    def get_fishing_rods(self):
-        config = self.load_config()
-        if not config:
-            return {}
-        rods = {}
-        for rod in config.get("FISHING_RODS", []):
-            rods[rod["id"]] = rod
-        return rods
-
-config_manager = ConfigManager()
-
-class AutoFishingManager:
-    def __init__(self):
-        self.active_sessions = {}
-        self.session_stats = {}
-        self.message_info = {}
-        self.lock = threading.Lock()
-        self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_AUTO)
-        self.flood_control = {}  # Track flood control per user
-        
-    def add_session(self, uid, mid, cid):
-        with self.lock:
-            self.active_sessions[uid] = {
-                "active": True,
-                "start_time": time.time(),
-                "last_update": 0
-            }
-            self.message_info[uid] = {
-                "mid": mid,
-                "cid": cid,
-                "last_update": time.time()
-            }
-            self.session_stats[uid] = {
-                "count": 0,
-                "coins": 0,
-                "exp": 0,
-                "rarity_count": {r: 0 for r in ["C","U","R","E","L","M","S","X","Z"]},
-                "best_catch": None,
-                "best_value": 0
-            }
-            self.flood_control[uid] = {
-                "retry_count": 0,
-                "last_error": 0
-            }
-    
-    def stop_session(self, uid):
-        with self.lock:
-            if uid in self.active_sessions:
-                self.active_sessions[uid]["active"] = False
-    
-    def is_active(self, uid):
-        with self.lock:
-            return uid in self.active_sessions and self.active_sessions[uid]["active"]
-    
-    def get_message_info(self, uid):
-        with self.lock:
-            return self.message_info.get(uid, {}).copy()
-    
-    def update_message_info(self, uid, mid, cid):
-        with self.lock:
-            self.message_info[uid] = {
-                "mid": mid,
-                "cid": cid,
-                "last_update": time.time()
-            }
-    
-    def update_stats(self, uid, result):
-        with self.lock:
-            if uid in self.session_stats:
-                stats = self.session_stats[uid]
-                stats["count"] += 1
-                
-                if result and result.get("success"):
-                    stats["coins"] += result["reward"] - 10
-                    stats["exp"] += result["exp"]
-                    stats["rarity_count"][result["rarity"]] += 1
-                    
-                    if result["reward"] > stats["best_value"]:
-                        stats["best_catch"] = result["fish"]
-                        stats["best_value"] = result["reward"]
-                else:
-                    stats["coins"] -= 10
-    
-    def get_stats(self, uid):
-        with self.lock:
-            return self.session_stats.get(uid, {}).copy()
-    
-    def get_session_info(self, uid):
-        with self.lock:
-            return self.active_sessions.get(uid, {}).copy()
-    
-    def should_update(self, uid):
-        """Kiểm tra xem có nên update message không"""
-        with self.lock:
-            if uid not in self.active_sessions:
-                return False
-            session = self.active_sessions[uid]
-            current_time = time.time()
-            time_since_update = current_time - session.get("last_update", 0)
-            
-            # Update nếu đã qua đủ thời gian và không có flood control
-            if time_since_update >= AUTO_UPDATE_INTERVAL:
-                session["last_update"] = current_time
-                return True
-            return False
-    
-    def cleanup_session(self, uid):
-        with self.lock:
-            if uid in self.active_sessions:
-                del self.active_sessions[uid]
-            if uid in self.session_stats:
-                del self.session_stats[uid]
-            if uid in self.message_info:
-                del self.message_info[uid]
-            if uid in self.flood_control:
-                del self.flood_control[uid]
-
-auto_manager = AutoFishingManager()
-
-def get_level_exp(level):
-    return 1000 if level <= 10 else int(1000 * (1.5 ** ((level - 10) // 10)))
-
-def get_next_sunday():
-    now = datetime.now(VIETNAM_TZ)
-    days = (6 - now.weekday()) % 7
-    if days == 0 and now.hour >= 0:
-        days = 7
-    return (now + timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
-
-def should_reset():
-    now = datetime.now(VIETNAM_TZ)
-    return now.weekday() == 6 and now.hour == 0 and now.minute < 1
-
-def get_user_rank(exp):
-    FISH_RANKS = config_manager.get_fish_ranks()
-    if not FISH_RANKS:
-        return {"name": "🎣 Tân Thủ", "exp_required": 0, "coin_bonus": 1.0, "fish_bonus": 1.0, "luck_bonus": 1.0}, 1, None, 0
-    
-    rank = list(FISH_RANKS.values())[0]
-    level = 1
-    
-    for rid, r in FISH_RANKS.items():
-        if exp >= r["exp_required"]:
-            rank = r
-            level = int(rid)
+def get_user_rank(exp: float) -> Tuple[Dict, Optional[Dict]]:
+    ranks = [
+        {"name": "🌱 Newbie", "exp": 0},
+        {"name": "🌳 Apprentice", "exp": 5000},
+        {"name": "🌲 Adept", "exp": 20000},
+        {"name": "🌴 Expert", "exp": 100000},
+        {"name": "🔥 Master", "exp": 500000},
+        {"name": "🌟 Grandmaster", "exp": 2000000},
+        {"name": "⚡ Legend", "exp": 5000000},
+        {"name": "🔮 Mystic", "exp": 10000000},
+        {"name": "🌌 Celestial", "exp": 25000000},
+        {"name": "👑 God", "exp": 100000000}
+    ]
+    user_rank = ranks[0]
+    next_rank = None
+    for i, rank in enumerate(ranks):
+        if exp >= rank["exp"]:
+            user_rank = rank
+            next_rank = ranks[i + 1] if i + 1 < len(ranks) else None
         else:
             break
-    
-    next_r = FISH_RANKS.get(str(level + 1)) if level < len(FISH_RANKS) else None
-    exp_next = next_r["exp_required"] - exp if next_r else 0
-    return rank, level, next_r, exp_next
+    return user_rank, next_rank
 
-def fmt(num):
-    if num >= 1e12: return f"{num/1e12:.1f}T".replace('.0T', 'T')
-    elif num >= 1e9: return f"{num/1e9:.1f}B".replace('.0B', 'B')
-    elif num >= 1e6: return f"{num/1e6:.1f}M".replace('.0M', 'M')
-    elif num >= 1e3: return f"{num/1e3:.1f}K".replace('.0K', 'K')
-    else: return str(int(num))
-
-def get_color(r):
-    return {"C":"⚪","U":"🟢","R":"🔵","E":"🟣","L":"🟡","M":"🔴","S":"⚫","X":"💠","Z":"✨"}.get(r,"⚪")
-
-def extract_flood_wait(error_str):
-    """Extract số giây cần đợi từ flood error"""
-    try:
-        match = re.search(r'retry after (\d+)', str(error_str).lower())
-        if match:
-            return int(match.group(1)) + 1
-        return 5
-    except:
-        return 5
-
-def truncate_text(text, max_length=4096):
-    """Cắt text để không vượt quá giới hạn"""
-    if len(text) <= max_length:
-        return text
-    return text[:max_length-3] + "..."
-
-class Cache:
-    def __init__(self):
-        self.data = {}
-        self.timeout = 30
-        self.lock = threading.Lock()
-        
-    def get(self, k):
-        with self.lock:
-            if k in self.data:
-                d, t = self.data[k]
-                if time.time() - t < self.timeout:
-                    return d
-                else:
-                    del self.data[k]
-            return None
-            
-    def set(self, k, v):
-        with self.lock:
-            self.data[k] = (v, time.time())
-            
-    def clear(self):
-        with self.lock:
-            self.data = {}
-
-cache = Cache()
+def fmt(num: float) -> str:
+    if num is None:
+        num = 0
+    if num < 1000:
+        return str(int(num))
+    if num < 1e6:
+        return f"{num/1000.0:.1f}K".replace('.0', '')
+    if num < 1e9:
+        return f"{num/1e6:.1f}M".replace('.0', '')
+    return f"{num/1e9:.1f}B".replace('.0', '')
 
 class Storage:
     @staticmethod
-    def save(data):
+    async def save(data: Dict) -> None:
         try:
-            with open(LOCAL_BACKUP_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except:
-            pass
-            
-    @staticmethod
-    def load():
-        try:
-            with open(LOCAL_BACKUP_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
+            async with aiofiles.open(LOCAL_BACKUP_FILE, 'w', encoding='utf-8') as f:
+                await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+        except Exception as e:
+            logger.error(f"Async save failed: {e}")
 
-class Monitor:
     @staticmethod
-    def stats():
+    async def load() -> Dict:
+        if not os.path.exists(LOCAL_BACKUP_FILE):
+            return {}
         try:
-            cpu = psutil.cpu_percent(interval=0.1)
-            mem = psutil.virtual_memory()
-            return {"cpu": cpu, "ram": mem.percent}
-        except:
-            return {"cpu": 0, "ram": 0}
-            
-    @staticmethod
-    def check():
-        try:
-            s = Monitor.stats()
-            if s["cpu"] > 90 or s["ram"] > 90:
-                gc.collect()
-                time.sleep(0.1)
-                return False
-            return True
-        except:
-            return True
+            async with aiofiles.open(LOCAL_BACKUP_FILE, 'r', encoding='utf-8') as f:
+                return json.loads(await f.read())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
 
 class DataManager:
     def __init__(self):
-        self.github = Github(GITHUB_TOKEN)
-        self.repo = self.github.get_repo(GITHUB_REPO)
-        self.queue = []
-        self.lock = threading.Lock()
-        self.executor = ThreadPoolExecutor(max_workers=4)
-        self.last_save = time.time()
-        threading.Thread(target=self.auto_save, daemon=True).start()
-        threading.Thread(target=self.reset_check, daemon=True).start()
-    
-    def reset_check(self):
+        self.users: Dict[str, UserData] = {}
+        self.lock = asyncio.Lock()
+        self.github = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
+        self.repo = self.github.get_repo(GITHUB_REPO) if self.github else None
+        self._autosave_task: Optional[asyncio.Task] = None
+
+    async def initialize(self):
+        self.users = await Storage.load()
+        if not self.users:
+            await self.sync_from_github()
+        self._autosave_task = asyncio.create_task(self.auto_save_loop())
+
+    async def sync_from_github(self):
+        if not self.repo:
+            return
+        loop = asyncio.get_event_loop()
+        try:
+            file_content = await loop.run_in_executor(None, self.repo.get_contents, GITHUB_FILE_PATH)
+            self.users = json.loads(base64.b64decode(file_content.content).decode())
+            await Storage.save(self.users)
+            logger.info("Successfully synced from GitHub.")
+        except Exception as e:
+            logger.error(f"GitHub sync failed: {e}")
+
+    async def auto_save_loop(self):
         while True:
-            try:
-                if should_reset():
-                    self.reset_coins()
-                    time.sleep(60)
-                time.sleep(30)
-            except:
-                time.sleep(60)
-    
-    def reset_coins(self):
-        try:
-            users = {}
-            try:
-                file = self.repo.get_contents(GITHUB_FILE_PATH)
-                for line in base64.b64decode(file.content).decode().strip().split('\n'):
-                    if line.strip():
-                        try:
-                            d = json.loads(line)
-                            if 'user_id' in d:
-                                d['coins'] = 100
-                                d['last_reset'] = datetime.now(VIETNAM_TZ).isoformat()
-                                users[d['user_id']] = d
-                        except:
-                            pass
-            except:
-                pass
+            await asyncio.sleep(SAVE_INTERVAL)
+            async with self.lock:
+                await Storage.save(self.users)
+            logger.debug("Autosave complete.")
+
+    async def get_user(self, uid: int) -> UserData:
+        uid_str = str(uid)
+        async with self.lock:
+            user = self.users.get(uid_str)
+            if not user:
+                user = self.users[uid_str] = self.new_user(uid_str)
             
-            if users:
-                content = '\n'.join([json.dumps(d, ensure_ascii=False) for d in users.values()])
-                try:
-                    file = self.repo.get_contents(GITHUB_FILE_PATH)
-                    self.repo.update_file(GITHUB_FILE_PATH, f"Reset {datetime.now().strftime('%Y%m%d')}", content, file.sha)
-                except:
-                    self.repo.create_file(GITHUB_FILE_PATH, f"Reset {datetime.now().strftime('%Y%m%d')}", content)
-            cache.clear()
-        except:
-            pass
-    
-    def load_user(self, uid):
-        uid = str(uid)
-        cached = cache.get(f"u_{uid}")
-        if cached:
-            return cached
-            
-        try:
-            file = self.repo.get_contents(GITHUB_FILE_PATH)
-            for line in base64.b64decode(file.content).decode().strip().split('\n'):
-                if line.strip():
-                    try:
-                        d = json.loads(line)
-                        if d.get('user_id') == uid:
-                            d.setdefault('owned_rods', ["1"])
-                            d.setdefault('inventory', {"rod": "1", "fish": {}})
-                            d.setdefault('total_exp', d.get('exp', 0))
-                            d.setdefault('chanle_win', 0)
-                            d.setdefault('chanle_lose', 0)
-                            d.setdefault('level_exp', 0)
-                            cache.set(f"u_{uid}", d)
-                            return d
-                    except:
-                        pass
-        except:
-            local = Storage.load()
-            if uid in local:
-                return local[uid]
-        return self.new_user(uid)
-    
-    def new_user(self, uid):
-        return {
-            "user_id": str(uid), 
-            "username": "", 
-            "coins": 100, 
-            "exp": 0, 
-            "total_exp": 0, 
-            "level": 1,
-            "level_exp": 0, 
-            "fishing_count": 0, 
-            "win_count": 0, 
-            "lose_count": 0, 
-            "chanle_win": 0, 
-            "chanle_lose": 0, 
-            "owned_rods": ["1"], 
-            "inventory": {"rod": "1", "fish": {}}, 
-            "created_at": datetime.now().isoformat()
-        }
-    
-    def save_user(self, data):
-        with self.lock:
-            cache.set(f"u_{data['user_id']}", data)
-            self.queue.append(data)
-            
-            if len(self.queue) >= 10 or (time.time() - self.last_save > SAVE_INTERVAL):
-                self.executor.submit(self.batch_save)
-    
-    def batch_save(self):
-        with self.lock:
-            if not self.queue:
-                return
-            to_save = self.queue.copy()
-            self.queue.clear()
-            self.last_save = time.time()
-            
-        try:
-            users = {}
-            try:
-                file = self.repo.get_contents(GITHUB_FILE_PATH)
-                for line in base64.b64decode(file.content).decode().strip().split('\n'):
-                    if line.strip():
-                        try:
-                            d = json.loads(line)
-                            if 'user_id' in d:
-                                users[d['user_id']] = d
-                        except:
-                            pass
-            except:
-                pass
-            
-            for d in to_save:
-                users[d['user_id']] = d
-                
-            Storage.save(users)
-            content = '\n'.join([json.dumps(d, ensure_ascii=False) for d in users.values()])
-            
-            try:
-                file = self.repo.get_contents(GITHUB_FILE_PATH)
-                self.repo.update_file(GITHUB_FILE_PATH, f"U{datetime.now().strftime('%H%M')}", content, file.sha)
-            except:
-                self.repo.create_file(GITHUB_FILE_PATH, f"C{datetime.now().strftime('%H%M')}", content)
-        except:
-            pass
-    
-    def auto_save(self):
-        while True:
-            try:
-                time.sleep(SAVE_INTERVAL)
-                if self.queue and Monitor.check():
-                    self.batch_save()
-            except:
-                time.sleep(60)
-    
-    def get_user(self, uid):
-        user = self.load_user(uid)
-        user.setdefault('inventory', {"rod": "1", "fish": {}})
-        FISHING_RODS = config_manager.get_fishing_rods()
-        if FISHING_RODS and user['inventory'].get('rod') not in FISHING_RODS:
-            user['inventory']['rod'] = "1"
-        user.setdefault('total_exp', user.get('exp', 0))
-        user.setdefault('chanle_win', 0)
-        user.setdefault('chanle_lose', 0)
-        user.setdefault('level_exp', 0)
-        return user
-    
-    def update_user(self, uid, data):
-        data['user_id'] = str(uid)
-        self.save_user(data)
-    
-    def best_rod(self, owned):
-        FISHING_RODS = config_manager.get_fishing_rods()
-        if not FISHING_RODS:
-            return "1"
-        best = "1"
-        best_val = 0
-        for rid in owned:
-            if rid in FISHING_RODS:
-                val = FISHING_RODS[rid].get('coin_multiplier', 1.0)
-                if val > best_val:
-                    best_val = val
-                    best = rid
-        return best
+            defaults = {
+                'total_exp': 0, 'minigames': {},
+                'stats': {'cl_win': 0, 'cl_lose': 0, 'hl_win': 0, 'hl_lose': 0},
+                'daily_streak': 0, 'last_daily': None,
+                'minigame_streaks': {}
+            }
+            for k, v in defaults.items():
+                user.setdefault(k, v)
+
+            for game_name, game_obj_dict in list(user['minigames'].items()):
+                if not game_obj_dict or game_obj_dict.get('game_over', True):
+                    del user['minigames'][game_name]
+            return user
+
+    async def update_user(self, uid: int, data: UserData):
+        async with self.lock:
+            self.users[str(uid)] = data
+
+    def new_user(self, uid: str) -> UserData:
+        return {"user_id": uid, "username": "", "coins": 100, "created_at": datetime.now().isoformat()}
+
+    async def get_top_users(self, key: str, limit: int = 10) -> List[UserData]:
+        async with self.lock:
+            return sorted(self.users.values(), key=lambda x: x.get(key, 0), reverse=True)[:limit]
+
+    async def shutdown(self):
+        if self._autosave_task:
+            self._autosave_task.cancel()
+        await Storage.save(self.users)
+        logger.info("DataManager shut down gracefully.")
 
 dm = DataManager()
 
-def get_rod_name(user):
-    FISHING_RODS = config_manager.get_fishing_rods()
-    if not FISHING_RODS:
-        return "🎣 Cơ bản"
-    rid = user.get('inventory', {}).get('rod', '1')
-    return FISHING_RODS.get(rid, {"name": "🎣 Cơ bản"})['name']
+def add_exp(user: UserData, exp: int):
+    user['total_exp'] = user.get('total_exp', 0) + exp
 
-async def safe_edit_message(bot, chat_id, message_id, text, reply_markup=None, max_retries=3):
-    """Edit message với xử lý lỗi tốt"""
-    text = truncate_text(text)
-    
-    for attempt in range(max_retries):
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-            return True
-        except Exception as e:
-            error_str = str(e).lower()
-            
-            if "message is not modified" in error_str:
-                return True
-            
-            if "flood" in error_str:
-                wait_time = extract_flood_wait(error_str)
-                logging.warning(f"Flood control, waiting {wait_time}s")
-                await asyncio.sleep(wait_time)
-                continue
-            
-            if "message to edit not found" in error_str:
-                return False
-            
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1.5 * (attempt + 1))
-            else:
-                logging.error(f"Failed to edit message after {max_retries} attempts: {e}")
-                return False
-    
-    return False
+def get_game_bet(user: UserData) -> int:
+    bet = int(user.get('coins', 0) * 0.10)
+    return max(10, bet)
 
-async def safe_send_message(bot, chat_id, text, reply_markup=None, max_retries=3):
-    """Send message với xử lý lỗi"""
-    text = truncate_text(text)
-    
-    for attempt in range(max_retries):
-        try:
-            msg = await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-            return msg
-        except Exception as e:
-            error_str = str(e).lower()
-            
-            if "flood" in error_str:
-                wait_time = extract_flood_wait(error_str)
-                logging.warning(f"Flood control on send, waiting {wait_time}s")
-                await asyncio.sleep(wait_time)
-                continue
-            
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1.5 * (attempt + 1))
-            else:
-                logging.error(f"Failed to send message: {e}")
-                return None
-    
-    return None
+def get_exp_reward(user: UserData, bet: int) -> int:
+    return 1000
 
-async def chanle(uid, choice, bet=1000):
-    user = dm.get_user(uid)
-    if user["coins"] < bet:
-        return None, f"❌ Cần {fmt(bet)} xu!"
-    user["coins"] -= bet
-    dice = random.randint(1, 6)
-    win = (choice == "even" and dice % 2 == 0) or (choice == "odd" and dice % 2 != 0)
-    
-    if win:
-        prize = int(bet * 2.5)
-        user["coins"] += prize
-        user["chanle_win"] = user.get("chanle_win", 0) + 1
-        dm.update_user(uid, user)
-        return {"success": True, "dice": dice, "win": prize, "coins": user["coins"]}, None
+def _update_minigame_streak(user: UserData, game_name: str, won: bool):
+    streaks = user.setdefault('minigame_streaks', {})
+    game_streak = streaks.setdefault(game_name, {'losses': 0, 'guaranteed_win': False})
+
+    if won:
+        game_streak['losses'] = 0
+        game_streak['guaranteed_win'] = False
     else:
-        user["chanle_lose"] = user.get("chanle_lose", 0) + 1
-        dm.update_user(uid, user)
-        return {"success": False, "dice": dice, "coins": user["coins"]}, None
+        game_streak['losses'] += 1
+        if game_streak['losses'] >= 3:
+            game_streak['guaranteed_win'] = True
+            game_streak['losses'] = 0
 
-async def fish(uid, auto=False):
-    user = dm.get_user(uid)
-    if user["coins"] < 10:
-        return None, "❌ Cần 10 xu!"
-    user["coins"] -= 10
-    
-    FISHING_RODS = config_manager.get_fishing_rods()
-    FISH_TYPES = config_manager.get_fish_types()
-    
-    if not FISHING_RODS or not FISH_TYPES:
-        user["coins"] += 10
-        dm.update_user(uid, user)
-        return None, "❌ Config chưa được load!"
-    
-    rod = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), list(FISHING_RODS.values())[0])
-    rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-    
-    luck = 1.0
-    if not auto:
-        r = random.random()
-        if r < 0.01: luck = 5.0
-        elif r < 0.03: luck = 3.0
-        elif r < 0.08: luck = 2.0
-        elif r < 0.2: luck = 1.5
-    else:
-        if random.random() < 0.005: luck = 2.0
-        elif random.random() < 0.02: luck = 1.5
-    
-    luck *= rank.get('luck_bonus', 1.0)
-    
-    rand = random.uniform(0, 100)
-    total = 0
-    caught = None
-    
-    items = list(FISH_TYPES.items())
-    random.shuffle(items)
-    
-    for name, data in items:
-        chance = data["chance"] * rod.get('bonus', 1.0) * rank.get('fish_bonus', 1.0) * luck
-        
-        if auto:
-            if data['rarity'] in ['L', 'M', 'S', 'X', 'Z']:
-                chance *= 0.2
-            elif data['rarity'] == 'E':
-                chance *= 0.5
-            elif data['rarity'] == 'R':
-                chance *= 0.7
-        
-        total += chance
-        if rand <= total:
-            caught = name
-            reward = int(data["value"] * rank.get('coin_bonus', 1.0) * rod.get('coin_multiplier', 1.0))
-            exp = int(data["exp"] * rod.get('exp_bonus', 1.0))
-            break
-    
-    if caught:
-        user['inventory'].setdefault('fish', {})
-        user['inventory']['fish'][caught] = user['inventory']['fish'].get(caught, 0) + 1
-        user["coins"] += reward
-        user["exp"] += exp
-        user["total_exp"] = user.get('total_exp', 0) + exp
-        user["level_exp"] = user.get('level_exp', 0) + exp
-        
-        exp_req = get_level_exp(user["level"])
-        leveled = False
-        while user["level_exp"] >= exp_req:
-            user["level_exp"] -= exp_req
-            user["level"] += 1
-            exp_req = get_level_exp(user["level"])
-            leveled = True
-        
-        user["fishing_count"] += 1
-        user["win_count"] += 1
-        dm.update_user(uid, user)
-        
-        return {
-            "success": True, 
-            "fish": caught, 
-            "rarity": FISH_TYPES[caught]['rarity'],
-            "reward": reward, 
-            "exp": exp, 
-            "leveled": leveled, 
-            "level": user["level"],
-            "coins": user["coins"], 
-            "luck": luck
-        }, None
-    else:
-        user["fishing_count"] += 1
-        user["lose_count"] += 1
-        dm.update_user(uid, user)
-        return {"success": False, "coins": user["coins"]}, None
+async def safe_edit_message(bot: Bot, chat_id: int, msg_id: int, text: str, kbd: InlineKeyboardMarkup):
+    try:
+        await bot.edit_message_text(text, chat_id, msg_id, reply_markup=kbd, parse_mode='Markdown')
+    except Exception as e:
+        if "message is not modified" not in str(e).lower():
+            logger.warning(f"Edit failed: {e}")
 
-async def auto_fish_optimized(uid, mid, cid, bot):
-    """Auto fishing với rate limiting và error handling tốt"""
-    async with auto_manager.semaphore:
-        auto_manager.add_session(uid, mid, cid)
-        
-        last_full_update = 0
-        error_count = 0
-        consecutive_errors = 0
-        update_failures = 0
-        
-        try:
-            # Initial message
-            await rate_limiter.acquire(uid)
-            initial_msg = await safe_edit_message(
-                bot, cid, mid,
-                "🤖 **KHỞI ĐỘNG AUTO...**\n\n⏳ Đang chuẩn bị..."
-            )
-            
-            if not initial_msg:
-                logging.error(f"Failed to start auto for {uid}")
-                return
-            
-            while auto_manager.is_active(uid):
-                # Check system resources
-                if not Monitor.check():
-                    await asyncio.sleep(2)
-                    continue
-                
-                # Fishing với delay ngẫu nhiên
-                await asyncio.sleep(random.uniform(0.5, 1.5))
-                
-                res, err = await fish(uid, auto=True)
-                
-                if err:
-                    error_count += 1
-                    consecutive_errors += 1
-                    
-                    if error_count >= 5 or consecutive_errors >= 3:
-                        await rate_limiter.acquire(uid)
-                        await safe_edit_message(
-                            bot, cid, mid,
-                            f"⛔ **AUTO DỪNG**\n\n{err}\n\nLỗi liên tục!"
-                        )
-                        break
-                    
-                    await asyncio.sleep(3)
-                    continue
-                
-                # Reset consecutive errors on success
-                consecutive_errors = 0
-                auto_manager.update_stats(uid, res)
-                
-                # Check if should update message
-                current_time = time.time()
-                time_since_update = current_time - last_full_update
-                
-                if time_since_update >= AUTO_UPDATE_INTERVAL and auto_manager.should_update(uid):
-                    # Rate limit the update
-                    if rate_limiter.check_can_update(uid):
-                        await rate_limiter.acquire(uid)
-                        
-                        user = dm.get_user(uid)
-                        stats = auto_manager.get_stats(uid)
-                        session_info = auto_manager.get_session_info(uid)
-                        
-                        if not session_info:
-                            break
-                        
-                        runtime = int(current_time - session_info.get('start_time', current_time))
-                        rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-                        
-                        # Create compact message
-                        txt = f"🤖 **AUTO**\n"
-                        txt += f"📊 {stats['count']} câu | ⏱️ {runtime}s\n"
-                        txt += f"💰 +{fmt(stats['coins'])} | ⭐ +{stats['exp']}\n"
-                        txt += f"💰 Xu: {fmt(user['coins'])}\n"
-                        
-                        # Rarity summary
-                        rarity_line = ""
-                        for r in ["Z", "X", "S", "M", "L", "E", "R", "U", "C"]:
-                            if stats['rarity_count'][r] > 0:
-                                rarity_line += f"{get_color(r)}{stats['rarity_count'][r]} "
-                        
-                        if rarity_line:
-                            txt += f"\n{rarity_line}\n"
-                        
-                        if stats['best_catch']:
-                            txt += f"\n🎯 Best: {stats['best_catch'][:20]}\n"
-                        
-                        txt += f"\n🔄 Update: {AUTO_UPDATE_INTERVAL}s"
-                        
-                        kb = [
-                            [InlineKeyboardButton("🛑 DỪNG", callback_data='stop_auto')],
-                            [InlineKeyboardButton("↩️ Menu", callback_data='back_menu_auto')]
-                        ]
-                        
-                        success = await safe_edit_message(
-                            bot, cid, mid, txt,
-                            reply_markup=InlineKeyboardMarkup(kb)
-                        )
-                        
-                        if success:
-                            last_full_update = current_time
-                            update_failures = 0
-                        else:
-                            update_failures += 1
-                            
-                            # Try sending new message if too many failures
-                            if update_failures >= 3:
-                                new_msg = await safe_send_message(
-                                    bot, cid, txt,
-                                    reply_markup=InlineKeyboardMarkup(kb)
-                                )
-                                if new_msg:
-                                    auto_manager.update_message_info(uid, new_msg.message_id, cid)
-                                    mid = new_msg.message_id
-                                    update_failures = 0
-                
-                # Delay based on rod speed với jitter
-                user = dm.get_user(uid)
-                FISHING_RODS = config_manager.get_fishing_rods()
-                rod = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), {"auto_speed": 4.0}) if FISHING_RODS else {"auto_speed": 4.0}
-                
-                base_delay = rod.get('auto_speed', 4.0)
-                jitter = random.uniform(-0.5, 0.5)
-                actual_delay = max(2.5, base_delay + jitter)  # Minimum 2.5s
-                
-                await asyncio.sleep(actual_delay)
-        
-        except asyncio.CancelledError:
-            logging.info(f"Auto fishing cancelled for {uid}")
-        except Exception as e:
-            logging.error(f"Auto error for {uid}: {e}")
-            logging.error(traceback.format_exc())
-        
-        finally:
-            # Cleanup và final message
-            stats = auto_manager.get_stats(uid)
-            auto_manager.cleanup_session(uid)
-            
-            try:
-                await rate_limiter.acquire(uid)
-                
-                txt = f"✅ **KẾT THÚC**\n\n"
-                txt += f"📊 Tổng: {stats['count']} câu\n"
-                txt += f"💰 Thu: +{fmt(stats['coins'])}\n"
-                txt += f"⭐ EXP: +{stats['exp']}\n"
-                
-                if stats['best_catch']:
-                    txt += f"\n🎯 Tốt nhất: {stats['best_catch'][:30]}"
-                
-                kb = [[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
-                
-                await safe_edit_message(
-                    bot, cid, mid, txt,
-                    reply_markup=InlineKeyboardMarkup(kb)
-                )
-            except:
-                pass
+async def update_username_if_needed(user_id: int, telegram_user: Update.effective_user):
+    db_user = await dm.get_user(user_id)
+    new_username = f"@{telegram_user.username}" if telegram_user.username else telegram_user.first_name
+    
+    if db_user.get("username") != new_username:
+        db_user["username"] = new_username
+        await dm.update_user(user_id, db_user)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    
-    # Rate limiting
+    if not update.effective_user:
+        return
+    user, uid = update.effective_user, update.effective_user.id
     await rate_limiter.acquire(uid)
-    
-    name = update.effective_user.username or update.effective_user.first_name
-    user = dm.get_user(uid)
-    user["username"] = f"@{name}" if update.effective_user.username else name
-    dm.update_user(uid, user)
-    rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-    s = Monitor.stats()
-    reset = get_next_sunday()
-    
-    txt = truncate_text(
-        f"🎮 **GAME CÂU CÁ**\n\n"
-        f"👤 {user['username']}\n"
-        f"💰 {fmt(user['coins'])} xu\n"
-        f"⭐ Lv.{user['level']}\n"
-        f"🎯 {fmt(user.get('total_exp', 0))} EXP\n"
-        f"🏆 {rank['name']}\n"
-        f"🎣 {get_rod_name(user)}\n\n"
-        f"⏰ Reset: CN {reset.strftime('%d/%m')}\n\n"
-        f"/menu - Menu\n"
-        f"/stop - Dừng auto\n"
-        f"/reload - Reload config\n\n"
-        f"💻 CPU {s['cpu']:.0f}% RAM {s['ram']:.0f}%"
-    )
-    
-    await update.message.reply_text(txt, parse_mode='Markdown')
-
-async def reload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    await rate_limiter.acquire(uid)
-    
-    config_manager.reload_config()
-    await update.message.reply_text("✅ **Config đã được reload!**\n\n/menu", parse_mode='Markdown')
+    await update_username_if_needed(uid, user)
+    await update.message.reply_text("✨ **MINI GAME BOT** ✨\n\nChào mừng! Bot đã được cập nhật với các trò chơi mới. Sử dụng /menu để khám phá.", parse_mode='Markdown')
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user:
+        return
     uid = update.effective_user.id
-    
-    # Rate limiting
     await rate_limiter.acquire(uid)
+    await update_username_if_needed(uid, update.effective_user)
+    user = await dm.get_user(uid)
+    rank, next_rank = get_user_rank(user.get('total_exp', 0))
     
-    user = dm.get_user(uid)
-    if not user.get("username"):
-        user["username"] = f"@{update.effective_user.username}" if update.effective_user.username else update.effective_user.first_name
-        dm.update_user(uid, user)
-    
-    rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-    kb = [
-        [InlineKeyboardButton("🎣 Câu", callback_data='fish'),
-         InlineKeyboardButton("🤖 Auto", callback_data='auto')],
-        [InlineKeyboardButton("🎣 Shop", callback_data='shop'),
-         InlineKeyboardButton("🎲 Chẵn Lẻ", callback_data='chanle')],
-        [InlineKeyboardButton("🎒 Kho", callback_data='inv'),
-         InlineKeyboardButton("📊 Stats", callback_data='stats')],
-        [InlineKeyboardButton("🏆 Top Xu", callback_data='top_coins'),
-         InlineKeyboardButton("🏆 Top Rank", callback_data='top_rank')],
-        [InlineKeyboardButton("🏆 Rank", callback_data='rank'),
-         InlineKeyboardButton("📖 Help", callback_data='help')]
-    ]
-    
-    reset = get_next_sunday()
-    exp_req = get_level_exp(user['level'])
-    exp_prog = user.get('level_exp', 0)
-    
-    txt = truncate_text(
-        f"🎮 **MENU**\n\n"
-        f"👤 {user['username']} Lv.{user['level']}\n"
-        f"💰 {fmt(user['coins'])} xu\n"
-        f"⭐ {fmt(user.get('total_exp', 0))} EXP\n"
-        f"📊 {exp_prog}/{exp_req}\n"
-        f"🏆 {rank['name']}\n"
-        f"🎣 {get_rod_name(user)}\n\n"
-        f"⏰ Reset: CN {reset.strftime('%d/%m')}"
-    )
-    
-    await update.message.reply_text(
-        txt, 
-        reply_markup=InlineKeyboardMarkup(kb), 
-        parse_mode='Markdown'
-    )
+    exp_str = f"{fmt(user.get('total_exp', 0))}"
+    if next_rank:
+        exp_str += f" / {fmt(next_rank['exp'])}"
 
-async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    await rate_limiter.acquire(uid)
+    txt = f"""
+👤 **{user.get('username', 'Player')}**
+- 🏆 **Rank:** {rank['name']}
+- ⭐ **EXP:** {exp_str}
+- 💰 **Xu:** {fmt(user['coins'])}
+"""
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🪙 Tung Đồng Xu", callback_data='game_coinflip'), InlineKeyboardButton("🎰 Máy Xèng", callback_data='game_slots')],
+        [InlineKeyboardButton("💎 Kho Báu", callback_data='game_treasure'), InlineKeyboardButton("✊ Oẳn Tù Tì", callback_data='rps_start')],
+        [InlineKeyboardButton("🔢 Đoán Số", callback_data='guess_start'), InlineKeyboardButton("🃏 Cao/Thấp", callback_data='game_highlow')],
+        [InlineKeyboardButton("🎲 Chẵn Lẻ", callback_data='game_chanle'), InlineKeyboardButton("🎲 Tài Xỉu", callback_data='game_taixiu'), InlineKeyboardButton("🎲 Lắc Xúc Xắc", callback_data='game_diceroll')],
+        [InlineKeyboardButton("🎡 Vòng Quay", callback_data='game_luckywheel'), InlineKeyboardButton("🎁 Điểm Danh", callback_data='daily_bonus')],
+        [InlineKeyboardButton("📊 Thống Kê", callback_data='stats'), InlineKeyboardButton("🏆 Bảng Xếp Hạng", callback_data='ranking')],
+        [InlineKeyboardButton("📖 Hướng Dẫn", callback_data='help')]
+    ])
     
-    if auto_manager.is_active(uid):
-        auto_manager.stop_session(uid)
-        await update.message.reply_text("🛑 **Đang dừng auto...**", parse_mode='Markdown')
+    if update.callback_query:
+        await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, txt, kb)
     else:
-        await update.message.reply_text("❌ Không có auto!\n\n/menu", parse_mode='Markdown')
+        await update.message.reply_text(txt, reply_markup=kb, parse_mode='Markdown')
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
+    if not q or not q.from_user:
+        return
     await q.answer()
     uid = q.from_user.id
+    await update_username_if_needed(uid, q.from_user)
     data = q.data
-    
-    # Rate limiting cho callbacks
     await rate_limiter.acquire(uid)
+
+    if data.startswith('rps_play_'):
+        await handle_rps(update, context)
+    elif data.startswith('cf_play_'):
+        await handle_coin_flip_play(update, context)
+    elif data.startswith('taixiu_'):
+        await handle_taixiu_bet(update, context)
+    elif data.startswith('treasure_chest_'):
+        await handle_treasure_choice(update, context)
+    elif data.startswith('hl_play_'):
+        await handle_highlow_play(update, context)
+    elif data.startswith('dr_play_'):
+        await handle_dice_roll_play(update, context)
+    elif data.startswith('chanle_play_'):
+        await handle_chanle_play(update, context)
+    else:
+        handlers = {
+            'game_treasure': handle_treasure_hunt, 'game_chanle': handle_chanle, 'game_highlow': handle_highlow_start,
+            'game_taixiu': handle_taixiu, 'game_luckywheel': handle_lucky_wheel, 'daily_bonus': handle_daily_bonus,
+            'stats': handle_stats, 'ranking': handle_ranking, 'top_coins': handle_top_coins, 'top_rank': handle_top_rank,
+            'help': handle_help, 'back_menu': menu, 'guess_start': guess_game, 'rps_start': rps_start, 
+            'game_coinflip': handle_coin_flip_start,
+            'game_slots': handle_slot_machine_start,
+            'game_diceroll': handle_dice_roll_start,
+        }
+        if data in handlers:
+            await handlers[data](update, context)
+
+async def guess_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user:
+        return
+    uid = update.effective_user.id
+    user = await dm.get_user(uid)
     
-    if data == 'back_menu_auto':
-        if auto_manager.is_active(uid):
-            auto_manager.stop_session(uid)
-            await q.edit_message_text("🛑 **Đang dừng...**", parse_mode='Markdown')
-            await asyncio.sleep(2)
-        data = 'back_menu'
-    
-    if data == 'shop':
-        user = dm.get_user(uid)
-        FISHING_RODS = config_manager.get_fishing_rods()
-        if not FISHING_RODS:
-            await q.edit_message_text("❌ Config chưa được load!", parse_mode='Markdown')
+    if update.callback_query:
+        if 'guess_number' in user.get('minigames', {}):
+            await context.bot.answer_callback_query(update.callback_query.id, "Bạn đang trong ván chơi rồi!", show_alert=True)
             return
-            
-        rod = user.get('inventory', {}).get('rod', '1')
-        owned = user.get('owned_rods', ['1'])
-        best = dm.best_rod(owned)
-        txt = f"🎣 **SHOP CẦN**\n\n💰 {fmt(user['coins'])} xu\n🎣 {FISHING_RODS.get(rod, {'name': '🎣 Cơ bản'})['name']}\n\n"
-        kb = []
+
+        bet = get_game_bet(user)
+        if user['coins'] < bet:
+            await context.bot.answer_callback_query(update.callback_query.id, f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+            return
         
-        if rod != best:
-            kb.append([InlineKeyboardButton(f"⚡ Trang bị tốt nhất", callback_data=f'equip_{best}')])
+        user['coins'] -= bet
+        game = GuessNumberGame(bet=bet)
+        user['minigames']['guess_number'] = game.to_dict()
+        await dm.update_user(uid, user)
         
-        cnt = 0
-        for rid, rd in FISHING_RODS.items():
-            if rid not in owned and cnt < 5:
-                txt += f"⬜ {rd['name']} - {fmt(rd['price'])}\n   {rd['desc'][:50]}\n"
-                if user['coins'] >= rd['price']:
-                    kb.append([InlineKeyboardButton(f"Mua {rd['name'][:20]}", callback_data=f'buy_{rid}')])
-                cnt += 1
+        text = f"🤔 **ĐOÁN SỐ** 🤔\n\nTôi đã nghĩ một số từ {game.min_val} đến {game.max_val}.\n(Cược: {fmt(bet)} xu)\nHãy trả lời tin nhắn này với số bạn đoán!"
+        await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, text, InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]))
+        return
+
+    if update.message and update.message.text:
+        game_dict = user.get('minigames', {}).get('guess_number')
+        if not game_dict:
+            await update.message.reply_text("Bắt đầu game Đoán Số từ /menu đã.", reply_to_message_id=update.message.message_id)
+            return
         
-        if cnt == 0:
-            txt += "\n✅ Đã có tất cả!"
-        
-        kb.append([InlineKeyboardButton("↩️", callback_data='back_menu')])
-        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    elif data.startswith('buy_'):
-        rid = data.replace('buy_', '')
-        user = dm.get_user(uid)
-        FISHING_RODS = config_manager.get_fishing_rods()
-        if not FISHING_RODS:
-            await q.edit_message_text("❌ Config chưa được load!", parse_mode='Markdown')
-            return
-            
-        rd = FISHING_RODS.get(rid)
-        if not rd:
-            await q.edit_message_text("❌ Lỗi!")
-            return
-        if user['coins'] < rd['price']:
-            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-            await q.edit_message_text(f"❌ Cần {fmt(rd['price'])} xu!", reply_markup=InlineKeyboardMarkup(kb))
-            return
-        user['coins'] -= rd['price']
-        user.setdefault('owned_rods', ['1']).append(rid)
-        best = dm.best_rod(user['owned_rods'])
-        user['inventory']['rod'] = best
-        dm.update_user(uid, user)
-        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-        await q.edit_message_text(
-            truncate_text(f"✅ Mua thành công!\n{rd['name']}\n{rd['desc'][:100]}\n\n🎣 Đã trang bị!\n💰 Còn: {fmt(user['coins'])}"),
-            reply_markup=InlineKeyboardMarkup(kb), 
-            parse_mode='Markdown'
-        )
-    
-    elif data.startswith('equip_'):
-        rid = data.replace('equip_', '')
-        user = dm.get_user(uid)
-        if rid not in user.get('owned_rods', []):
-            await q.edit_message_text("❌ Chưa có!")
-            return
-        user['inventory']['rod'] = rid
-        dm.update_user(uid, user)
-        FISHING_RODS = config_manager.get_fishing_rods()
-        rd = FISHING_RODS.get(rid, {'name': '🎣 Cơ bản', 'desc': 'Mặc định'})
-        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-        await q.edit_message_text(
-            truncate_text(f"✅ Trang bị: {rd['name']}\n{rd['desc'][:100]}"),
-            reply_markup=InlineKeyboardMarkup(kb), 
-            parse_mode='Markdown'
-        )
-    
-    elif data == 'chanle':
-        user = dm.get_user(uid)
-        txt = f"🎲 **CHẴN LẺ**\n\n💰 {fmt(user['coins'])} xu\n🏆 Thắng: {user.get('chanle_win', 0)}\n💔 Thua: {user.get('chanle_lose', 0)}\n\n📋 Luật:\n🎲 1-6\n💰 1K xu\n🏆 x2.5"
-        kb = [
-            [InlineKeyboardButton("CHẴN", callback_data='cl_even'), 
-             InlineKeyboardButton("LẺ", callback_data='cl_odd')],
-            [InlineKeyboardButton("↩️", callback_data='back_menu')]
-        ]
-        await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    elif data in ['cl_even', 'cl_odd']:
-        choice = 'even' if data == 'cl_even' else 'odd'
-        await q.edit_message_text("🎲 Đang tung...")
-        await asyncio.sleep(1.5)
-        res, err = await chanle(uid, choice)
-        if err:
-            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-            await q.edit_message_text(err, reply_markup=InlineKeyboardMarkup(kb))
-            return
-        dice_ico = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"][res['dice'] - 1]
-        choice_txt = "CHẴN" if choice == "even" else "LẺ"
-        res_txt = "CHẴN" if res['dice'] % 2 == 0 else "LẺ"
-        if res["success"]:
-            txt = f"🎉 **THẮNG!**\n\n{dice_ico} {res['dice']} ({res_txt})\nChọn: {choice_txt}\n\n💰 +{fmt(res['win'])}\n💰 Xu: {fmt(res['coins'])}"
-        else:
-            txt = f"😢 **THUA!**\n\n{dice_ico} {res['dice']} ({res_txt})\nChọn: {choice_txt}\n\n💸 -1K\n💰 Xu: {fmt(res['coins'])}"
-        kb = [
-            [InlineKeyboardButton("🎲 Tiếp", callback_data='chanle')], 
-            [InlineKeyboardButton("↩️", callback_data='back_menu')]
-        ]
-        await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    elif data == 'inv':
-        user = dm.get_user(uid)
-        FISH_TYPES = config_manager.get_fish_types()
-        inv = user.get('inventory', {}).get('fish', {})
-        txt = f"🎒 **KHO**\n\n💰 {fmt(user['coins'])}\n🎣 {get_rod_name(user)}\n\n📦 Cá:\n"
-        total_val = 0
-        total_cnt = 0
-        if inv and FISH_TYPES:
-            sorted_inv = sorted(inv.items(), key=lambda x: FISH_TYPES.get(x[0], {}).get('value', 0), reverse=True)[:15]
-            for name, cnt in sorted_inv:
-                if name in FISH_TYPES:
-                    val = FISH_TYPES[name]['value'] * cnt
-                    total_val += val * 0.7
-                    total_cnt += cnt
-                    txt += f"{get_color(FISH_TYPES[name]['rarity'])} {name[:20]}: {cnt}\n"
-            txt += f"\n📊 {total_cnt} con\n💰 {fmt(int(total_val))}"
-            kb = [[InlineKeyboardButton("💰 Bán", callback_data='sell')], [InlineKeyboardButton("↩️", callback_data='back_menu')]]
-        else:
-            txt += "❌ Trống!"
-            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    elif data == 'sell':
-        user = dm.get_user(uid)
-        rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-        FISH_TYPES = config_manager.get_fish_types()
-        total_val = 0
-        total_cnt = 0
-        inv = user.get('inventory', {}).get('fish', {})
-        if inv and FISH_TYPES:
-            for name, cnt in inv.items():
-                if name in FISH_TYPES:
-                    total_val += FISH_TYPES[name]['value'] * cnt * 0.7 * rank.get('coin_bonus', 1.0)
-                    total_cnt += cnt
-            user['inventory']['fish'] = {}
-            user["coins"] += int(total_val)
-            dm.update_user(uid, user)
-            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-            await q.edit_message_text(
-                f"💰 **BÁN OK!**\n{total_cnt} con\n+{fmt(int(total_val))} (x{rank.get('coin_bonus', 1.0):.1f})\n💰 {fmt(user['coins'])}", 
-                reply_markup=InlineKeyboardMarkup(kb), 
-                parse_mode='Markdown'
-            )
-        else:
-            await q.edit_message_text("❌ Trống!")
-    
-    elif data == 'top_coins':
-        users = []
+        game = GuessNumberGame.from_dict(game_dict)
+
         try:
-            file = dm.repo.get_contents(GITHUB_FILE_PATH)
-            for line in base64.b64decode(file.content).decode().strip().split('\n'):
-                if line.strip():
-                    try:
-                        users.append(json.loads(line))
-                    except:
-                        pass
-        except:
-            pass
-        sorted_u = sorted(users, key=lambda x: x.get('coins', 0), reverse=True)[:10]
-        txt = "🏆 **TOP XU**\n\n"
-        medals = ["🥇", "🥈", "🥉"] + [f"{i}." for i in range(4, 11)]
-        for i, u in enumerate(sorted_u, 1):
-            txt += f"{medals[i-1]} {u.get('username', 'User')[:20]} - {fmt(u.get('coins', 0))}\n"
-        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    elif data == 'top_rank':
-        users = []
-        try:
-            file = dm.repo.get_contents(GITHUB_FILE_PATH)
-            for line in base64.b64decode(file.content).decode().strip().split('\n'):
-                if line.strip():
-                    try:
-                        users.append(json.loads(line))
-                    except:
-                        pass
-        except:
-            pass
-        sorted_u = sorted(users, key=lambda x: x.get('total_exp', 0), reverse=True)[:10]
-        txt = "🏆 **TOP RANK**\n\n"
-        medals = ["🥇", "🥈", "🥉"] + [f"{i}." for i in range(4, 11)]
-        for i, u in enumerate(sorted_u, 1):
-            r, _, _, _ = get_user_rank(u.get('total_exp', 0))
-            txt += f"{medals[i-1]} {u.get('username', 'User')[:20]}\n   {r['name']} - {fmt(u.get('total_exp', 0))} EXP\n"
-        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    elif data == 'rank':
-        user = dm.get_user(uid)
-        rank, level, next_r, exp_next = get_user_rank(user.get('total_exp', 0))
-        exp_req = get_level_exp(user['level'])
-        exp_prog = user.get('level_exp', 0)
-        txt = f"🏆 **RANK**\n\n🎯 {fmt(user.get('total_exp', 0))} EXP\n🏆 {rank['name']}\n⭐ Lv.{user['level']} ({exp_prog}/{exp_req})\n\n📊 Buff:\n💰 Xu x{rank.get('coin_bonus', 1.0):.1f}\n🎣 Cá x{rank.get('fish_bonus', 1.0):.1f}\n🍀 May mắn x{rank.get('luck_bonus', 1.0):.1f}"
-        if next_r:
-            prog = user.get('total_exp', 0) - rank['exp_required']
-            total = next_r['exp_required'] - rank['exp_required']
-            pct = (prog / total * 100) if total > 0 else 0
-            txt += f"\n\n📈 Tiếp: {next_r['name']}\nCần: {fmt(exp_next)} EXP\n{pct:.1f}%"
-        else:
-            txt += "\n\n👑 MAX!"
-        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    elif data == 'help':
-        txt = "📖 **HELP**\n\n🎣 10 xu/lần\n🍀 Thường > Auto\n🎲 1K xu, x2.5\n💰 Reset CN 00:00\n🎒 Bán = 70%\n⚡ Auto trang bị tốt nhất\n🔄 Auto update 60s\n📁 Config update 10p\n⚠️ Rate limit: 1 msg/1.5s\n\n/menu - Menu\n/stop - Dừng\n/reload - Reload config"
-        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-        await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    elif data == 'fish':
-        user = dm.get_user(uid)
-        FISHING_RODS = config_manager.get_fishing_rods()
-        if not FISHING_RODS:
-            await q.edit_message_text("❌ Config chưa được load!", parse_mode='Markdown')
+            guess = int(update.message.text)
+        except (ValueError, IndexError):
+            await update.message.reply_text("Vui lòng nhập một số hợp lệ.", reply_to_message_id=update.message.message_id)
             return
-            
-        rod = FISHING_RODS.get(user.get('inventory', {}).get('rod', '1'), {"speed": 3.0, "name": "🎣 Cơ bản"})
-        rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-        await q.edit_message_text(f"🎣 Câu... ({rod.get('speed', 3.0)}s)")
-        await asyncio.sleep(rod.get('speed', 3.0))
-        res, err = await fish(uid, auto=False)
-        if err:
-            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-            await q.edit_message_text(err, reply_markup=InlineKeyboardMarkup(kb))
-            return
-        if res["success"]:
-            luck_txt = ""
-            total_luck = res.get("luck", 1.0)
-            if total_luck >= 15.0:
-                luck_txt = f"\n🍀 **GODLIKE x{total_luck:.1f}!**"
-            elif total_luck >= 10.0:
-                luck_txt = f"\n🍀 **LEGENDARY x{total_luck:.1f}!**"
-            elif total_luck >= 6.0:
-                luck_txt = f"\n🍀 **EPIC x{total_luck:.1f}!**"
-            elif total_luck >= 3.0:
-                luck_txt = f"\n🍀 **LUCKY x{total_luck:.1f}!**"
-            elif total_luck > 1.5:
-                luck_txt = f"\n🍀 May mắn x{total_luck:.1f}"
-            txt = f"🎉 **BẮT ĐƯỢC!**\n{res['fish'][:30]} {get_color(res['rarity'])}\n💰 +{fmt(res['reward'])}\n⭐ +{res['exp']} EXP\n💰 {fmt(res['coins'])}{luck_txt}"
-            if res['leveled']:
-                txt += f"\n\n🎊 **LEVEL {res['level']}!**"
-        else:
-            txt = f"😢 Trượt!\n💰 {fmt(res['coins'])}"
-        kb = [
-            [InlineKeyboardButton("🎣 Tiếp", callback_data='fish')], 
-            [InlineKeyboardButton("↩️", callback_data='back_menu')]
-        ]
-        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    elif data == 'auto':
-        if auto_manager.is_active(uid):
-            await q.edit_message_text("⚠️ Đang auto!\n/stop", parse_mode='Markdown')
-            return
-        if not Monitor.check():
-            await q.edit_message_text("⚠️ Quá tải!", parse_mode='Markdown')
-            return
-        user = dm.get_user(uid)
-        if user["coins"] < 10:
-            kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-            await q.edit_message_text("❌ Cần 10 xu!", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-            return
-        await q.edit_message_text("🤖 **KHỞI ĐỘNG AUTO...**", parse_mode='Markdown')
-        asyncio.create_task(auto_fish_optimized(uid, q.message.message_id, q.message.chat_id, context.bot))
-    
-    elif data == 'stop_auto':
-        if auto_manager.is_active(uid):
-            auto_manager.stop_session(uid)
-            await q.edit_message_text("🛑 **Đang dừng...**", parse_mode='Markdown')
-        else:
-            await q.edit_message_text("❌ Không có auto!", parse_mode='Markdown')
-    
-    elif data == 'stats':
-        user = dm.get_user(uid)
-        rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-        win_rate = (user.get('win_count', 0) / user.get('fishing_count', 1)) * 100 if user.get('fishing_count', 0) > 0 else 0
-        exp_req = get_level_exp(user['level'])
-        exp_prog = user.get('level_exp', 0)
-        txt = f"📊 **STATS**\n\n👤 {user['username'][:30]}\n⭐ Lv.{user['level']} ({exp_prog}/{exp_req})\n🏆 {rank['name']}\n\n📈 Câu:\n🎣 {user.get('fishing_count', 0)}\n✅ {user.get('win_count', 0)}\n❌ {user.get('lose_count', 0)}\n📊 {win_rate:.1f}%\n\n🎲 Chẵn lẻ:\n✅ {user.get('chanle_win', 0)}\n❌ {user.get('chanle_lose', 0)}"
-        kb = [[InlineKeyboardButton("↩️", callback_data='back_menu')]]
-        await q.edit_message_text(truncate_text(txt), reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    elif data == 'back_menu':
-        user = dm.get_user(uid)
-        rank, _, _, _ = get_user_rank(user.get('total_exp', 0))
-        kb = [
-            [InlineKeyboardButton("🎣 Câu", callback_data='fish'),
-             InlineKeyboardButton("🤖 Auto", callback_data='auto')],
-            [InlineKeyboardButton("🎣 Shop", callback_data='shop'),
-             InlineKeyboardButton("🎲 Chẵn Lẻ", callback_data='chanle')],
-            [InlineKeyboardButton("🎒 Kho", callback_data='inv'),
-             InlineKeyboardButton("📊 Stats", callback_data='stats')],
-            [InlineKeyboardButton("🏆 Top Xu", callback_data='top_coins'),
-             InlineKeyboardButton("🏆 Top Rank", callback_data='top_rank')],
-            [InlineKeyboardButton("🏆 Rank", callback_data='rank'),
-             InlineKeyboardButton("📖 Help", callback_data='help')]
-        ]
-        reset = get_next_sunday()
-        exp_req = get_level_exp(user['level'])
-        exp_prog = user.get('level_exp', 0)
-        txt = truncate_text(
-            f"🎮 **MENU**\n\n"
-            f"👤 {user['username'][:30]} Lv.{user['level']}\n"
-            f"💰 {fmt(user['coins'])} xu\n"
-            f"⭐ {fmt(user.get('total_exp', 0))} EXP\n"
-            f"📊 {exp_prog}/{exp_req}\n"
-            f"🏆 {rank['name']}\n"
-            f"🎣 {get_rod_name(user)}\n\n"
-            f"⏰ Reset: CN {reset.strftime('%d/%m')}"
-        )
-        await q.edit_message_text(
-            txt, 
-            reply_markup=InlineKeyboardMarkup(kb), 
-            parse_mode='Markdown'
-        )
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.error(f"Error: {context.error}")
-    
-    # Handle flood control errors globally
-    if "flood" in str(context.error).lower():
-        wait_time = extract_flood_wait(str(context.error))
-        logging.warning(f"Global flood control, waiting {wait_time}s")
-        await asyncio.sleep(wait_time)
+        result = game.make_guess(guess)
+        user['minigames']['guess_number'] = game.to_dict()
 
-def cleanup():
-    """Cleanup trước khi tắt bot"""
-    logging.info("Starting cleanup...")
-    
-    # Stop all auto sessions
-    for uid in list(auto_manager.active_sessions.keys()):
-        auto_manager.stop_session(uid)
-    
-    # Wait for sessions to stop
-    time.sleep(2)
-    
-    # Clear all data
-    auto_manager.active_sessions.clear()
-    auto_manager.session_stats.clear()
-    auto_manager.message_info.clear()
-    auto_manager.flood_control.clear()
-    
-    # Shutdown executor
-    if hasattr(dm, 'executor'):
-        dm.executor.shutdown(wait=False)
-    
-    # Force garbage collection
-    gc.collect()
-    
-    logging.info("Cleanup completed")
+        if result == "correct":
+            prize = game.bet * 2.5
+            exp = get_exp_reward(user, game.bet)
+            user['coins'] += prize
+            add_exp(user, exp)
+            del user['minigames']['guess_number']
+            txt = f"🎉 **CHÍNH XÁC!** 🎉\nSố bí mật là {game.secret_number}.\nBạn đoán đúng sau {game.guesses} lần.\n\n> 💰 **Thưởng:** {fmt(prize)} xu\n> ⭐ **Kinh nghiệm:** +{fmt(exp)} EXP"
+            await update.message.reply_text(txt, reply_to_message_id=update.message.message_id)
+        elif result == "higher":
+            await update.message.reply_text("⬆️ Cao hơn!", reply_to_message_id=update.message.message_id)
+        else:
+            await update.message.reply_text("⬇️ Thấp hơn!", reply_to_message_id=update.message.message_id)
+        
+        await dm.update_user(uid, user)
 
-def main():
-    """Main function"""
-    # Load config first
-    config = config_manager.load_config()
-    if not config:
-        print("❌ Không thể load config! Vui lòng tạo file game_config.json trên GitHub")
-        print("📁 Repo: " + GITHUB_REPO)
-        print("📄 File: game_config.json")
+async def rps_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.callback_query:
+        return
+    bet = get_game_bet(await dm.get_user(update.effective_user.id))
+    keyboard = [[
+        InlineKeyboardButton("✌️ Kéo", callback_data='rps_play_scissors'),
+        InlineKeyboardButton("✋ Bao", callback_data='rps_play_paper'),
+        InlineKeyboardButton("✊ Búa", callback_data='rps_play_rock')
+    ], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+    text = f"Oẳn tù tì!\nCược: **{fmt(bet)} xu**"
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, text, InlineKeyboardMarkup(keyboard))
+
+async def handle_rps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    user_choice = q.data.split('_')[2]
+    uid = q.from_user.id
+    user = await dm.get_user(uid)
+    
+    bet = get_game_bet(user)
+    if user['coins'] < bet:
+        await q.answer(f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+    user['coins'] -= bet
+
+    game_name = 'rps'
+    streaks = user.setdefault('minigame_streaks', {})
+    game_streak = streaks.setdefault(game_name, {'losses': 0, 'guaranteed_win': False})
+    forced_win = game_streak.get('guaranteed_win', False)
+    if forced_win:
+        game_streak['guaranteed_win'] = False
+
+    choices = ['rock', 'paper', 'scissors']
+    bot_choice = random.choice(choices)
+    
+    outcomes = {('rock', 'scissors'): 'win', ('scissors', 'paper'): 'win', ('paper', 'rock'): 'win'}
+    choice_text = {'rock': '✊ Búa', 'paper': '✋ Bao', 'scissors': '✌️ Kéo'}
+    
+    result_text = f"Bạn chọn: {choice_text[user_choice]}\nBot chọn: {choice_text[bot_choice]}\n\n" 
+    
+    won = False
+    if user_choice == bot_choice:
+        result = f"⚖️ **HÒA!**\n(Hoàn lại {fmt(bet)} xu)"
+        user['coins'] += bet
+        won = True
+    elif (outcomes.get((user_choice, bot_choice)) == 'win') or forced_win:
+        if forced_win and outcomes.get((user_choice, bot_choice)) != 'win':
+            if user_choice == 'rock': bot_choice = 'scissors'
+            elif user_choice == 'paper': bot_choice = 'rock'
+            elif user_choice == 'scissors': bot_choice = 'paper'
+            result_text = f"Bạn chọn: {choice_text[user_choice]}\nBot chọn: {choice_text[bot_choice]}\n\n"
+
+        prize = bet * 2.5
+        exp = get_exp_reward(user, bet)
+        user['coins'] += prize
+        add_exp(user, exp)
+        result = f"🎉 **BẠN THẮNG!**\n\n> 💰 **Thưởng:** +{fmt(prize)} xu\n> ⭐ **Kinh nghiệm:** +{fmt(exp)} EXP"
+        if forced_win:
+            result = "✨ **Bảo hiểm kích hoạt!** ✨\n" + result
+        won = True
+    else:
+        result = f"😢 **BẠN THUA!**\n\n> 💸 **Mất:** {fmt(bet)} xu"
+        won = False
+
+    _update_minigame_streak(user, game_name, won)
+    await dm.update_user(uid, user)
+    await safe_edit_message(context.bot, q.message.chat_id, q.message.message_id, result_text + result, InlineKeyboardMarkup([[InlineKeyboardButton("Chơi lại", callback_data='rps_start'), InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]))
+
+async def handle_coin_flip_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.callback_query:
+        return
+    uid = update.effective_user.id
+    user = await dm.get_user(uid)
+    bet = get_game_bet(user)
+    if user['coins'] < bet:
+        await context.bot.answer_callback_query(update.callback_query.id, f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+
+    keyboard = [[
+        InlineKeyboardButton("🪙 Ngửa (Heads)", callback_data='cf_play_heads'),
+        InlineKeyboardButton("🌑 Sấp (Tails)", callback_data='cf_play_tails')
+    ], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+    text = f"🪙 **TUNG ĐỒNG XU** 🪙\n\nCược: **{fmt(bet)} xu**\nChọn Sấp hoặc Ngửa:"
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, text, InlineKeyboardMarkup(keyboard))
+
+async def handle_coin_flip_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    uid = q.from_user.id
+    user = await dm.get_user(uid)
+    
+    user_choice = q.data.split('_')[2]
+    bet = get_game_bet(user)
+
+    if user['coins'] < bet:
+        await q.answer(f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+    user['coins'] -= bet
+
+    game_name = 'coinflip'
+    streaks = user.setdefault('minigame_streaks', {})
+    game_streak = streaks.setdefault(game_name, {'losses': 0, 'guaranteed_win': False})
+    forced_win = game_streak.get('guaranteed_win', False)
+    if forced_win:
+        game_streak['guaranteed_win'] = False
+
+    actual_result = random.choice(['heads', 'tails'])
+    
+    won = forced_win or (user_choice == actual_result)
+    if forced_win:
+        result = user_choice
+    else:
+        result = actual_result
+
+    _update_minigame_streak(user, game_name, won)
+
+    result_text = f"Đồng xu rơi... **{actual_result.upper()}**!\n\n" 
+
+    if won:
+        prize = bet * 2.5
+        exp = get_exp_reward(user, bet)
+        user['coins'] += prize
+        add_exp(user, exp)
+        txt = f"🎉 **BẠN THẮNG!**\n\n> 💰 **Thưởng:** +{fmt(prize)} xu\n> ⭐ **Kinh nghiệm:** +{fmt(exp)} EXP"
+        if forced_win:
+            txt = "✨ **Bảo hiểm kích hoạt!** ✨\n" + txt
+    else:
+        txt = f"😢 **BẠN THUA!**\n\n> 💸 **Mất:** {fmt(bet)} xu"
+        
+    await dm.update_user(uid, user)
+    await safe_edit_message(context.bot, q.message.chat_id, q.message.message_id, result_text + txt, InlineKeyboardMarkup([[InlineKeyboardButton("Chơi lại", callback_data='game_coinflip'), InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]))
+
+async def handle_slot_machine_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    uid = q.from_user.id
+    user = await dm.get_user(uid)
+    bet = get_game_bet(user)
+    if user['coins'] < bet:
+        await q.answer(f"❌ Cần {fmt(bet)} xu!", show_alert=True)
         return
     
-    # Create application
-    app = Application.builder().token(BOT_TOKEN).build()
+    user['coins'] -= bet
+
+    game_name = 'slots'
+    streaks = user.setdefault('minigame_streaks', {})
+    game_streak = streaks.setdefault(game_name, {'losses': 0, 'guaranteed_win': False})
+    forced_win = game_streak.get('guaranteed_win', False)
+    if forced_win:
+        game_streak['guaranteed_win'] = False
+
+    reels = ['🍒', '🍋', '🍊', '🍉', '💰', '💎', '💔']
     
-    # Add handlers
+    if forced_win:
+        win_symbol = random.choice(['💰', '🍉', '🍒'])
+        results = [win_symbol, win_symbol, win_symbol]
+    else:
+        results = random.choices(reels, weights=[10, 10, 10, 5, 4, 2, 15], k=3)
+
+    payouts = {
+        ('💎', '💎', '💎'): 10,
+        ('💰', '💰', '💰'): 5,
+        ('🍉', '🍉', '🍉'): 4,
+        ('🍊', '🍊', '🍊'): 3,
+        ('🍋', '🍋', '🍋'): 3,
+        ('🍒', '🍒', '🍒'): 3,
+    }
+    
+    win_multiplier = 0
+    if results[0] == results[1] == results[2]:
+        win_multiplier = payouts.get(tuple(results), 0)
+    else:
+        checked_symbols = set()
+        for symbol in results:
+            if symbol in checked_symbols:
+                continue
+            if results.count(symbol) == 2:
+                if symbol == '💎':
+                    win_multiplier = 2
+                    break
+                if symbol == '💰':
+                    win_multiplier = 1.5
+                    break
+                if symbol in ['🍉', '🍊', '🍋', '🍒']:
+                    win_multiplier = 1
+                    break
+            checked_symbols.add(symbol)
+
+    prize = int(bet * win_multiplier)
+    won = prize > bet
+    _update_minigame_streak(user, game_name, won)
+    
+    result_text = f"🎰 **MÁY XÈNG** 🎰\n\n`{results[0]} | {results[1]} | {results[2]}`\n\n" 
+
+    if win_multiplier > 1:
+        user['coins'] += prize
+        exp = get_exp_reward(user, bet)
+        add_exp(user, exp)
+        txt = f"🎉 **THẮNG LỚN!**\n\n> 💰 **Thưởng:** +{fmt(prize - bet)} xu\n> ⭐ **Kinh nghiệm:** +{fmt(exp)} EXP"
+        if forced_win:
+            txt = "✨ **Bảo hiểm kích hoạt!** ✨\n" + txt
+    elif win_multiplier == 1:
+        user['coins'] += prize
+        txt = f"😌 **HÒA VỐN!**\n\n> Bạn được hoàn lại tiền cược: {fmt(bet)} xu"
+    else:
+        txt = f"😢 **THUA!**\n\n> 💸 **Mất:** {fmt(bet)} xu"
+
+    await dm.update_user(uid, user)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Quay tiếp", callback_data='game_slots'), InlineKeyboardButton("↩️ Menu", callback_data='back_menu')] ])
+    await safe_edit_message(context.bot, q.message.chat_id, q.message.message_id, result_text + txt, kb)
+
+async def handle_taixiu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.callback_query:
+        return
+    uid = update.effective_user.id
+    user = await dm.get_user(uid)
+    bet = get_game_bet(user)
+    if user['coins'] < bet:
+        await context.bot.answer_callback_query(update.callback_query.id, f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+    
+    keyboard = [[
+        InlineKeyboardButton("Tài (11-18)", callback_data=f'taixiu_tai_{bet}'),
+        InlineKeyboardButton("Xỉu (3-10)", callback_data=f'taixiu_xiu_{bet}')
+    ], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+    text = f"🎲 **TÀI XỈU** 🎲\n\nCược: **{fmt(bet)} xu**\nChọn Tài hoặc Xỉu:"
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, text, InlineKeyboardMarkup(keyboard))
+
+async def handle_taixiu_bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    uid = q.from_user.id
+    user = await dm.get_user(uid)
+    
+    _, choice, bet_str = q.data.split('_')
+    bet = int(bet_str)
+
+    if user['coins'] < bet:
+        await q.answer(f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+    user['coins'] -= bet
+    
+    game_name = 'taixiu'
+    streaks = user.setdefault('minigame_streaks', {})
+    game_streak = streaks.setdefault(game_name, {'losses': 0, 'guaranteed_win': False})
+    forced_win = game_streak.get('guaranteed_win', False)
+    if forced_win:
+        game_streak['guaranteed_win'] = False
+
+    d1, d2, d3 = random.randint(1, 6), random.randint(1, 6), random.randint(1, 6)
+    total = d1 + d2 + d3
+    actual_result = 'tai' if 11 <= total <= 18 else 'xiu'
+    
+    won = forced_win or (choice == actual_result)
+    if forced_win:
+        result = choice
+    else:
+        result = actual_result
+
+    _update_minigame_streak(user, game_name, won)
+
+    result_text = f"Kết quả: `{d1}` + `{d2}` + `{d3}` = **{total}** ({actual_result.upper()})\n\n" 
+
+    if won:
+        prize = bet * 2.5
+        exp = get_exp_reward(user, bet)
+        user['coins'] += prize
+        add_exp(user, exp)
+        txt = f"🎉 **THẮNG!**\n\n> 💰 **Thưởng:** +{fmt(prize)} xu\n> ⭐ **Kinh nghiệm:** +{fmt(exp)} EXP"
+        if forced_win:
+            txt = "✨ **Bảo hiểm kích hoạt!** ✨\n" + txt
+    else:
+        txt = f"😢 **THUA!**\n\n> 💸 **Mất:** {fmt(bet)} xu"
+        
+    await dm.update_user(uid, user)
+    await safe_edit_message(context.bot, q.message.chat_id, q.message.message_id, result_text + txt, InlineKeyboardMarkup([[InlineKeyboardButton("Chơi lại", callback_data='game_taixiu'), InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]))
+
+async def handle_treasure_hunt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.callback_query:
+        return
+    uid = update.effective_user.id
+    user = await dm.get_user(uid)
+    bet = get_game_bet(user)
+    if user['coins'] < bet:
+        await context.bot.answer_callback_query(update.callback_query.id, f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+
+    keyboard = [[
+        InlineKeyboardButton("Rương 1", callback_data='treasure_chest_1'),
+        InlineKeyboardButton("Rương 2", callback_data='treasure_chest_2'),
+        InlineKeyboardButton("Rương 3", callback_data='treasure_chest_3')
+    ], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+    
+    text = f"💎 **SĂN KHO BÁU** 💎\n\nChọn một trong ba rương để mở.\nCược: **{fmt(bet)} xu**"
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, text, InlineKeyboardMarkup(keyboard))
+
+async def handle_treasure_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    uid = q.from_user.id
+    user = await dm.get_user(uid)
+    bet = get_game_bet(user)
+
+    if user['coins'] < bet:
+        await q.answer(f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+    
+    user['coins'] -= bet
+
+    prizes = [0, 0, 2.5]
+    random.shuffle(prizes)
+    chosen_multiplier = random.choice(prizes)
+    prize_amount = int(bet * chosen_multiplier)
+    
+    if prize_amount > 0:
+        user['coins'] += prize_amount
+        exp = get_exp_reward(user, bet)
+        add_exp(user, exp)
+        txt = f"🎉 **BẠN TÌM THẤY KHO BÁU!**\n\n> 💰 **Thưởng:** +{fmt(prize_amount - bet)} xu\n> ⭐ **Kinh nghiệm:** +{fmt(exp)} EXP"
+    else:
+        txt = f"😢 **RƯƠNG RỖNG!**\n\n> 💸 **Mất:** {fmt(bet)} xu"
+
+    await dm.update_user(uid, user)
+    await safe_edit_message(context.bot, q.message.chat_id, q.message.message_id, txt, InlineKeyboardMarkup([[InlineKeyboardButton("Chơi lại", callback_data='game_treasure'), InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]))
+
+async def handle_highlow_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.callback_query:
+        return
+    uid = update.effective_user.id
+    user = await dm.get_user(uid)
+    bet = get_game_bet(user)
+
+    if user['coins'] < bet:
+        await context.bot.answer_callback_query(update.callback_query.id, f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+    
+    user['coins'] -= bet
+    game = HighLowGame(bet=bet)
+    user['minigames']['highlow'] = game.to_dict()
+    await dm.update_user(uid, user)
+
+    keyboard = [[
+        InlineKeyboardButton("⬆️ Cao Hơn", callback_data='hl_play_high'),
+        InlineKeyboardButton("⬇️ Thấp Hơn", callback_data='hl_play_low')
+    ], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+    
+    text = f"🃏 **CAO / THẤP** 🃏\n\nLá bài hiện tại là: **{game.current_card}**\nCược: **{fmt(bet)} xu**\n\nĐoán xem lá tiếp theo cao hơn hay thấp hơn?"
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, text, InlineKeyboardMarkup(keyboard))
+
+async def handle_highlow_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    uid = q.from_user.id
+    user = await dm.get_user(uid)
+    game_dict = user.get('minigames', {}).get('highlow')
+    if not game_dict:
+        return
+
+    game = HighLowGame.from_dict(game_dict)
+    choice = q.data.split('_')[2]
+
+    game_name = 'highlow'
+    streaks = user.setdefault('minigame_streaks', {})
+    game_streak = streaks.setdefault(game_name, {'losses': 0, 'guaranteed_win': False})
+    forced_win = game_streak.get('guaranteed_win', False)
+    if forced_win:
+        game_streak['guaranteed_win'] = False
+
+    if forced_win:
+        if choice == 'high':
+            game.current_card = random.randint(1, 12)
+            new_card = random.randint(game.current_card + 1, 13)
+        else:
+            game.current_card = random.randint(2, 13)
+            new_card = random.randint(1, game.current_card - 1)
+        game.win = True
+    else:
+        new_card = game.play(choice)
+
+    del user['minigames']['highlow']
+
+    _update_minigame_streak(user, game_name, game.win)
+
+    result_text = f"Lá bài mới là **{new_card}**.\n\n" 
+
+    if game.win:
+        prize = game.bet * 2.5
+        exp = get_exp_reward(user, game.bet)
+        user['coins'] += prize
+        add_exp(user, exp)
+        txt = f"🎉 **THẮNG!**\n\n> 💰 **Thưởng:** +{fmt(prize)} xu\n> ⭐ **Kinh nghiệm:** +{fmt(exp)} EXP"
+        if forced_win:
+            txt = "✨ **Bảo hiểm kích hoạt!** ✨\n" + txt
+    else:
+        txt = f"😢 **THUA!**\n\n> 💸 **Mất:** {fmt(game.bet)} xu"
+    
+    await dm.update_user(uid, user)
+    await safe_edit_message(context.bot, q.message.chat_id, q.message.message_id, result_text + txt, InlineKeyboardMarkup([[InlineKeyboardButton("Chơi lại", callback_data='game_highlow'), InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]))
+
+async def handle_dice_roll_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.callback_query:
+        return
+    uid = update.effective_user.id
+    user = await dm.get_user(uid)
+    bet = get_game_bet(user)
+
+    if user['coins'] < bet:
+        await context.bot.answer_callback_query(update.callback_query.id, f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+
+    keyboard = [[ 
+        InlineKeyboardButton("🎲 Lắc Xúc Xắc", callback_data='dr_play_roll')
+    ], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+
+    text = f"🎲 **LẮC XÚC XẮC** 🎲\n\nCược: **{fmt(bet)} xu**\n\nNếu tổng 2 xúc xắc là 7, bạn thắng!"
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, text, InlineKeyboardMarkup(keyboard))
+
+async def handle_dice_roll_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    uid = q.from_user.id
+    user = await dm.get_user(uid)
+
+    bet = get_game_bet(user)
+
+    if user['coins'] < bet:
+        await q.answer(f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+    
+    user['coins'] -= bet
+
+    game_name = 'diceroll'
+    streaks = user.setdefault('minigame_streaks', {})
+    game_streak = streaks.setdefault(game_name, {'losses': 0, 'guaranteed_win': False})
+    forced_win = game_streak.get('guaranteed_win', False)
+    if forced_win:
+        game_streak['guaranteed_win'] = False
+
+    game = DiceRollGame(bet=bet)
+    
+    if forced_win:
+        d1 = random.randint(1, 6)
+        d2 = 7 - d1
+        if d2 < 1 or d2 > 6:
+            d1 = random.choice([1, 2, 3])
+            d2 = 7 - d1
+        game.dice_result = (d1, d2)
+        game.win = True
+    else:
+        d1, d2 = game.roll_dice()
+
+    total = d1 + d2
+
+    _update_minigame_streak(user, game_name, game.win)
+
+    result_text = f"Bạn lắc được: `{d1}` và `{d2}`. Tổng là **{total}**.\n\n" 
+
+    if game.win:
+        prize = bet * 2.5
+        exp = get_exp_reward(user, bet)
+        user['coins'] += prize
+        add_exp(user, exp)
+        txt = f"🎉 **THẮNG!**\n\n> 💰 **Thưởng:** +{fmt(prize)} xu\n> ⭐ **Kinh nghiệm:** +{fmt(exp)} EXP"
+        if forced_win:
+            txt = "✨ **Bảo hiểm kích hoạt!** ✨\n" + txt
+    else:
+        txt = f"😢 **THUA!**\n\n> 💸 **Mất:** {fmt(bet)} xu"
+    
+    await dm.update_user(uid, user)
+    await safe_edit_message(context.bot, q.message.chat_id, q.message.message_id, result_text + txt, InlineKeyboardMarkup([[InlineKeyboardButton("Chơi lại", callback_data='game_diceroll'), InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]))
+
+async def handle_chanle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.callback_query:
+        return
+    uid = update.effective_user.id
+    user = await dm.get_user(uid)
+    bet = get_game_bet(user)
+    if user['coins'] < bet:
+        await context.bot.answer_callback_query(update.callback_query.id, f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+
+    keyboard = [[ 
+        InlineKeyboardButton("Chẵn", callback_data='chanle_play_chan'),
+        InlineKeyboardButton("Lẻ", callback_data='chanle_play_le')
+    ], [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]
+    text = f"🎲 **CHẴN LẺ** 🎲\n\nCược: **{fmt(bet)} xu**\nChọn Chẵn hoặc Lẻ:"
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, text, InlineKeyboardMarkup(keyboard))
+
+async def handle_chanle_play(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    uid = q.from_user.id
+    user = await dm.get_user(uid)
+    
+    user_choice = q.data.split('_')[2]
+    bet = get_game_bet(user)
+
+    if user['coins'] < bet:
+        await q.answer(f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+    user['coins'] -= bet
+
+    game_name = 'chanle'
+    streaks = user.setdefault('minigame_streaks', {})
+    game_streak = streaks.setdefault(game_name, {'losses': 0, 'guaranteed_win': False})
+    
+    forced_win = game_streak.get('guaranteed_win', False)
+    if forced_win:
+        game_streak['guaranteed_win'] = False
+
+    d1, d2 = random.randint(1, 6), random.randint(1, 6)
+    total = d1 + d2
+    actual_result = 'chan' if total % 2 == 0 else 'le'
+    
+    won = forced_win or (user_choice == actual_result)
+    if forced_win:
+        result = user_choice
+    else:
+        result = actual_result
+    
+    _update_minigame_streak(user, game_name, won)
+
+    result_text = f"Kết quả: `{d1}` + `{d2}` = **{total}** ({actual_result.upper()})\n\n" 
+
+    if won:
+        prize = bet * 2.5
+        exp = get_exp_reward(user, bet)
+        user['coins'] += prize
+        add_exp(user, exp)
+        user.setdefault('stats', {}).setdefault('cl_win', 0)
+        user['stats']['cl_win'] += 1
+        txt = f"🎉 **THẮNG!**\n\n> 💰 **Thưởng:** +{fmt(prize)} xu\n> ⭐ **Kinh nghiệm:** +{fmt(exp)} EXP"
+        if forced_win:
+            txt = "✨ **Bảo hiểm kích hoạt!** ✨\n" + txt
+    else:
+        user.setdefault('stats', {}).setdefault('cl_lose', 0)
+        user['stats']['cl_lose'] += 1
+        txt = f"😢 **THUA!**\n\n> 💸 **Mất:** {fmt(bet)} xu"
+        
+    await dm.update_user(uid, user)
+    await safe_edit_message(context.bot, q.message.chat_id, q.message.message_id, result_text + txt, InlineKeyboardMarkup([[InlineKeyboardButton("Chơi lại", callback_data='game_chanle'), InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]))
+
+async def handle_lucky_wheel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    uid = q.from_user.id
+    user = await dm.get_user(uid)
+    bet = get_game_bet(user)
+    if user['coins'] < bet:
+        await q.answer(f"❌ Cần {fmt(bet)} xu!", show_alert=True)
+        return
+    
+    user['coins'] -= bet
+
+    outcomes = [(0, 0.20), (0.5, 0.30), (2, 0.20), (3, 0.15), (4, 0.10), (5, 0.05)]
+    multipliers, weights = zip(*outcomes)
+    chosen_multiplier = random.choices(multipliers, weights=weights, k=1)[0]
+    
+    prize = int(bet * chosen_multiplier)
+    user['coins'] += prize
+    
+    title = ""
+    details = f"Kết quả: **x{chosen_multiplier}**"
+    
+    if chosen_multiplier > 1:
+        title = "🎉 **THẮNG LỚN!**"
+        exp = get_exp_reward(user, bet)
+        add_exp(user, exp)
+        details += f"\n\n> 💰 **Thưởng:** +{fmt(prize - bet)} xu\n> ⭐ **Kinh nghiệm:** +{fmt(exp)} EXP"
+    elif chosen_multiplier == 1:
+        title = "😌 **HÒA VỐN!**"
+        details += f"(Hoàn lại {fmt(bet)} xu)"
+    else:
+        title = "😢 **THUA!**"
+        details += f"\n\n> 💸 **Mất:** {fmt(bet - prize)} xu"
+
+    await dm.update_user(uid, user)
+    
+    txt = f"🎡 **VÒNG QUAY MAY MẮN** 🎡\n\n{title}\n{details}"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Chơi lại", callback_data='game_luckywheel'), InlineKeyboardButton("↩️ Menu", callback_data='back_menu')] ])
+    await safe_edit_message(context.bot, q.message.chat_id, q.message.message_id, txt, kb)
+
+async def handle_daily_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    uid = q.from_user.id
+    user = await dm.get_user(uid)
+    now = datetime.now(VIETNAM_TZ)
+    
+    streak = user.get('daily_streak', 0)
+    last_daily_str = user.get('last_daily')
+    
+    if last_daily_str:
+        last_daily = datetime.fromisoformat(last_daily_str).astimezone(VIETNAM_TZ)
+        if now.date() == last_daily.date():
+            await q.answer("Bạn đã nhận thưởng hôm nay rồi. Quay lại vào ngày mai!", show_alert=True)
+            return
+        streak = streak + 1 if (now.date() - last_daily.date()).days == 1 else 1
+    else:
+        streak = 1
+
+    streak = min(streak, 7)
+    base_prize = random.randint(1000, 2000)
+    streak_bonus = streak * 500
+    prize = base_prize + streak_bonus
+    exp = 150 + (streak * 25)
+
+    title = f"🎉 **ĐIỂM DANH NGÀY {streak}**"
+    if streak == 7:
+        jackpot = random.randint(5000, 10000)
+        prize += jackpot
+        title += " - JACKPOT!"
+        prize_details = f"> 💰 **Thưởng:** +{fmt(prize)} xu (có {fmt(jackpot)} xu thưởng!)"
+    else:
+        prize_details = f"> 💰 **Thưởng:** +{fmt(prize)} xu"
+
+    result_txt = f"{title}\n\n{prize_details}\n> ⭐ **Kinh nghiệm:** +{fmt(exp)} EXP"
+    user['coins'] += prize
+    add_exp(user, exp)
+        
+    user['last_daily'] = now.isoformat()
+    user['daily_streak'] = streak
+    await dm.update_user(uid, user)
+    
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')] ])
+    await safe_edit_message(context.bot, q.message.chat_id, q.message.message_id, result_txt, kb)
+
+async def handle_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.callback_query:
+        return
+    uid = update.effective_user.id
+    user = await dm.get_user(uid)
+    rank, next_rank = get_user_rank(user.get('total_exp', 0))
+    
+    txt = f"""
+📊 **THỐNG KÊ CÁ NHÂN**
+
+👤 **{user.get('username', 'Player')}**
+- 💰 **Xu:** {fmt(user['coins'])}
+- 🏆 **Rank:** {rank['name']}
+- ⭐ **Tổng EXP:** {fmt(user.get('total_exp', 0))}
+"""
+    if next_rank:
+        exp_needed = next_rank['exp'] - user.get('total_exp', 0)
+        txt += f"📈 **Hạng tiếp:** {next_rank['name']} (còn {fmt(exp_needed)} EXP)"
+    
+    s = user.get('stats', {})
+    txt += f"\n\n**Thành Tích**\n🎲 Chẵn Lẻ: {s.get('cl_win', 0)} thắng - {s.get('cl_lose', 0)} thua"
+    
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, txt, InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]))
+
+async def handle_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.callback_query:
+        return
+    txt = "🏆 **BẢNG XẾP HẠNG** 🏆\n\nChọn loại bảng xếp hạng bạn muốn xem."
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 Top Xu", callback_data='top_coins'), InlineKeyboardButton("⭐ Top Rank", callback_data='top_rank')],
+        [InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]
+    ])
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, txt, kb)
+
+async def handle_top_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.callback_query:
+        return
+    uid = update.callback_query.from_user.id
+    
+    async with dm.lock:
+        all_users_sorted = sorted(dm.users.values(), key=lambda x: x.get('coins', 0), reverse=True)
+    
+    top_10_users = all_users_sorted[:10]
+
+    txt = "🏆 **TOP 10 GIÀU CÓ** 🏆\n\n" 
+    medals = ["🥇", "🥈", "🥉"] + [f"**{i}.**" for i in range(4, 11)]
+    user_in_top_10 = False
+    for i, u in enumerate(top_10_users):
+        if u.get('user_id') == str(uid):
+            user_in_top_10 = True
+        txt += f"{medals[i]} {u.get('username', 'User')[:20]} - **{fmt(u.get('coins', 0))} xu**\n"
+
+    if not user_in_top_10:
+        try:
+            user_rank_index = next(i for i, u in enumerate(all_users_sorted) if u.get('user_id') == str(uid))
+            user_data = all_users_sorted[user_rank_index]
+            txt += "...\n"
+            txt += f"**{user_rank_index + 1}.** {user_data.get('username', 'User')[:20]} - **{fmt(user_data.get('coins', 0))} xu** (Bạn)\n"
+        except StopIteration:
+            pass
+
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, txt, InlineKeyboardMarkup([[InlineKeyboardButton("↩️ BXH", callback_data='ranking')]]))
+
+async def handle_top_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.callback_query:
+        return
+    uid = update.callback_query.from_user.id
+
+    async with dm.lock:
+        all_users_sorted = sorted(dm.users.values(), key=lambda x: x.get('total_exp', 0), reverse=True)
+    
+    top_10_users = all_users_sorted[:10]
+
+    txt = "🏆 **TOP 10 CẤP ĐỘ** 🏆\n\n" 
+    medals = ["🥇", "🥈", "🥉"] + [f"**{i}.**" for i in range(4, 11)]
+    user_in_top_10 = False
+    for i, u in enumerate(top_10_users):
+        if u.get('user_id') == str(uid):
+            user_in_top_10 = True
+        rank, _ = get_user_rank(u.get('total_exp', 0))
+        txt += f"{medals[i]} {u.get('username', 'User')[:20]} - **{rank['name']}** ({fmt(u.get('total_exp', 0))} EXP)\n"
+
+    if not user_in_top_10:
+        try:
+            user_rank_index = next(i for i, u in enumerate(all_users_sorted) if u.get('user_id') == str(uid))
+            user_data = all_users_sorted[user_rank_index]
+            rank, _ = get_user_rank(user_data.get('total_exp', 0))
+            txt += "...\n"
+            txt += f"**{user_rank_index + 1}.** {user_data.get('username', 'User')[:20]} - **{rank['name']}** ({fmt(user_data.get('total_exp', 0))} EXP) (Bạn)\n"
+        except StopIteration:
+            pass
+
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, txt, InlineKeyboardMarkup([[InlineKeyboardButton("↩️ BXH", callback_data='ranking')]]))
+
+async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.callback_query:
+        return
+    txt = """
+📖 **HƯỚNG DẪN CHƠI GAME** 📖
+
+Chào mừng bạn đến với thế giới mini-game!
+
+**📜 QUY TẮC CHUNG**
+- **Cược Mặc Định:** 10% số xu hiện có (tối thiểu 10 xu). Thắng nhận x2.5 tiền cược.
+- **Phần Thưởng EXP:** Mỗi ván thắng được 1,000 EXP.
+- **Bảo Hiểm Thua:** Thua 3 ván liên tiếp = chắc chắn thắng ván tiếp theo!
+
+**🎲 DANH SÁCH TRÒ CHƠI**
+
+- **🪙 Tung Đồng Xu:** 50/50 Sấp hoặc Ngửa
+- **🎰 Máy Xèng:** Quay 3 biểu tượng giống nhau để thắng lớn
+- **💎 Kho Báu:** Chọn 1/3 rương chứa kho báu
+- **✊ Oẳn Tù Tì:** Kéo, Búa, Bao cổ điển
+- **🔢 Đoán Số:** Đoán số từ 1-100
+- **🃏 Cao/Thấp:** Đoán lá bài tiếp theo
+- **🎲 Chẵn Lẻ / Tài Xỉu:** Dựa vào tổng xúc xắc
+- **🎡 Vòng Quay:** Quay nhận thưởng ngẫu nhiên
+
+**🎁 TÍNH NĂNG KHÁC**
+- **/menu:** Menu chính
+- **/stats:** Thống kê cá nhân
+- **/ranking:** Bảng xếp hạng
+- **/daily:** Điểm danh hàng ngày
+- **/tip:** Chuyển xu cho người khác
+
+Chúc bạn chơi game vui vẻ! 🍀
+"""
+    await safe_edit_message(context.bot, update.effective_chat.id, update.callback_query.message.message_id, txt, InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Menu", callback_data='back_menu')]]))
+
+async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not update.message or not update.message.text:
+        return
+    uid = update.effective_user.id
+    await rate_limiter.acquire(uid)
+    await update_username_if_needed(uid, update.effective_user)
+
+    user_message = update.message.text[1:].lstrip()
+
+    if not user_message:
+        await update.message.reply_text("Vui lòng nhập nội dung sau dấu ! Ví dụ: !hello")
+        return
+
+    try:
+        response = await ai_client.chat.completions.create(
+            model=AI_MODEL,
+            messages=[
+                {
+                    'role': 'user',
+                    'content': user_message
+                }
+            ]
+        )
+        bot_response = response.choices[0].message.content
+        if bot_response:
+            await update.message.reply_text(bot_response)
+        else:
+            await update.message.reply_text("Tôi không có câu trả lời cho điều đó.")
+
+    except Exception as e:
+        logger.error(f"Error calling OpenAI: {e}")
+        await update.message.reply_text("Xin lỗi, tôi không thể xử lý yêu cầu của bạn lúc này.")
+
+async def tip_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user:
+        return
+
+    sender_id = update.effective_user.id
+    
+    target_user_id = None
+    amount = 0
+    
+    args = context.args
+    
+    if update.message.reply_to_message:
+        target_user_id = update.message.reply_to_message.from_user.id
+        if not args:
+            await update.message.reply_text("Usage: /tip <số tiền> khi reply tin nhắn.")
+            return
+        try:
+            amount = int(args[0])
+        except (ValueError, IndexError):
+            await update.message.reply_text("Số tiền không hợp lệ.")
+            return
+    else:
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /tip <user_id/@username> <số tiền>")
+            return
+        
+        target_identifier = args[0]
+        try:
+            amount = int(args[1])
+        except ValueError:
+            await update.message.reply_text("Số tiền không hợp lệ.")
+            return
+
+        if target_identifier.startswith('@'):
+            target_username = target_identifier
+            found = False
+            async with dm.lock:
+                for uid, udata in dm.users.items():
+                    if udata.get('username') == target_username:
+                        target_user_id = int(uid)
+                        found = True
+                        break
+            if not found:
+                await update.message.reply_text(f"Không tìm thấy người dùng {target_username}.")
+                return
+        else:
+            try:
+                target_user_id = int(target_identifier)
+            except ValueError:
+                await update.message.reply_text("User ID hoặc username không hợp lệ.")
+                return
+
+    if amount <= 0:
+        await update.message.reply_text("Số tiền phải lớn hơn 0.")
+        return
+
+    if sender_id == target_user_id:
+        await update.message.reply_text("Bạn không thể tip cho chính mình.")
+        return
+
+    sender_user = await dm.get_user(sender_id)
+
+    if sender_user['coins'] < amount:
+        await update.message.reply_text(f"Bạn không đủ xu. Bạn chỉ có {fmt(sender_user['coins'])} xu.")
+        return
+
+    target_user = await dm.get_user(target_user_id)
+    
+    sender_user['coins'] -= amount
+    target_user['coins'] += amount
+    
+    await dm.update_user(sender_id, sender_user)
+    await dm.update_user(target_user_id, target_user)
+
+    sender_username = sender_user.get('username', f'User {sender_id}')
+    target_username = target_user.get('username', f'User {target_user_id}')
+    await update.message.reply_text(f"{sender_username} đã tip {target_username} {fmt(amount)} xu!")
+
+async def give_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or update.effective_user.id != BOT_OWNER_ID:
+        await update.message.reply_text("Bạn không có quyền sử dụng lệnh này.")
+        return
+
+    args = context.args
+    target_user_id = None
+    amount = 0
+
+    try:
+        if update.message.reply_to_message:
+            target_user_id = update.message.reply_to_message.from_user.id
+            if not args:
+                await update.message.reply_text("Usage: /give <số tiền> khi reply.")
+                return
+            amount = int(args[0])
+        else:
+            if not args:
+                await update.message.reply_text("Usage: /give <user_id> <số tiền> HOẶC /give <số tiền> (cho chính mình).")
+                return
+            
+            if len(args) == 1:
+                amount = int(args[0])
+                target_user_id = update.effective_user.id
+            else:
+                target_user_id = int(args[0])
+                amount = int(args[1])
+
+    except (ValueError, IndexError):
+        await update.message.reply_text("Format lệnh không hợp lệ.")
+        return
+
+    if amount <= 0:
+        await update.message.reply_text("Số tiền phải lớn hơn 0.")
+        return
+
+    if not target_user_id:
+        await update.message.reply_text("Không thể xác định người nhận.")
+        return
+
+    target_user = await dm.get_user(target_user_id)
+    target_user['coins'] += amount
+    await dm.update_user(target_user_id, target_user)
+
+    target_username = target_user.get('username', f'User {target_user_id}')
+    await update.message.reply_text(f"Đã cấp {fmt(amount)} xu cho {target_username}.")
+
+async def kick_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or update.message.chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("Lệnh này chỉ dùng trong nhóm.")
+        return
+
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    admins = await context.bot.get_chat_administrators(chat_id)
+    admin_ids = {admin.user.id for admin in admins}
+
+    if user_id not in admin_ids:
+        await update.message.reply_text("Bạn không phải admin.")
+        return
+
+    try:
+        target_user_id_str = context.args[0]
+        target_user_id = int(target_user_id_str)
+    except (ValueError, IndexError):
+        await update.message.reply_text("Usage: /kick <user_id>")
+        return
+
+    try:
+                await context.bot.kick_chat_member(chat_id, target_user_id)
+        await update.message.reply_text(f"Đã kick người dùng {target_user_id}.")
+    except Exception as e:
+        logger.error(f"Không thể kick user {target_user_id}: {e}")
+        await update.message.reply_text(f"Không thể kick người dùng {target_user_id}.")
+
+async def ban_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or update.message.chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("Lệnh này chỉ dùng trong nhóm.")
+        return
+
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    admins = await context.bot.get_chat_administrators(chat_id)
+    admin_ids = {admin.user.id for admin in admins}
+
+    if user_id not in admin_ids:
+        await update.message.reply_text("Bạn không phải admin.")
+        return
+
+    try:
+        target_user_id_str = context.args[0]
+        target_user_id = int(target_user_id_str)
+    except (ValueError, IndexError):
+        await update.message.reply_text("Usage: /ban <user_id>")
+        return
+
+    try:
+        await context.bot.restrict_chat_member(chat_id, target_user_id, permissions={'can_send_messages': False})
+        await update.message.reply_text(f"Đã cấm người dùng {target_user_id} gửi tin nhắn.")
+    except Exception as e:
+        logger.error(f"Không thể ban user {target_user_id}: {e}")
+        await update.message.reply_text(f"Không thể ban người dùng {target_user_id}.")
+
+async def unban_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or update.message.chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("Lệnh này chỉ dùng trong nhóm.")
+        return
+
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    admins = await context.bot.get_chat_administrators(chat_id)
+    admin_ids = {admin.user.id for admin in admins}
+
+    if user_id not in admin_ids:
+        await update.message.reply_text("Bạn không phải admin.")
+        return
+
+    try:
+        target_user_id_str = context.args[0]
+        target_user_id = int(target_user_id_str)
+    except (ValueError, IndexError):
+        await update.message.reply_text("Usage: /unban <user_id>")
+        return
+
+    try:
+        await context.bot.unban_chat_member(chat_id, target_user_id)
+        await update.message.reply_text(f"Đã bỏ cấm người dùng {target_user_id}.")
+    except Exception as e:
+        logger.error(f"Không thể unban user {target_user_id}: {e}")
+        await update.message.reply_text(f"Không thể unban người dùng {target_user_id}.")
+
+def parse_duration(duration_str: str) -> Optional[int]:
+    if not duration_str:
+        return None
+    duration_str = duration_str.lower()
+    if duration_str.endswith('m'):
+        return int(duration_str[:-1]) * 60
+    if duration_str.endswith('h'):
+        return int(duration_str[:-1]) * 3600
+    if duration_str.endswith('d'):
+        return int(duration_str[:-1]) * 86400
+    return None
+
+async def mute_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or update.message.chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("Lệnh này chỉ dùng trong nhóm.")
+        return
+
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    admins = await context.bot.get_chat_administrators(chat_id)
+    admin_ids = {admin.user.id for admin in admins}
+
+    if user_id not in admin_ids:
+        await update.message.reply_text("Bạn không phải admin.")
+        return
+
+    try:
+        target_user_id_str = context.args[0]
+        target_user_id = int(target_user_id_str)
+        duration_str = context.args[1] if len(context.args) > 1 else None
+        mute_duration = parse_duration(duration_str)
+    except (ValueError, IndexError):
+        await update.message.reply_text("Usage: /mute <user_id> [thời gian(m,h,d)]")
+        return
+
+    try:
+        if mute_duration:
+            await context.bot.restrict_chat_member(chat_id, target_user_id, permissions={'can_send_messages': False}, until_date=datetime.now() + timedelta(seconds=mute_duration))
+            await update.message.reply_text(f"Đã tắt tiếng người dùng {target_user_id} trong {duration_str}.")
+        else:
+            await context.bot.restrict_chat_member(chat_id, target_user_id, permissions={'can_send_messages': False})
+            await update.message.reply_text(f"Đã tắt tiếng người dùng {target_user_id} vĩnh viễn.")
+    except Exception as e:
+        logger.error(f"Không thể mute user {target_user_id}: {e}")
+        await update.message.reply_text(f"Không thể mute người dùng {target_user_id}.")
+
+async def unmute_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or update.message.chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("Lệnh này chỉ dùng trong nhóm.")
+        return
+
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    admins = await context.bot.get_chat_administrators(chat_id)
+    admin_ids = {admin.user.id for admin in admins}
+
+    if user_id not in admin_ids:
+        await update.message.reply_text("Bạn không phải admin.")
+        return
+
+    try:
+        target_user_id_str = context.args[0]
+        target_user_id = int(target_user_id_str)
+    except (ValueError, IndexError):
+        await update.message.reply_text("Usage: /unmute <user_id>")
+        return
+
+    try:
+        await context.bot.restrict_chat_member(chat_id, target_user_id, permissions={
+            'can_send_messages': True, 
+            'can_send_media_messages': True, 
+            'can_send_polls': True, 
+            'can_send_other_messages': True, 
+            'can_add_web_page_previews': True, 
+            'can_change_info': True, 
+            'can_invite_users': True, 
+            'can_pin_messages': True
+        })
+        await update.message.reply_text(f"Đã bỏ tắt tiếng người dùng {target_user_id}.")
+    except Exception as e:
+        logger.error(f"Không thể unmute user {target_user_id}: {e}")
+        await update.message.reply_text(f"Không thể unmute người dùng {target_user_id}.")
+
+async def pin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or update.message.chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("Lệnh này chỉ dùng trong nhóm.")
+        return
+
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    admins = await context.bot.get_chat_administrators(chat_id)
+    admin_ids = {admin.user.id for admin in admins}
+
+    if user_id not in admin_ids:
+        await update.message.reply_text("Bạn không phải admin.")
+        return
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Reply vào tin nhắn cần ghim.")
+        return
+
+    try:
+        await context.bot.pin_chat_message(chat_id, update.message.reply_to_message.message_id)
+        await update.message.reply_text("Đã ghim tin nhắn.")
+    except Exception as e:
+        logger.error(f"Không thể ghim tin nhắn: {e}")
+        await update.message.reply_text("Không thể ghim tin nhắn.")
+
+async def unpin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or update.message.chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("Lệnh này chỉ dùng trong nhóm.")
+        return
+
+    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
+
+    admins = await context.bot.get_chat_administrators(chat_id)
+    admin_ids = {admin.user.id for admin in admins}
+
+    if user_id not in admin_ids:
+        await update.message.reply_text("Bạn không phải admin.")
+        return
+
+    try:
+        await context.bot.unpin_chat_message(chat_id)
+        await update.message.reply_text("Đã bỏ ghim tin nhắn.")
+    except Exception as e:
+        logger.error(f"Không thể bỏ ghim tin nhắn: {e}")
+        await update.message.reply_text("Không thể bỏ ghim tin nhắn.")
+
+async def post_init(application: Application) -> None:
+    await dm.initialize()
+    logger.info("🤖 Bot khởi động thành công!")
+
+async def post_shutdown(application: Application) -> None:
+    await dm.shutdown()
+    logger.info("Bot đã tắt.")
+
+def main() -> None:
+    if not BOT_TOKEN:
+        logger.critical("BOT_TOKEN chưa được cấu hình.")
+        return
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
-    app.add_handler(CommandHandler("stop", stop_cmd))
-    app.add_handler(CommandHandler("reload", reload_cmd))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_error_handler(error_handler)
-    
-    # Display startup info
-    reset = get_next_sunday()
-    s = Monitor.stats()
-    FISH_RANKS = config_manager.get_fish_ranks()
-    FISH_TYPES = config_manager.get_fish_types()
-    FISHING_RODS = config_manager.get_fishing_rods()
-    
-    print("=" * 50)
-    print("🤖 Bot Started Successfully!")
-    print("=" * 50)
-    print(f"📊 Config loaded from GitHub")
-    print(f"🏆 Ranks: {len(FISH_RANKS)}")
-    print(f"🐟 Fish: {len(FISH_TYPES)}")
-    print(f"🎣 Rods: {len(FISHING_RODS)}")
-    print(f"⏰ Reset: {reset.strftime('%d/%m %H:%M')}")
-    print(f"💻 CPU {s['cpu']:.0f}% | RAM {s['ram']:.0f}%")
-    print(f"🔄 Config auto update every 10 minutes")
-    print(f"⚡ Rate limit: {GLOBAL_RATE_LIMIT} msg/s")
-    print(f"⏱️ Min interval: {MIN_UPDATE_INTERVAL}s per user")
-    print(f"📁 Repository: {GITHUB_REPO}")
-    print("=" * 50)
-    
-    try:
-        # Run bot
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-    except KeyboardInterrupt:
-        print("\n🛑 Shutting down...")
-        cleanup()
-        print("✅ Bot stopped successfully")
-    except Exception as e:
-        print(f"❌ Fatal error: {e}")
-        cleanup()
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^!.*'), chat_handler))
+    app.add_handler(CommandHandler("tip", tip_coins))
+    app.add_handler(CommandHandler("give", give_coins))
+    app.add_handler(CommandHandler("kick", kick_member))
+    app.add_handler(CommandHandler("ban", ban_member))
+    app.add_handler(CommandHandler("unban", unban_member))
+    app.add_handler(CommandHandler("mute", mute_member))
+    app.add_handler(CommandHandler("unmute", unmute_member))
+    app.add_handler(CommandHandler("pin", pin_message))
+    app.add_handler(CommandHandler("unpin", unpin_message))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guess_game))
+
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot dừng bởi người dùng.")
